@@ -1,0 +1,1 @@
+{"description": "Builds and smoke-tests the original app for the smoke stage.", "level": "level_1", "tools": ["Read", "Grep"], "skills": ["app_smoke", "dftracer-build-app", "dftracer-smoke-test"], "permission_mode": "default", "background": true, "instructions": "Run smoke_run, follow the job, run smoke_validate, and report the command, runtime and files written."}

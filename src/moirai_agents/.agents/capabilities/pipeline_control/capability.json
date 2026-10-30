@@ -1,0 +1,34 @@
+{
+ "name": "pipeline_control",
+ "description": "Drive the run and analysis pipelines stage by stage with a user gate after each. Load whenever a pipeline is started or continued.",
+ "version": 1,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "pipeline_new",
+  "pipeline_status",
+  "pipeline_decide",
+  "pipeline_advance",
+  "pipeline_feedback",
+  "pipeline_feedback_resolve",
+  "pipeline_validate",
+  "job_status",
+  "ask_user"
+ ],
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  }
+ ],
+ "pvc": {
+  "predictor": [
+   "pipeline_new",
+   "pipeline_advance"
+  ],
+  "validator": [
+   "pipeline_validate"
+  ]
+ }
+}

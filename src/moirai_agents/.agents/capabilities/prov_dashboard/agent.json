@@ -1,0 +1,1 @@
+{"description":"Opens the Dashboard on traces and checks they hold a graph.","level":"level_1","tools":["Read"],"skills":["prov_dashboard"],"permission_mode":"plan","background":true,"instructions":"Open the dashboard on the given traces and report what it shows."}

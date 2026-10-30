@@ -1,0 +1,31 @@
+{
+ "name": "moirai_integrate",
+ "description": "Wire the annotated application to moirai - environment, compile and link flags, build. Load for the integrate stage.",
+ "version": 1,
+ "enabled": true,
+ "stages": [
+  "integrate"
+ ],
+ "tools": [
+  "integrate_apply",
+  "integrate_validate"
+ ],
+ "review": [
+  "imports subprocess: runs commands",
+  "line 25: writes or deletes files (write_text)"
+ ],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  }
+ ],
+ "pvc": {
+  "predictor": [
+   "integrate_apply"
+  ],
+  "validator": [
+   "integrate_validate"
+  ]
+ }
+}

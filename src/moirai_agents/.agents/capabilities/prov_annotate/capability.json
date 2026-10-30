@@ -1,0 +1,41 @@
+{
+ "name": "prov_annotate",
+ "description": "Add moirai provenance to an application - find data accesses, agree entity types and activities with the user, insert them into a copy, validate. Load for the annotate stage.",
+ "version": 1,
+ "enabled": true,
+ "stages": [
+  "annotate"
+ ],
+ "tools": [
+  "annotate_scan",
+  "annotate_spec",
+  "annotate_apply",
+  "annotate_validate"
+ ],
+ "review": [
+  "imports shutil: copies/removes files",
+  "imports subprocess: runs commands",
+  "line 185: writes or deletes files (write_text)",
+  "line 236: writes or deletes files (write_text)",
+  "line 298: writes or deletes files (write_text)",
+  "line 311: writes or deletes files (rmtree)",
+  "line 329: writes or deletes files (write_text)",
+  "line 331: writes or deletes files (write_text)"
+ ],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  }
+ ],
+ "pvc": {
+  "predictor": [
+   "annotate_scan",
+   "annotate_spec",
+   "annotate_apply"
+  ],
+  "validator": [
+   "annotate_validate"
+  ]
+ }
+}

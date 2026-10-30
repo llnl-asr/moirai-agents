@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>moirai-agents</title>
+<script>try{const t=localStorage.getItem("moirai_theme");if(t)document.documentElement.dataset.theme=t}catch(_){}</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="banner" hidden></div>
+<div class="app">
+<header>
+  <button class="tog" id="togl" title="Toggle chats sidebar (Ctrl+[)" aria-label="Toggle chats sidebar"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M6 2.5v11"/></svg></button>
+  <h1>moirai-agents</h1><span class="sub">data provenance · capabilities</span>
+  <nav class="tabs"><button id="tabchat" class="on">Chat</button><button id="tabdash">Dashboard<span class="livedot" id="tablive" hidden></span></button></nav>
+  <div id="statuswrap"><button id="statusbtn" aria-haspopup="true" aria-expanded="false" title="Status"><span class="sd"></span>Status</button><div id="statuspanel"><div class="pills" id="pills"></div></div></div>
+  <button class="tog" id="themebtn" title="Switch between light and dark" aria-label="Switch theme"></button>
+  <button class="tog" id="togr" title="Toggle the right panel (Ctrl+])" aria-label="Toggle side panel"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="2.5" width="13" height="11" rx="2"/><path d="M10 2.5v11"/></svg></button>
+</header>
+<aside class="left">
+  <div class="side-h"><button class="btn primary" id="newbtn" style="flex:1">New chat</button></div>
+  <div class="sessions" id="sessions"></div>
+</aside>
+<main id="chatview">
+  <div id="log"></div>
+  <div class="composer">
+    <div class="opts">
+      <span class="seg" id="modeseg"><button data-m="ask" class="on" title="Questions">Ask</button><button data-m="run" title="Annotate, run and watch an application">Run</button><button data-m="analysis" title="Explore existing traces">Analysis</button></span>
+      <label>via <select id="prov" title="Model access: switch between the ones you have verified"></select></label>
+      <label>model <select id="model"></select></label><button class="btn" id="mset" title="Model settings: LivAI, Anthropic, OpenAI" style="padding:3px 8px">⚙</button>
+    </div>
+    <div class="chips" id="chips"></div>
+    <div class="row">
+      <button class="btn" id="attach" title="Attach files">📎</button><input type="file" id="fileinp" multiple hidden>
+      <textarea id="input" placeholder="Ask, or start a pipeline… (Enter to send, Shift+Enter for a new line, ↑ for earlier messages)"></textarea>
+      <button class="btn primary" id="send">Send</button>
+      <button class="btn danger" id="stop" hidden>Stop</button>
+    </div>
+  </div>
+</main>
+<section id="dashview" hidden aria-label="Provenance dashboard"></section>
+<aside class="right"><div class="panel">
+  <details class="sec" data-sec="steps" open><summary><h3>Steps <span class="cnt" id="scount"></span></h3></summary><div id="steps"><div class="lesson st">no pipeline in this chat</div></div></details>
+  <details class="sec" data-sec="agents" open><summary><h3>Agents</h3></summary><div id="agents"><div class="agent"><div class="s">idle</div></div></div></details>
+  <details class="sec" data-sec="jobs" open><summary><h3>Jobs <span class="cnt" id="jcount"></span></h3></summary><div id="jobs"><div class="job">none</div></div></details>
+  <details class="sec" data-sec="lessons"><summary><h3>Lessons <span class="cnt" id="lcount"></span></h3></summary><div id="lessons"><div class="lesson st">no lessons yet</div></div></details>
+  <details class="sec" data-sec="capabilities"><summary><h3>Capabilities <span class="cnt" id="ccount"></span></h3></summary><div id="capabilities"></div></details>
+</div></aside>
+</div>
+<div id="cdlg" class="dlg" hidden><div class="box">
+  <button class="x" id="cclose" title="Close">×</button>
+  <h2>Claude Code on this server</h2>
+  <div id="cbody"></div>
+  <div class="row"><button class="btn primary" id="crecheck">Check again</button><span class="msg" id="cmsg"></span></div>
+</div></div>
+<div id="mdlg" hidden><div class="box">
+  <button class="x" id="mclose" title="Close">×</button>
+  <h2>Model settings</h2>
+  <p>Choose how the agent reaches a model. Each choice is checked with a real call before it is saved; you can set up several and switch between them in the header. Keys are stored for your account only (a file only the server can read) and are never shown again.</p>
+  <div class="provs" id="mprovs"></div>
+  <div id="mform"></div>
+  <div class="msg" id="mmsg"></div>
+</div></div>
+<script>
+(()=>{const app=document.querySelector('.app'),K='moirai_sidebars';
+ let st={};try{st=JSON.parse(localStorage.getItem(K)||'{}')}catch(_){}
+ const w=innerWidth;
+ if(st.l===undefined)st.l=w>720; if(st.r===undefined)st.r=w>1100;
+ const apply=()=>{app.classList.toggle('nol',!st.l);app.classList.toggle('nor',!st.r);
+  document.getElementById('togl').setAttribute('aria-pressed',st.l);document.getElementById('togr').setAttribute('aria-pressed',st.r);
+  try{localStorage.setItem(K,JSON.stringify(st))}catch(_){}};
+ const t=k=>{st[k]=!st[k];apply()};
+ document.getElementById('togl').onclick=()=>t('l');document.getElementById('togr').onclick=()=>t('r');
+ addEventListener('keydown',e=>{if(e.ctrlKey&&!e.altKey&&(e.key==='['||e.key===']')){e.preventDefault();t(e.key==='['?'l':'r')}});
+ apply();})();
+const $=s=>document.querySelector(s);
+let cfg={},session=null,mode='ask',es=null,running=false;
+const STARTERS={ask:[
+ ['What is moirai?','What does moirai record, and how do I add it to my application?'],
+ ['What can you do?','List the capabilities you have and what each is for.']],
+ run:[
+ ['Trace my application','Run the provenance pipeline on my application. App directory: <path>. Small test command: <command>.'],
+ ['Continue','Where is my pipeline, and what is the next step?']],
+ analysis:[
+ ['Explore traces','Run the analysis pipeline on my traces: <directory or glob>.'],
+ ['Lineage of an output','In my traces at <path>, where did <output file> come from?']]};
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+function md(src,o){o=o||{};
+ const blocks=[];src=String(src||'').replace(/^[ \t]*```(\w*)\n([\s\S]*?)^[ \t]*```/gm,(m,l,c)=>{blocks.push(`<pre><code>${esc(c)}</code></pre>`);return `\u0000${blocks.length-1}\u0000`});
+ const lines=src.split('\n');let out=[],i=0;
+ const inl=t=>esc(t).replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>').replace(/(^|[^*])\*([^*\n]+)\*/g,'$1<i>$2</i>').replace(/\[([^\]]+)\]\(([^)\s]+)\)/g,(m,t,u)=>/^https?:/.test(u)?`<a href="${u}" target="_blank" rel="noopener">${t}</a>`:/^\/?#campaign\//.test(u)?`<a href="${u.replace(/^\//,'')}" class="cvlink">${t}</a> <a href="${u.startsWith('/')?u:'/'+u}" target="_blank" title="open in a new browser tab">↗</a>`:(o.link?`<a href="${o.link(u)}">${t}</a>`:m));
+ while(i<lines.length){let l=lines[i];
+  if(/^\u0000\d+\u0000$/.test(l.trim())){out.push(blocks[+l.trim().slice(1,-1)]);i++;continue}
+  if(/^\|.*\|\s*$/.test(l)&&i+1<lines.length&&/^\|[\s:|-]+\|\s*$/.test(lines[i+1])){const row=r=>r.trim().replace(/^\||\|$/g,'').split('|').map(c=>c.trim());
+   let h=row(l),t=`<div class="tbl"><table><tr>${h.map(c=>`<th>${inl(c)}</th>`).join('')}</tr>`;i+=2;
+   while(i<lines.length&&/^\|.*\|\s*$/.test(lines[i])){t+=`<tr>${row(lines[i]).map(c=>`<td>${inl(c)}</td>`).join('')}</tr>`;i++}out.push(t+'</table></div>');continue}
+  const am=o.docs&&l.match(/^!!!\s+(\w+)(?:\s+"([^"]*)")?/);if(am){let b=[];i++;while(i<lines.length&&(/^\s{4}/.test(lines[i])||!lines[i].trim())&&b.length<60){b.push(lines[i].replace(/^\s{4}/,''));i++}
+   out.push(`<div class="adm ${esc(am[1])}"><b>${esc(am[2]||am[1])}</b> ${b.map(inl).join('<br>')}</div>`);continue}
+  const h=l.match(o.docs?/^(#{1,6})\s+(.*)/:/^(#{1,4})\s+(.*)/);if(h){const n=o.docs?h[1].length:h[1].length+1;out.push(`<h${n}${o.hid?` id="${o.hid(h[2])}"`:''}>${inl(h[2])}</h${n}>`);i++;continue}
+  if(/^\s*([-*]|\d+\.)\s+/.test(l)){const ol=/^\s*\d+\./.test(l);let t=ol?'<ol>':'<ul>';while(i<lines.length&&/^\s*([-*]|\d+\.)\s+/.test(lines[i])){t+=`<li>${inl(lines[i].replace(/^\s*([-*]|\d+\.)\s+/,''))}</li>`;i++}out.push(t+(ol?'</ol>':'</ul>'));continue}
+  if(!l.trim()){i++;continue}
+  let p=[];while(i<lines.length&&lines[i].trim()&&!/^(#{1,6}\s|!!!\s|\s*([-*]|\d+\.)\s|\|)/.test(lines[i])&&!/^\u0000/.test(lines[i].trim())){p.push(lines[i]);i++}
+  if(!p.length){p.push(lines[i]);i++}   // always make progress (e.g. a table row whose |---| line has not streamed in yet)
+  out.push(`<p>${p.map(inl).join('<br>')}</p>`)}
+ return out.join('\n').replace(/\u0000(\d+)\u0000/g,(m,n)=>blocks[+n]);
+}
+let TOK=new URLSearchParams(location.search).get('token');try{if(TOK)sessionStorage.setItem('moirai_token',TOK);else TOK=sessionStorage.getItem('moirai_token')}catch(_){}
+if(location.search)history.replaceState(null,'',location.pathname+location.hash);
+function authH(h){h=h||{};if(TOK)h['X-Moirai-Token']=TOK;return h}
+function showLogin(){running=false;$('#log').innerHTML='<div class="empty"><h2>This page needs its private link</h2><div>Open the link the server printed when it started (<code>scripts/webui_start.sh</code>).</div></div>'}
+async function api(path,body,again){const r=await fetch(path,body?{method:'POST',headers:authH({'Content-Type':'application/json'}),body:JSON.stringify(body)}:{headers:authH()});
+  if(r.status===401){showLogin();return {error:'unauthorized',silent:true}}
+ return r.json()}
+function setMode(m){mode=m;document.querySelectorAll('#modeseg button').forEach(b=>b.classList.toggle('on',b.dataset.m===m));if(!session)renderEmpty()}
+function renderEmpty(){lastDay=null;const H={ask:['Ask about provenance','Questions about moirai and your traces.'],run:['Run pipeline','Explore, smoke test, annotate, integrate with moirai, run, watch it live, query. You approve every step.'],analysis:['Analysis pipeline','Give it traces: explore them on the Dashboard and with queries.']}[mode];
+ $('#log').innerHTML=`<div class="empty"><h2>${H[0]}</h2><div>${H[1]}</div>
+ <div class="starters">${STARTERS[mode].map(s=>`<div class="starter" data-q="${esc(s[1])}"><b>${esc(s[0])}</b>${esc(s[1])}</div>`).join('')}</div></div>`;
+ document.querySelectorAll('.starter').forEach(e=>e.onclick=()=>{$('#input').value=e.dataset.q;$('#input').focus()})}
+// Timestamps: a day divider whenever the date changes, then a compact time on every message.
+let lastDay=null;
+const dayKey=d=>d.getFullYear()+'-'+d.getMonth()+'-'+d.getDate();
+function dayLabel(d){const now=new Date(),y=new Date(now);y.setDate(now.getDate()-1);
+ if(dayKey(d)===dayKey(now))return 'Today';if(dayKey(d)===dayKey(y))return 'Yesterday';
+ return d.toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric',...(d.getFullYear()!==now.getFullYear()?{year:'numeric'}:{})})}
+const hhmm=d=>d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+function timeTag(ts){const d=ts?new Date(ts*1000):new Date();
+ return `<time datetime="${d.toISOString()}" title="${esc(d.toLocaleString())}">${hhmm(d)}</time>`}
+function dayBreak(ts){const d=ts?new Date(ts*1000):new Date();if(dayKey(d)===lastDay)return;lastDay=dayKey(d);
+ const l=document.createElement('div');l.className='dayline';l.textContent=dayLabel(d);$('#log').appendChild(l)}
+function msgEl(role,ts){const emp=$('#log .empty');if(emp)emp.remove();dayBreak(ts);
+ const d=document.createElement('div');d.className='msg '+role;d.innerHTML=`<div class="who">${role==='user'?'you':'moirai-agents'}${timeTag(ts)}</div><div class="bubble"></div>`;
+ $('#log').appendChild(d);return d.querySelector('.bubble')}
+function scroll(){const l=$('#log');if(l.scrollHeight-l.scrollTop-l.clientHeight<200)l.scrollTop=l.scrollHeight}
+// Jump to the newest message and stay there while late content (plots, markdown) settles,
+// unless the user scrolls away first.
+let pinUntil=0;
+function toBottom(){const l=$('#log');l.scrollTop=l.scrollHeight;pinUntil=Date.now()+2500;
+ const tick=()=>{if(Date.now()>pinUntil)return;l.scrollTop=l.scrollHeight;requestAnimationFrame(tick)};requestAnimationFrame(tick)}
+['wheel','touchstart','keydown','mousedown'].forEach(t=>addEventListener(t,e=>{if(t!=='keydown'||$('#log').contains(e.target)||e.key==='PageUp'||e.key==='ArrowUp')pinUntil=0},{passive:true}));
+const AG={main:null,agents:{}};
+function agentsReset(){AG.main={name:'moirai-agents (main)',status:'idle',last:'',n:0,t0:Date.now()};AG.agents={};drawAgents()}
+function drawAgents(){const all=[AG.main,...Object.values(AG.agents)].filter(Boolean);
+ $('#agents').innerHTML=all.map(a=>{const el=a.end?((a.end-a.t0)/1000).toFixed(0):((Date.now()-a.t0)/1000).toFixed(0);
+  const dot=a.status==='running'?'':a.status==='error'?'bad':'ok';
+  return `<div class="agent"><div class="h"><span class="dot ${a.status==='idle'?'':dot}"></span><span class="n">${esc(a.name)}</span><span style="margin-left:auto;color:var(--muted)">${a.status} · ${a.n} tools · ${el}s</span></div>${a.desc?`<div class="s" title="${esc(a.desc)}">${esc(a.desc)}</div>`:''}<div class="s">${esc(a.last||'')}</div></div>`}).join('')}
+setInterval(()=>{if(running)drawAgents()},1000);
+function agentEvent(e){const a=e.parent&&AG.agents[e.parent]?AG.agents[e.parent]:AG.main;if(!a)return;
+ if(e.type==='tool_use'){a.n++;a.last='→ '+(toolDesc(e)||e.name.replace(/^mcp__/,''));a.status='running';
+  if(e.agent){AG.agents[e.id]={name:(e.agent.type||'sub-agent'),desc:e.agent.description,status:'running',last:'starting',n:0,t0:Date.now()}}}
+ else if(e.type==='tool_result'){if(AG.agents[e.id]){const s=AG.agents[e.id];s.status=e.is_error?'error':'done';s.end=Date.now();s.last=(e.text||'').slice(0,120)}}
+ else if(e.type==='text'||e.type==='delta'){a.last='✎ '+(e.text||'').slice(-90).replace(/\s+/g,' ');a.status='running'}
+ else if(e.type==='result'||e.type==='error'){AG.main.status=e.is_error||e.type==='error'?'error':'done';AG.main.end=Date.now();
+  Object.values(AG.agents).forEach(s=>{if(s.status==='running'){s.status='done';s.end=Date.now()}})}
+ drawAgents()}
+function toolDesc(e){if(e.summary)return e.summary;let q=null;try{q=JSON.parse(e.input)}catch(_){}
+ const g=k=>q?q[k]:((e.input||'').match(new RegExp('"'+k+'":\\s*"((?:[^"\\\\]|\\\\.)*)"'))||[])[1];
+ const t=(g('description')||g('command')||g('file_path')||g('pattern')||g('query')||g('url')||'').replace(/\s+/g,' ');
+ return t.length>120?t.slice(0,119)+'…':t}
+// Tool payloads as readable fields instead of raw JSON.
+const KLABEL={file_path:'file',old_string:'replace',new_string:'with',run_in_background:'background',subagent_type:'agent',
+ trace_path:'trace',profile_json:'profile',run_uid:'run'};
+function fmtVal(v,k,dp=0){
+ if(v===null||v===undefined||v==='')return '<div class="v" style="color:var(--muted)">—</div>';
+ if(typeof v==='string'){let j=null;if(/^\s*[\[{]/.test(v)){try{j=JSON.parse(v)}catch(_){}}
+  if(j&&typeof j==='object')return fmtVal(j,k,dp);
+  const cls=k==='old_string'?' class="del"':k==='new_string'?' class="add"':'';
+  return (v.includes('\n')||v.length>140||cls||k==='command'||k==='content')?`<pre${cls}>${esc(v)}</pre>`:`<div class="v">${esc(v)}</div>`}
+ if(typeof v!=='object')return `<div class="v">${esc(String(v))}</div>`;
+ if(Array.isArray(v)&&v.every(x=>typeof x!=='object'||x===null))return v.length?`<ul>${v.map(x=>`<li>${esc(String(x))}</li>`).join('')}</ul>`:'<div class="v">(none)</div>';
+ if(Array.isArray(v)&&v.every(x=>x&&typeof x==='object'&&!Array.isArray(x))&&v.length<=50){
+  const cols=[...new Set(v.flatMap(Object.keys))];if(cols.length<=8&&v.every(x=>Object.values(x).every(y=>typeof y!=='object'||y===null)))
+   return `<div style="overflow-x:auto"><table class="mdt"><tr>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr>${v.map(x=>`<tr>${cols.map(c=>`<td>${esc(x[c]??'')}</td>`).join('')}</tr>`).join('')}</table></div>`}
+ const ks=Object.keys(v);if(!Array.isArray(v)&&ks.length<=40&&dp<3)
+  return `<div class="tin" style="border:0;padding:0 0 0 ${dp?10:0}px">${fields(v,[],dp+1)}</div>`;
+ if(Array.isArray(v)&&v.length<=20&&dp<3)return v.map((x,i)=>`<div class="k">#${i+1}</div>${fmtVal(x,k,dp+1)}`).join('');
+ return `<pre>${esc(JSON.stringify(v,null,2))}</pre>`}
+function fields(o,skip=[],dp=0){return Object.entries(o).filter(([k])=>!skip.includes(k)).map(([k,v])=>`<div class="k">${esc(KLABEL[k]||k.replace(/_/g,' '))}</div>${fmtVal(v,k,dp)}`).join('')}
+function fmtInput(e){let q=null;try{q=JSON.parse(e.input)}catch(_){}
+ if(!q||typeof q!=='object'){   // older chats stored a cut-off JSON string: at least unescape it
+  const t=(e.input||'').replace(/^\{\s*/,'').replace(/\\n/g,'\n').replace(/\\t/g,'\t').replace(/\\"/g,'"').replace(/\\\\/g,'\\');
+  return `<div class="tin"><pre>${esc(t)}</pre></div>`}
+ const skip=e.agent?['description','subagent_type']:e.name==='Bash'?['description']:[];
+ const body=fields(q,skip);return body?`<div class="tin">${body}</div>`:''}
+function fmtResult(t,err){let j=null;if(/^\s*[\[{]/.test(t||'')){try{j=JSON.parse(t)}catch(_){}}
+ const body=j&&typeof j==='object'?fmtVal(j,'result',1):`<pre${err?' class="del"':''}>${esc(t||'(no output)')}</pre>`;
+ return `<div class="tin res"><div class="k">${err?'error':'output'}</div>${body}</div>`}
+function toolHead(e){const nm=e.agent?'🤖 '+esc(e.agent.type||'sub-agent'):esc((e.name||'').replace(/^mcp__/,''));
+ const d=e.agent?(e.agent.description||''):toolDesc(e);
+ const t0=e.ts?`<span class="tm" data-t0="${e.ts}" title="started ${esc(new Date(e.ts*1000).toLocaleString())}">${hms(e.ts)}</span>`:'<span class="tm"></span>';
+ return `<span class="dot"></span><span class="nm">${nm}</span><span class="ds" title="${esc(d)}">${esc(d)}</span>${t0}<span class="stt">running…</span>`}
+// Step times: start (and live elapsed) while running; finish time + duration when done.
+const hms=ts=>new Date(ts*1000).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit',second:'2-digit'});
+function dur(s){s=Math.max(0,s);return s<60?s.toFixed(s<10?1:0)+'s':s<3600?`${Math.floor(s/60)}m ${String(Math.floor(s%60)).padStart(2,'0')}s`:`${Math.floor(s/3600)}h ${String(Math.floor(s%3600/60)).padStart(2,'0')}m`}
+function toolDone(d,e){const tm=d.querySelector('summary .tm');if(!tm||!e.ts)return;const t0=+tm.dataset.t0;
+ tm.classList.add('fin');tm.textContent=hms(e.ts)+(t0?' · '+dur(e.ts-t0):'');
+ tm.title=(t0?`started ${new Date(t0*1000).toLocaleString()}\n`:'')+`finished ${new Date(e.ts*1000).toLocaleString()}`}
+setInterval(()=>document.querySelectorAll('details.tool summary .tm[data-t0]:not(.fin)').forEach(tm=>{
+ if(!running)return;tm.textContent=hms(+tm.dataset.t0)+' · '+dur(Date.now()/1000-tm.dataset.t0)}),1000);
+class Renderer{constructor(b,opts={}){this.b=b;this.cur=null;this.buf='';this.tools={};this.answered=!!opts.answered;this.turn=opts.turn;this.live=!!opts.live}
+ block(){if(!this.cur){this.cur=document.createElement('div');this.b.appendChild(this.cur);this.buf=''}return this.cur}
+ ev(e){if(this.waitEl){this.waitEl.remove();this.waitEl=null}if(this.live){agentEvent(e);window.dispatchEvent(new CustomEvent('moirai:stream',{detail:{type:e.type,name:e.name||'',id:e.id||'',tid:e.tool_use_id||''}}))}
+  if(e.parent&&this.tools[e.parent]&&(e.type==='tool_use'||e.type==='text')){ // sub-agent activity nests under its Task card
+   const host=this.tools[e.parent];let sub=host.querySelector(':scope > .sub');if(!sub){sub=document.createElement('div');sub.className='sub';host.appendChild(sub)}
+   if(e.type==='tool_use'){const d=document.createElement('details');d.className='tool';d.innerHTML=`<summary>${toolHead(e)}</summary>${fmtInput(e)}`;sub.appendChild(d);this.tools[e.id]=d}
+   else{const p=document.createElement('div');p.className='meta';p.textContent=e.text.slice(0,400);sub.appendChild(p)}
+   scroll();return}
+  switch(e.type){
+  case 'delta':this.block();this.buf+=e.text;this.cur.innerHTML=md(this.buf);break;
+  case 'text':this.block();this.cur.innerHTML=md(e.text);this.cur=null;break;
+  case 'tool_use':{this.cur=null;if(/ask_user$/.test(e.name||'')){this.askCard(e);this.tools[e.id]=null;break}
+   const d=document.createElement('details');d.className='tool';
+   d.innerHTML=`<summary>${toolHead(e)}</summary>${fmtInput(e)}`;if(e.agent)d.open=true;this.b.appendChild(d);this.tools[e.id]=d;break}
+  case 'tool_log':{const d=this.tools[e.id];if(!d)break;let lv=d.querySelector(':scope > pre.live');
+   if(!lv){d.insertAdjacentHTML('beforeend','<div class="live-h">live output</div><pre class="live"></pre>');lv=d.querySelector(':scope > pre.live');
+    if(!d.open&&!d.dataset.userClosed){d.open=true;d.dataset.autoOpened='1'}
+    d.querySelector('summary').addEventListener('click',()=>{if(d.open)d.dataset.userClosed='1'})}
+   const stick=lv.scrollHeight-lv.scrollTop-lv.clientHeight<30;lv.textContent=(lv.textContent+e.text).slice(-65536);if(stick)lv.scrollTop=lv.scrollHeight;
+   const last=e.text.trim().split('\n').pop();if(last&&this.live){AG.main.last='⋯ '+last.slice(0,110);drawAgents()}
+   if(this.live)scroll();return}
+  case 'tool_result':{if(this.lessons&&this.lessons[e.id]){const q=this.lessons[e.id],t=e.ts?hms(e.ts)+' · ':'';
+    if(e.is_error)this.meta(`${t}⏸ lesson not accepted yet (${q.kind||'no kind'}): ${String(e.text||'').replace(/^ValueError:\s*/,'').split(/\.|\n/)[0].slice(0,140)}`);
+    else{this.meta(`${t}💡 lesson proposed${q.kind?' ('+q.kind+')':''} → ${q.target||'?'}: ${(q.lesson||[q.symptom,q.fix].filter(Boolean).join(' → ')).slice(0,160)} (approve it in the Learning panel)`);setTimeout(pollLessons,1500)}}
+   {const d0=this.tools[e.id];if(d0){d0.querySelectorAll(':scope > pre.live, :scope > .live-h').forEach(x=>x.remove());if(d0.dataset.autoOpened)d0.open=false}}if(this.plots&&this.plots[e.id]){try{const r=JSON.parse(e.text);if(r.plot_id){const h=document.createElement('div');this.b.appendChild(h);renderPlot(h,r.plot_id)}}catch(_){}}
+   const d=this.tools[e.id];if(!d)break;d.querySelector('.dot').classList.add(e.is_error?'bad':'ok');
+   d.querySelector('summary .stt').textContent=e.is_error?'error':'done';toolDone(d,e);d.insertAdjacentHTML('beforeend',fmtResult(e.text,e.is_error));
+   if(e.is_error&&/requested permissions|No such tool available|is disabled/i.test(e.text||'')&&!this.hinted){this.hinted=true;
+    this.meta(mode==='ask'?'This tool is blocked in Ask mode. To build or run, switch to Run.':'This tool is not allowed for agent sessions; ask moirai-agents for another way.')}break}
+  case 'init':{const m=(e.mcp_servers||[]).map(s=>`${s.name}:${s.status}`).join(' ');this.meta(`session started · ${e.model||''} · ${e.tools} tools · ${m}`);break}
+  case 'result':this.cur=null;if(e.is_error&&e.text){const x=document.createElement('div');x.className='err';x.textContent=e.text;this.b.appendChild(x)}
+   this.meta(`${e.turns??'?'} turns · ${e.duration_ms?(e.duration_ms/1000).toFixed(1)+' s':''}${e.cost_usd?` · $${e.cost_usd.toFixed(3)}`:''}`);this.feedbackBar();break;
+  case 'error':{const x=document.createElement('div');x.className='err';x.textContent=e.text;this.b.appendChild(x);break}
+  case 'log':if(/interrupted/.test(e.text||''))this.meta('⏸ interrupted by your feedback');else if(/stopped by user/.test(e.text||''))this.meta('⏹ stopped by you');break
+  case 'notice':this.cur=null;this.meta('↻ '+e.text);break
+  case 'steer':{this.cur=null;const m=document.createElement('div');m.className='steer-msg';m.dataset.n=e.n;
+   m.innerHTML=`<b>you, while it was working:</b>${timeTag(e.ts)} ${esc(e.text)}${fileChips(e.files)}<span class="st">⏳ queued — the agent reads it after its current step</span>`;this.b.appendChild(m);break}
+  case 'steer_ack':{const m=this.b.querySelector(`.steer-msg[data-n="${e.n}"] .st`);if(m)m.textContent='✓ received by the agent';break}}
+  scroll()}
+ meta(t){const m=document.createElement('div');m.className='meta';m.textContent=t;this.b.appendChild(m)}
+ askCard(e){let q={};try{q=JSON.parse(e.input)}catch(_){q={question:e.input}}
+  const kind=q.kind||'choose',multi=kind==='multi';let opts=q.options||[];
+  if(!opts.length&&kind==='confirm')opts=[{label:'Yes, go ahead',recommended:true},{label:'No'}];
+  const c=document.createElement('div');c.className='ask'+(this.answered?' done':'');
+  c.innerHTML=`<div class="q">❓ ${esc(q.question||'')}</div>${q.context?`<div class="ctx">${esc(q.context)}</div>`:''}
+   ${opts.map((o,i)=>`<div class="opt" data-i="${i}"><input type="${multi?'checkbox':'radio'}" name="o${e.id}" tabindex="-1"><div><div>${esc(o.label)}${o.recommended?'<span class="rec">recommended</span>':''}</div>${o.description?`<div class="d">${esc(o.description)}</div>`:''}</div></div>`).join('')}
+   <textarea placeholder="${opts.length?'Optional comment or other answer…':'Your answer…'}"></textarea>
+   <div class="acts"><button class="btn primary">Send answer</button>${kind==='confirm'||opts.length?'<button class="btn danger">Reject / stop</button>':''}</div>`;
+  const sel=new Set();c.querySelectorAll('.opt').forEach(el=>el.onclick=()=>{const i=+el.dataset.i;
+   if(multi){sel.has(i)?sel.delete(i):sel.add(i)}else{sel.clear();sel.add(i)}
+   c.querySelectorAll('.opt').forEach(x=>{const on=sel.has(+x.dataset.i);x.classList.toggle('sel',on);x.querySelector('input').checked=on})});
+  const [ok,no]=c.querySelectorAll('.acts button');const ta=c.querySelector('textarea');
+  const answer=(rej)=>{const picked=[...sel].map(i=>opts[i].label);const com=ta.value.trim();
+   if(!rej&&!picked.length&&!com){ta.focus();return}
+   const msg=`Answer to: ${q.question}\n`+(rej?'Decision: REJECTED - do not proceed with this.':`Choice: ${picked.join(', ')||'(none)'}`)+(com?`\nComment: ${com}`:'');
+   c.classList.add('done');sendText(msg,running)};
+  ok.onclick=()=>answer(false);no&&(no.onclick=()=>answer(true));
+  this.b.appendChild(c)}
+ feedbackBar(){const f=document.createElement('div');f.className='fb';const turn=this.turn;
+  f.innerHTML=`<span>Was this helpful?</span><button data-r="up">👍</button><button data-r="down">👎</button><input placeholder="Feedback for the moirai-agents team (optional)"><button data-r="send">Send</button><span class="ok"></span>`;
+  let rating=null;const inp=f.querySelector('input'),okSpan=f.querySelector('.ok');
+  const post=()=>api('api/feedback',{session,turn,rating,comment:inp.value}).then(()=>{okSpan.textContent='thanks — saved'});
+  f.querySelectorAll('button').forEach(b=>b.onclick=()=>{if(b.dataset.r==='send'){post();return}
+   rating=b.dataset.r;f.querySelectorAll('button[data-r=up],button[data-r=down]').forEach(x=>x.classList.toggle('on',x===b));post()});
+  inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();post()}};this.b.appendChild(f)}}
+function setRunning(r){running=r;$('#stop').hidden=!r;$('#send').textContent=r?'Steer':'Send';
+ $('#send').title=r?'Give the running agent this message without interrupting it':'';
+ $('#input').placeholder=r?'Agent is working… Enter sends your message to it without interrupting (Stop ends the run)':'Ask, or start a pipeline…'}
+function follow(sid,r,from=0){es&&es.close();es=new EventSource(`api/stream/${sid}?from=${from}${TOK?'&token='+encodeURIComponent(TOK):''}`);let seen=from;
+ es.onmessage=m=>{const id=+m.lastEventId||0;if(id&&id<=seen)return;seen=id||seen+1;r.ev(JSON.parse(m.data))};
+ es.addEventListener('done',()=>{es.close();es=null;setRunning(false);loadSessions();pollLessons()});
+ es.onerror=async()=>{if(!es||es.readyState!==2)return;es=null;setRunning(false);
+  const me=await fetch('api/me',{headers:authH()});
+  if(me.status===401){showLogin();return}
+  r.meta('⚠ lost the connection to the server; reload the chat from the sidebar to see what finished.')};
+ es.sid=sid}
+let nTurns=0;
+// Attachments: sent with the message, kept on the server only while that run lasts, then deleted.
+let PENDING=[];const MAXF=25*1024*1024;
+const fsz=n=>n<1024?n+' B':n<1048576?(n/1024).toFixed(n<10240?1:0)+' KB':(n/1048576).toFixed(1)+' MB';
+function renderChips(){$('#chips').innerHTML=PENDING.map((f,i)=>`<span class="chip">📎 ${esc(f.name)} <span class="sz">${fsz(f.size)}</span><button data-i="${i}" title="Remove">✕</button></span>`).join('')+
+ (PENDING.length?'<span class="hint">deleted from the server when the run ends</span>':'');
+ $('#chips').querySelectorAll('button').forEach(b=>b.onclick=()=>{PENDING.splice(+b.dataset.i,1);renderChips()})}
+function addFiles(list){for(const f of list){if(f.size>MAXF){alert(`${f.name} is larger than 25 MB`);continue}PENDING.push(f)}renderChips()}
+const b64=f=>new Promise((ok,no)=>{const r=new FileReader();r.onload=()=>ok(String(r.result).split(',',2)[1]||'');r.onerror=no;r.readAsDataURL(f)});
+function fileChips(files,note){return files&&files.length?`<div class="ufiles">${files.map(f=>`<span class="chip" title="${note||'uploaded for this run only, then deleted'}">📎 ${esc(f.name)} <span class="sz">${fsz(f.size||0)}</span></span>`).join('')}</div>`:''}
+async function sendText(text,steer,files){if(!text&&!(files&&files.length))return false;
+ const body={session,message:text,mode,model:$('#model').value,steer:!!steer};
+ if(files&&files.length)body.files=await Promise.all(files.map(async f=>({name:f.name,data:await b64(f)})));
+ const res=await api('api/chat',body);if(res.error){if(res.needs_model){openModel(null,res.error);return false}if(res.claude){showClaude(res.claude);return false}if(!res.silent)alert(res.error);return false}
+ if(res.steered){toBottom();return true}   // shown in the running reply when the server relays it
+ session=res.session;rememberChat();liveTurn(text,null,(files||[]).map(f=>({name:f.name,size:f.size})));return true}
+// Messages re-sent after Stop carry a prefix for the agent; show the user's own words plus a tag.
+function userMsg(text,note,ts,files){const m=/^\[The user stopped the previous run(?: and asks:\] |\. Messages they sent meanwhile, in order:\]\n\n)/.exec(text||'');
+ if(m){text=text.slice(m[0].length);note=note||'sent while the stopped run was working'}
+ const u=msgEl('user',ts);u.textContent=text;if(note)u.insertAdjacentHTML('beforeend',`<span class="steer-tag">${esc(note)}</span>`);
+ u.insertAdjacentHTML('beforeend',fileChips(files));return u}
+function liveTurn(text,note,files){userMsg(text,note,null,files);
+ nTurns+=2;agentsReset();AG.main.status='running';AG.main.last='starting agent (loading MCP servers)…';
+ const ab=msgEl('assistant');const wait=document.createElement('div');wait.className='meta';wait.textContent='⏳ starting agent (loading rabbit + dftracer MCP servers, usually 5–20 s)…';ab.appendChild(wait);
+ const r=new Renderer(ab,{turn:nTurns-1,live:true});r.waitEl=wait;toBottom();setRunning(true);follow(session,r);loadSessions();pollJobs()}
+// Input history (shell-like): Up/Down recall earlier messages; the unsent draft is kept.
+const HKEY='moirai_hist';let HIST=[];try{HIST=JSON.parse(localStorage.getItem(HKEY)||'[]')}catch(_){}
+let hPos=null,hDraft='';
+function histPush(t){if(!t)return;if(HIST[HIST.length-1]!==t)HIST.push(t);HIST=HIST.slice(-200);hPos=null;
+ try{localStorage.setItem(HKEY,JSON.stringify(HIST))}catch(_){}}
+function histShow(i){const el=$('#input');hPos=i;el.value=i===null?hDraft:HIST[i];
+ const end=el.value.length;el.setSelectionRange(end,end);el.classList.toggle('hist',i!==null)}
+$('#input').addEventListener('keydown',e=>{if(e.altKey||e.ctrlKey||e.metaKey||e.shiftKey||e.isComposing)return;
+ const el=e.target,v=el.value,before=v.slice(0,el.selectionStart),after=v.slice(el.selectionEnd);
+ if(e.key==='ArrowUp'&&!before.includes('\n')&&HIST.length){         // only from the first line
+  if(hPos===null){hDraft=v;histShow(HIST.length-1)}else if(hPos>0)histShow(hPos-1);else return;e.preventDefault()}
+ else if(e.key==='ArrowDown'&&hPos!==null&&!after.includes('\n')){    // only from the last line
+  histShow(hPos<HIST.length-1?hPos+1:null);e.preventDefault()}
+ else if(e.key==='Escape'&&hPos!==null){histShow(null);e.preventDefault()}});
+$('#input').addEventListener('input',()=>{if(hPos!==null){hPos=null;$('#input').classList.remove('hist')}});   // edited: it is the draft now
+async function send(){const text=$('#input').value.trim(),files=PENDING.slice();if(!text&&!files.length)return;
+ histPush(text);$('#input').value='';$('#input').classList.remove('hist');PENDING=[];renderChips();
+ if(!await sendText(text,running,files)){$('#input').value=text;PENDING=files;renderChips()}}
+$('#attach').onclick=()=>$('#fileinp').click();
+$('#fileinp').onchange=e=>{addFiles(e.target.files);e.target.value=''};
+{const c=document.querySelector('.composer');
+ c.addEventListener('dragover',e=>{if([...e.dataTransfer.types].includes('Files')){e.preventDefault();c.classList.add('drop')}});
+ c.addEventListener('dragleave',e=>{if(!c.contains(e.relatedTarget))c.classList.remove('drop')});
+ c.addEventListener('drop',e=>{c.classList.remove('drop');if(e.dataTransfer.files.length){e.preventDefault();addFiles(e.dataTransfer.files)}});
+ $('#input').addEventListener('paste',e=>{const fs=[...(e.clipboardData?.files||[])];if(fs.length){e.preventDefault();addFiles(fs)}})}
+setInterval(()=>{if(me&&document.visibilityState==='visible')loadSessions()},4000);
+// Sidebar status per chat: yellow = running, green = finished with output you have not looked at, grey = idle.
+// "Seen" = the chat's last `updated` stamp when you last had it open (kept per browser).
+let SEEN={};try{SEEN=JSON.parse(localStorage.getItem('moirai_seen')||'{}')}catch(_){}
+function saveSeen(){try{localStorage.setItem('moirai_seen',JSON.stringify(SEEN))}catch(_){}}
+async function loadSessions(){const ss=await api('api/sessions');if(!Array.isArray(ss))return;
+ for(const s of ss){if(s.id===session||SEEN[s.id]===undefined)SEEN[s.id]=s.updated||0}saveSeen();
+ const st=s=>s.running?['run','running']:(s.updated||0)>(SEEN[s.id]||0)?['new','new result — not seen yet']:['','idle'];
+ {const t=$('#togl'),others=ss.filter(s=>s.id!==session);t.dataset.n=ss.length;   // shown when the sidebar is hidden
+  t.dataset.st=others.some(s=>s.running)?'run':others.some(s=>st(s)[0]==='new')?'new':'';
+  t.title=`Show chats (${ss.length}${t.dataset.st==='run'?', one running':t.dataset.st==='new'?', new results':''}) — Ctrl+[`}
+ // Active chats, then Archived. Archive/restore and delete are separate actions; retention is shown when near.
+ const now=Date.now()/1000,days=x=>Math.max(0,Math.ceil((x-now)/86400));
+ const row=s=>{const [c,tt]=st(s),arch=!!s.archived,left=s.expires?days(s.expires):null;
+  const exp=arch&&left!==null?`<span class="exp" title="archived chats are deleted ${cfg.chat_archive_days} days after archiving">${left}d</span>`
+   :(!arch&&left!==null&&left<=7?`<span class="exp" title="inactive chats are deleted after ${cfg.chat_active_days} days">expires ${left}d</span>`:'');
+  return `<div class="sess ${s.id===session?'active':''} ${arch?'arch':''}" data-id="${s.id}" title="${esc(s.title||'')}"><span class="sdot ${c}" title="${tt}"></span><span class="t">${esc(s.title||'(untitled)')}</span>${exp}<span class="tag">${s.mode==='integrate'?'app':'ask'}</span>
+   <span class="acts">${arch?`<button data-act="restore" title="Restore to active chats">↺</button>`:`<button data-act="archive" title="Archive (deleted ${cfg.chat_archive_days} days later)">⤓</button>`}<button class="del" data-act="delete" title="Delete now (click twice)">🗑</button></span></div>`};
+ const act=ss.filter(s=>!s.archived),arc=ss.filter(s=>s.archived);let open=false;try{open=localStorage.getItem('moirai_arch_open')==='1'}catch(_){}
+ $('#sessions').innerHTML=(act.length?`<div class="shead">Chats<a data-bulk="archive" title="Archive every chat that is not running">archive all</a></div>`+act.map(row).join(''):'<div class="sess" style="color:var(--muted)">no chats yet</div>')
+  +(arc.length?`<div class="shead"><span class="cv" data-bulk="toggle">${open?'▾':'▸'} Archived (${arc.length})</span><a class="danger" data-bulk="delete" title="Delete all archived chats now (click twice)">delete all</a></div>`+(open?arc.map(row).join(''):''):'');
+ document.querySelectorAll('.sess[data-id]').forEach(e=>e.onclick=()=>openSession(e.dataset.id));
+ document.querySelectorAll('#sessions [data-act]').forEach(b=>b.onclick=async ev=>{ev.stopPropagation();const id=b.closest('.sess').dataset.id,a=b.dataset.act;
+  if(a==='delete'&&!b.classList.contains('armed')){b.classList.add('armed');b.title='Click again to delete permanently';setTimeout(()=>{b.classList.remove('armed')},3000);return}
+  if(a==='delete'){await api('api/delete',{session:id});if(id===session)$('#newbtn').click()}
+  else await api('api/archive',{session:id,archived:a==='archive'});
+  loadSessions()});
+ document.querySelectorAll('#sessions [data-bulk]').forEach(b=>b.onclick=async()=>{const a=b.dataset.bulk;
+  if(a==='toggle'){try{localStorage.setItem('moirai_arch_open',open?'0':'1')}catch(_){}return loadSessions()}
+  if(!b.classList.contains('armed')){b.classList.add('armed');const t=b.textContent;b.textContent=a==='delete'?`delete ${arc.length} permanently?`:`archive ${act.length} chats?`;
+   setTimeout(()=>{b.classList.remove('armed');b.textContent=t},3500);return}
+  if(a==='delete'){await api('api/delete',{archived_all:true});if(arc.some(s=>s.id===session))$('#newbtn').click()}
+  else await api('api/archive',{all_active:true});
+  loadSessions()})}
+function rememberChat(){try{session?sessionStorage.setItem('moirai_chat',session):sessionStorage.removeItem('moirai_chat')}catch(_){}}
+async function openSession(id){const s=await api('api/session/'+id);if(s.error)return;
+ if(es){es.close();es=null}setRunning(false);session=id;rememberChat();setMode(s.mode||'ask');
+ if(s.model)$('#model').value=s.model;$('#log').innerHTML='';lastDay=null;
+ const T=s.turns||[];nTurns=T.length;
+ agentsReset();pollJobs();pollLessons();
+ let live=null;
+ T.forEach((t,i)=>{if(t.role==='user')userMsg(t.text,null,t.ts,t.files);else{const isLive=s.running&&i===T.length-1;
+  if(isLive){AG.main.status='running';AG.main.t0=(t.ts||Date.now()/1000)*1000}
+  const r=new Renderer(msgEl('assistant',t.ts),{turn:i,answered:i<T.length-1,live:isLive});(t.events||[]).forEach(e=>r.ev(e));if(isLive)live=r}})
+ if(live){Object.entries(s.live_logs||{}).forEach(([tid,text])=>live.ev({type:'tool_log',id:tid,text}));setRunning(true);follow(id,live,s.stream_pos||0)}
+ toBottom();loadSessions()}
+// Coming back to the page (another tab, VS Code panel switch, sleep): catch up on what was missed.
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&session&&me&&(!es||es.readyState===2))
+ api('api/session/'+session).then(s=>{if(s.running||running)openSession(session)})});
+let me=null;
+// ---- model access: livai | anthropic | openai, each verified on save; one active, switched from the header
+const PLBL={livai:'LivAI',anthropic:'Anthropic',openai:'OpenAI'};
+function accessLabel(){const a=me&&me.model_access,p=a&&a.active;if(!p)return 'no model access - click ⚙';
+ const e=a.providers[p];const how=p==='anthropic'?({claude:'subscription',anthropic:'API key',login:"server's Claude login"})[e.cred]||'':'key';
+ return `${PLBL[p]} · ${how}${e.verified?' ✓':' (not verified)'}`}
+function fillAccess(){const a=me.model_access||{providers:{}},ps=Object.keys(a.providers);
+ $('#prov').innerHTML=ps.length?ps.map(p=>`<option value="${p}" ${p===a.active?'selected':''}>${PLBL[p]}</option>`).join(''):'<option value="">-</option>';
+ const e=a.providers[a.active]||{};const ms=e.models||[];
+ $('#model').innerHTML=ms.map(m=>`<option ${m===e.model?'selected':''}>${esc(m)}</option>`).join('');
+ const pp=$('#provpill');if(pp){pp.textContent=accessLabel();pp.className='pill '+(a.active?'ok':'bad')}}
+async function refreshMe(){const r=await api('api/me');if(r&&!r.error){me=r;fillAccess()}}
+$('#prov').onchange=async()=>{const r=await api('api/model/active',{provider:$('#prov').value});if(r.error)alert(r.error);await refreshMe()};
+let MP=null,CST=null;
+const CSETUP=`<b style="display:block;margin-top:14px">How to set it up</b><ol>
+ <li>On the login node, as the account that runs the web UI, install Claude Code:<br><code>curl -fsSL https://claude.ai/install.sh | bash</code><br><small>(it lands in <code>~/.local/bin/claude</code>; with Node.js you can use <code>npm install -g @anthropic-ai/claude-code</code> instead)</small></li>
+ <li>Find its full path: <code>command -v claude</code> (or <code>ls ~/.local/bin/claude</code>) and check it runs: <code>claude --version</code></li>
+ <li>Tell moirai-agents where it is: paste that path above and press <b>Use this path</b> - or put <code>MOIRAI_AGENTS_CLAUDE_BIN=/full/path/to/claude</code> in <code>moirai-agents/.env</code>.</li>
+ <li>No restart is needed: press <b>Check again</b>. The model it talks to (LivAI, Anthropic, OpenAI) is chosen per user in ⚙ Model settings.</li></ol>
+ <p style="color:var(--muted)">Steps 1-3 in one go: <code>scripts/setup_claude.sh</code> (also what <b>Install it for me</b> runs).</p>`;
+// Claude Code missing or broken on the server: the exact reason, where it looked, and how to fix it
+function showClaude(c){if(!c)return;$('#cdlg').hidden=false;$('#cmsg').textContent='';
+ const owner=me&&me.owner;
+ $('#cbody').innerHTML=c.ok?`<p class="ok">✓ Claude Code works: <code>${esc(c.path)}</code> (${esc(c.version)})</p>`:
+  `<p class="bad"><b>${esc(({not_found:'Not installed',configured_missing:'Configured path does not exist',not_executable:'Not executable',timeout:'Does not answer',crashed:'Fails to run',cannot_run:'Cannot run'})[c.problem]||'Not usable')}:</b> ${esc(c.error)}</p>
+  <p>The agent runs as Claude Code (<code>claude</code>) under the server's account; every chat needs it, whichever model access you chose.</p>
+  ${owner?`<b>Fix it from here</b> (applies immediately, no server restart)
+   <label style="display:block;margin:8px 0 4px;color:var(--muted)">Path to an installed <code>claude</code> (on the server; <code>command -v claude</code> prints it)</label>
+   <div style="display:flex;gap:8px"><input id="cpath" type="text" style="flex:1;border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:var(--bg);color:var(--ink)" placeholder="${esc((c.searched||[])[0]||'~/.local/bin/claude')}"><button class="btn primary" id="cuse">Use this path</button></div>
+   <div style="margin-top:8px"><button class="btn" id="cinst">Not installed? Install it for me</button> <small style="color:var(--muted)">runs scripts/setup_claude.sh on the server (official installer, ~1 min)</small></div>
+   <pre id="clog" hidden style="white-space:pre-wrap;max-height:200px;overflow:auto;font-size:11.5px"></pre>
+   ${CSETUP}`:
+   `<p>This has to be fixed on the server by its owner. Send them this message:</p><pre style="white-space:pre-wrap">${esc('moirai-agents: Claude Code is not usable on the server - '+c.error+'\nFix: run scripts/setup_claude.sh as the account that runs the web UI (see README, "Claude Code").')}</pre>${CSETUP}`}
+  <details><summary>Where it looked</summary><ul>${(c.searched||[]).map(x=>`<li><code>${esc(x)}</code></li>`).join('')}</ul></details>`}
+$('#cclose').onclick=()=>{$('#cdlg').hidden=true};
+$('#cbody').addEventListener('click',async e=>{const id=e.target.id;if(id!=='cuse'&&id!=='cinst')return;
+ e.target.disabled=true;$('#cmsg').textContent=id==='cuse'?'checking that path…':'installing Claude Code on the server (about a minute)…';
+ const r=await api(id==='cuse'?'api/claude/path':'api/claude/install',id==='cuse'?{path:$('#cpath').value}:{});e.target.disabled=false;
+ if(r.ok){CST=r;showClaude(r);$('#cmsg').textContent='✓ fixed: '+(r.saved_to?'recorded in '+r.saved_to:'installed')+' - you can chat now';
+  const pl=$('#cpill');if(pl){pl.className='pill ok';pl.textContent='claude '+(r.version||'').split(' ')[0]}}
+ else{$('#cmsg').textContent=r.error||'still not usable';if(r.log){$('#clog').hidden=false;$('#clog').textContent=r.log}}});
+$('#crecheck').onclick=async()=>{$('#cmsg').textContent='checking…';const st=await api('api/status?recheck=1');CST=st.claude_check;showClaude(CST);
+ $('#cmsg').textContent=CST.ok?'works now - you can chat':'still not usable';const pl=$('#cpill');if(pl&&CST.ok){pl.className='pill ok';pl.textContent='claude '+(CST.version||'').split(' ')[0]}};
+function openModel(p,msg){$('#mdlg').hidden=false;const a=me.model_access||{providers:{}};
+ MP=p||a.active||'livai';drawModel();$('#mmsg').className='msg';$('#mmsg').textContent=msg||''}
+function drawModel(){const a=me.model_access||{providers:{}};
+ $('#mprovs').innerHTML=['livai','anthropic','openai'].map(p=>{const e=a.providers[p];
+  return `<button data-p="${p}" class="${p===MP?'on':''}"><b>${PLBL[p]}</b><small>${e?`<span class="ok">✓ ${e.verified?'verified':'saved'}</span>${p===a.active?' · active':''}`:'not set up'}</small></button>`}).join('');
+ $('#mprovs').querySelectorAll('button').forEach(b=>b.onclick=()=>{MP=b.dataset.p;drawModel();$('#mmsg').textContent=''});
+ const e=a.providers[MP],has=!!e;
+ const keyf=(lbl,ph)=>`<label>${lbl}${has&&e.key_hint?` <small>(saved: ${esc(e.key_hint)} - leave blank to keep it)</small>`:''}</label><input type="password" id="mkey" autocomplete="off" placeholder="${ph}">`;
+ let h='';
+ if(MP==='livai')h=keyf('LivAI API key','your LivAI key')+`<p>Routes Claude Code through the LLNL LivAI gateway; the models your key may use are read from LivAI.</p>`;
+ if(MP==='anthropic')h=keyf('Anthropic API key or Claude subscription token','sk-ant-api… or sk-ant-oat01-… from `claude setup-token`')+
+  (me.owner?`<label><input type="checkbox" id="mlogin" ${e&&e.cred==='login'?'checked':''}> use this server account's own Claude Code login instead</label>`:'')+
+  `<p>A Claude Pro/Max subscription works: run <code>claude setup-token</code> on your own computer and paste the token.</p>`;
+ if(MP==='openai')h=keyf('OpenAI API key','sk-…')+`<label>API base URL</label><input type="text" id="mbase" value="${esc((e&&e.base_url)||cfg.openai_url||'https://api.openai.com/v1')}">`+
+  `<p>The agent runs through a private LiteLLM bridge that translates to OpenAI with your key (only your runs can use it). Any OpenAI-compatible endpoint works.</p>`;
+ if(has&&e.models.length)h+=`<label>Default model</label><select id="mmodel">${e.models.map(m=>`<option ${m===e.model?'selected':''}>${esc(m)}</option>`).join('')}</select>`;
+ h+=`<div class="row"><button class="btn primary" id="mgo">${has?'Verify again & save':'Verify & save'}</button>${has&&MP!==a.active?'<button class="btn" id="muse">Use this one</button>':''}${has?'<button class="btn" id="mdel" style="margin-left:auto">Remove</button>':''}</div>`;
+ $('#mform').innerHTML=h;
+ $('#mgo').onclick=async()=>{const m=$('#mmsg');m.className='msg';m.textContent=`checking ${PLBL[MP]} with a real call${MP==='openai'?' through the bridge (starting it can take ~20 s)':''}…`;$('#mgo').disabled=true;
+  const body={provider:MP,key:($('#mkey')||{}).value||'',model:($('#mmodel')||{}).value||''};
+  if($('#mbase'))body.base_url=$('#mbase').value.trim();if($('#mlogin')&&$('#mlogin').checked)body.use_login=true;
+  const r=await api('api/model',body);$('#mgo').disabled=false;
+  if(r.error){m.className='msg bad';m.textContent=r.error;return}
+  await refreshMe();drawModel();const e2=me.model_access.providers[MP];m.className='msg ok';m.textContent=`✓ ${PLBL[MP]} works - ${e2.models.length} model(s); now active (default ${e2.model}).`};
+ const u=$('#muse');if(u)u.onclick=async()=>{await api('api/model/active',{provider:MP});await refreshMe();drawModel();$('#mmsg').className='msg ok';$('#mmsg').textContent=`now using ${PLBL[MP]}`};
+ const d=$('#mdel');if(d)d.onclick=async()=>{if(!confirm(`Forget your ${PLBL[MP]} settings and key?`))return;await api('api/model/remove',{provider:MP});await refreshMe();drawModel()}}
+$('#mset').onclick=()=>openModel();$('#mclose').onclick=()=>{$('#mdlg').hidden=true};
+async function boot(){
+ cfg=await api('api/config');if(cfg.silent)return;
+ const r=await fetch('api/me',{headers:authH()});if(r.status===401){showLogin();return}
+ me=await r.json();
+ history.replaceState(null,'',location.pathname+location.hash);
+ fillAccess();
+ if(me.needs_model)openModel(me.owner?'anthropic':'livai','Choose how the agent reaches a model to start chatting.');
+ let last=null;try{last=sessionStorage.getItem('moirai_chat')}catch(_){}
+ if(last)openSession(last).catch(()=>{renderEmpty();loadSessions()});else{renderEmpty();loadSessions()}
+ api('api/status').then(st=>{const p=[];CST=st.claude_check;p.push(`<span class="pill ${st.claude?'ok':'bad'}" id="cpill" style="cursor:pointer" title="${st.claude?esc(st.claude):'Claude Code is not usable - click for the reason and how to fix it'}">claude ${st.claude?esc((st.claude_version||'').split(' ')[0]):'⚠ not usable'}</span>`);
+  p.push(`<span class="pill ${me.provider?'ok':'bad'}" id="provpill">${accessLabel()}</span>`);
+  p.push(`<span class="pill">${st.capabilities} capabilities</span>`);$('#pills').innerHTML=p.join('');$('#cpill').onclick=()=>showClaude(CST);if(!st.claude&&me&&me.owner)showClaude(CST)});
+ startPanels()}
+$('#send').onclick=send;$('#stop').onclick=async()=>{const b=$('#stop');b.disabled=true;b.textContent='Stopping…';
+ const r=await api('api/stop',{session});b.disabled=false;b.textContent='Stop';
+ if(r&&r.queued){if(es){es.close();es=null}setRunning(false);
+  document.querySelectorAll('.steer-msg .st').forEach(x=>{if(!x.textContent.startsWith('✓'))x.textContent='↻ not seen before Stop — re-sent as the next run'});liveTurn(r.message,'sent while the stopped run was working — running now')}};
+$('#input').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();send()}};
+$('#newbtn').onclick=()=>{session=null;rememberChat();nTurns=0;agentsReset();pollJobs();pollLessons();if(es){es.close();es=null}setRunning(false);$('#log').innerHTML='';lastDay=null;renderEmpty();loadSessions()};
+</script>
+<script src="cytoscape.min.js"></script>
+<script src="dagre.min.js"></script>
+<script src="cytoscape-dagre.js"></script>
+<script src="moirai.js"></script>
+</body>
+</html>
