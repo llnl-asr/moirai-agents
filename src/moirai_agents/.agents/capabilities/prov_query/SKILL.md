@@ -37,5 +37,6 @@ Predictor `query_summary`, `query_entities`, `query_lineage`, `query_dataframe`,
 - A question asked twice: make it a tool with `capability_update`.
 
 ## Self-learn
+- Anything new explored here (workload, software, tool, system) becomes a capability: `capability_builder`, Rules.
 - A query users find useful: `pipeline_feedback(kind=process)` to turn it into a tool.
 - An API quirk you hit: `lesson_add` with the error.

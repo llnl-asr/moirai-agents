@@ -7,7 +7,7 @@ moirai-agents controls the server's lifecycle:
   every .py). When it changed (an edit, a ``pip install -e`` checkout switch), every ``dftracer_agents.*`` module is
   dropped and the server is rebuilt, so the next call runs the new code. ``MOIRAI_AGENTS_DFTRACER_AUTOREFRESH=0`` turns
   that off; :func:`refresh` forces a rebuild (``df_refresh`` tool).
-* **one session root** - ``DFTRACER_WORKSPACES`` = env, else ``$MOIRAI_AGENTS_USER_WORKSPACE/workspaces``. Every
+* **one session root** - always ``$MOIRAI_AGENTS_USER_WORKSPACE/workspaces``, whatever ``DFTRACER_WORKSPACES`` says in the environment. Every
   dftracer session of a pipeline lives there; use the capabilities (or ``df_call``) for pipeline work, not
   another dftracer server that has a different root.
 
@@ -21,6 +21,7 @@ import importlib
 import importlib.util
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -33,8 +34,7 @@ _LOCK = threading.RLock()
 
 
 def workspaces_root() -> str:
-    if os.environ.get("DFTRACER_WORKSPACES"):
-        return os.environ["DFTRACER_WORKSPACES"]
+    """Sessions live in this user's workspace. A DFTRACER_WORKSPACES exported for another project must not send them there."""
     ws = os.environ.get("MOIRAI_AGENTS_USER_WORKSPACE") or str(REPO / "workspace")
     return str(Path(ws) / "workspaces")
 
@@ -46,6 +46,8 @@ def _pkg_dir() -> Optional[Path]:
 
 def available() -> bool:
     """dftracer-agents and its MCP stack are installed (scripts/setup_env.sh, editable)."""
+    if os.environ.get("MOIRAI_AGENTS_NO_SESSIONS"):
+        return False
     return _pkg_dir() is not None and importlib.util.find_spec("fastmcp") is not None
 
 
@@ -158,6 +160,23 @@ def call(tool: str, args: Optional[dict] = None) -> Dict[str, Any]:
 def tools() -> list:
     srv = server()
     return sorted(t.name for t in _run(srv.list_tools()))
+
+
+def start_session(name: str, source: str, ref: str = "", purpose: str = "") -> Dict[str, Any]:
+    """Create the dftracer session a pipeline runs in: a clone of a git URL, or an import of a local tree. Returns {status, run_id, workspace}."""
+    if re.match(r"^(https?://|git@|ssh://)", source):
+        r = call("session_create", {"url": source, **({"ref": ref} if ref else {})})
+    else:
+        r = call("pipeline_create_run", {"app": name, "description": purpose})
+        if r.get("run_id"):
+            call("session_init_structure", {"run_id": r["run_id"]})
+            imp = call("session_import_local_tree", {"run_id": r["run_id"], "local_path": source, "overwrite": True})
+            if not ok(imp):
+                return imp
+    if not ok(r) or not r.get("run_id"):
+        return {"status": "error", "error": r.get("error") or f"no session for {source}"}
+    st = call("session_status", {"run_id": r["run_id"]})
+    return {"status": "ok", "run_id": r["run_id"], "workspace": st.get("workspace") or r.get("workspace")}
 
 
 def ok(d: Dict[str, Any]) -> bool:

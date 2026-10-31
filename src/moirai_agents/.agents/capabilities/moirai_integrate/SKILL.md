@@ -35,5 +35,6 @@ Predictor `integrate_apply`, validator `integrate_validate`. A failed verdict co
 - `python_import` failed: read the error; a missing dependency means the wrong Python.
 
 ## Self-learn
+- Anything new explored here (workload, software, tool, system) becomes a capability: `capability_builder`, Rules.
 - A build flag this app or site needs: `lesson_add` with the log line.
 - A build system the flags do not reach: `capability_update`.

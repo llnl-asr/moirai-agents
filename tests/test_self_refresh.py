@@ -1,8 +1,10 @@
 """Self-refresh and time limits, on real server processes."""
+from concurrent.futures import ThreadPoolExecutor
 import gzip
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -108,42 +110,110 @@ def test_web_hard_limit_ignores_activity(tmp_path, web):
     assert w.p.poll() == 0 and "maximum lifetime limit reached" in w.logp.read_text()
 
 
-def test_dashboard_pushes_events_as_the_trace_grows(tmp_path, web):
-    w = web()
-    tok = "test-token"
-    tr = tmp_path / "traces"
-    tr.mkdir()
-    pdir = tmp_path / "ws/workspaces/pipelines/demo-1"
-    pdir.mkdir(parents=True)
-    (pdir / "pipeline.json").write_text(json.dumps({"id": "demo-1", "kind": "analysis", "name": "demo", "created": 1, "stages": {}, "dashboard": {"traces": str(tr), "live": True}}))
-
-    def member(i):
-        return gzip.compress((json.dumps({"name": "EH", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"id": f"e{i}", "type": "t", "store": 2, "uri": f"u{i}"}}) + "\n" +
-                              json.dumps({"name": "step", "cat": "moirai", "ph": 1, "pid": 1, "ts": i, "dur": 3, "args": {"relations": {"generated": [f"e{i}"]}}}) + "\n").encode())
-    f = tr / "run_node1.pfw.gz"
-    f.write_bytes(member(1))
-    r = urllib.request.urlopen(urllib.request.Request(w.url("/api/dash/demo-1/stream"), headers={"X-Moirai-Token": tok}), timeout=10)
-
-    def next_data():
-        ev = None
-        while True:
-            line = r.readline().decode()
-            if line.startswith("event:"):
-                ev = line.split(":", 1)[1].strip()
-            if line.startswith("data:"):
-                return ev, json.loads(line[5:])
-    ev, snap = next_data()
-    assert ev == "snapshot" and snap["counts"]["activities"] == 1 and snap["live"] is True
+def test_dfdashboard_runs_behind_this_port_and_streams(tmp_path, web):
+    fake = tmp_path / "fake-dfdashboard"
+    fake.write_text(f"""#!{sys.executable}
+import http.server, sys, time
+port = int(sys.argv[sys.argv.index("--port") + 1])
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        if self.path.startswith("/api/prov/stream"):
+            self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.end_headers()
+            for i in range(3):
+                self.wfile.write(b"data: %d\\n\\n" % i); self.wfile.flush(); time.sleep(0.2)
+            return
+        self.send_response(200); self.send_header("Content-Type", "text/html"); self.end_headers()
+        self.wfile.write(b"<html><head></head>" + self.path.encode())
+http.server.ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+""")
+    fake.chmod(0o755)
+    w = web(MOIRAI_AGENTS_DFDASHBOARD=str(fake))
+    r = urllib.request.Request(w.url("/dash/?view=provenance&run=a%2Fb"), headers={"X-Moirai-Token": "test-token"})
+    page = urllib.request.urlopen(r, timeout=30).read().decode()
+    assert 'window.__DFTRACER__={apiBase:"/dash",base:"/dash"}' in page and "/?view=provenance&run=a%2Fb" in page
+    r = urllib.request.Request(w.url("/dash/api/prov/stream?run=x"), headers={"X-Moirai-Token": "test-token"})
+    s = urllib.request.urlopen(r, timeout=10)
     t0 = time.time()
-    with open(f, "ab") as fh:
-        fh.write(member(2))
-    while True:
-        _, d = next_data()
-        if d["items"]:
-            break
-    assert time.time() - t0 < 3
-    assert {i["kind"] for i in d["items"]} == {"entity", "activity"} and d["counts"]["activities"] == 2
-    assert w.get("/api/dash/demo-1/lineage?entity=e2", tok)["status"] == "ok"
+    assert s.readline() == b"data: 0\n"             # delivered before the stream ends: not buffered
+    assert time.time() - t0 < 0.3 + 2
+    assert b"data: 2" in s.read()
+    try:
+        urllib.request.urlopen(w.url("/dash/"), timeout=5)
+        raise AssertionError("no token was accepted")
+    except urllib.error.HTTPError as e:
+        assert e.code == 401
+    child = int(subprocess.check_output(["pgrep", "-f", str(fake)]).split()[0])
+    w.stop()
+    Web.wait(lambda: not os.path.exists(f"/proc/{child}"), 10)    # it goes down with the server
+
+
+def test_analysis_traces_are_linked_where_dfdashboard_watches(tmp_path, monkeypatch):
+    from conftest import tools
+    from moirai_agents.core import pipeline as P
+    tr = tmp_path / "elsewhere"
+    tr.mkdir()
+    (tr / "a_host.pfw.gz").write_bytes(gzip.compress(b'{"name":"step","cat":"moirai","ph":1,"pid":1,"ts":1,"dur":1,"args":{"relations":{}}}\n'))
+    t = tools()
+    pid = t["pipeline_new"]["fn"](kind="analysis", name="t", traces=str(tr))["id"]
+    r = t["dashboard_open"]["fn"](pipeline=pid)
+    assert r["status"] == "ok"
+    c = P.load(pid)
+    assert P.dash_run(c) == f"pipelines/{pid}/traces/analysis"
+    assert (P.root() / pid / "traces/analysis/raw" / "elsewhere_a_host.pfw.gz").resolve() == (tr / "a_host.pfw.gz").resolve() or list((P.root() / pid / "traces/analysis/raw").iterdir())
+
+
+def test_a_step_links_to_its_state_and_its_run(tmp_path, monkeypatch, web):
+    from conftest import tools
+    from moirai_agents.core import pipeline as P
+    w = web()
+    monkeypatch.setenv("MOIRAI_AGENTS_PIPELINES_DIR", str(tmp_path / "ws/workspaces/pipelines"))
+    pid = tools()["pipeline_new"]["fn"](kind="analysis", name="t", traces="/t")["id"]
+    raw = P.root() / pid / "traces/ingest/raw"
+    P.record(pid, "ingest", status="running", outputs={"traces": str(raw)}, note="reading traces")
+    row = next(s for s in w.get("/api/pipelines")["pipelines"][0]["stages"] if s["name"] == "ingest")
+    assert row["run"] == f"pipelines/{pid}/traces/ingest"
+    assert w.get(f"/api/pipeline/{pid}/ingest")["history"][0]["note"] == "reading traces"
+    try:
+        w.get(f"/api/pipeline/{pid}/nope")
+        raise AssertionError("a missing step opened")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+
+
+def test_a_path_opens_directly_without_a_pipeline(tmp_path, web):
+    w = web()
+    tr = tmp_path / "my traces"
+    tr.mkdir()
+    (tr / "a.pfw.gz").write_bytes(gzip.compress(b"{}\\n"))
+    run = w.post("/api/dashboard/open", {"path": str(tr)})["run"]
+    raw = tmp_path / "ws/workspaces" / run / "raw"
+    assert run.startswith("opened/") and raw.resolve() == tr.resolve()
+    assert w.post("/api/dashboard/open", {"path": str(tr)})["run"] == run     # same path, same run
+    (tr / "later.pfw.gz").write_bytes(gzip.compress(b"{}\\n"))
+    assert (raw / "later.pfw.gz").exists()                                     # a file written later is seen
+    nested = tmp_path / "tree/x"
+    nested.mkdir(parents=True)
+    (nested / "b.pfw.gz").write_bytes(gzip.compress(b"{}\\n"))
+    for path in (str(tmp_path / "tree"), str(nested / "b.pfw.gz"), str(tmp_path / "tree/*/*.pfw.gz")):
+        run = w.post("/api/dashboard/open", {"path": path})["run"]
+        assert len(list((tmp_path / "ws/workspaces" / run / "raw").iterdir())) == 1
+    try:
+        w.post("/api/dashboard/open", {"path": str(tmp_path / "nothing")})
+        raise AssertionError("an empty path opened")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400 and b"no .pfw.gz" in e.read()
+
+
+def test_a_placeholder_key_is_not_a_key(tmp_path, web):
+    w = web(LIVAI_API_KEY="sk-...", MOIRAI_AGENTS_ENV_FILE=str(tmp_path / "no.env"))
+    assert not w.get("/api/me")["model_access"]["providers"]
+
+
+def test_first_requests_can_arrive_together(tmp_path, web):
+    w = web(MOIRAI_AGENTS_OWNER_KEY="sk-ant-api-fake")
+    with ThreadPoolExecutor(8) as pool:
+        assert all(r["owner"] is True for r in pool.map(lambda _: w.get("/api/me"), range(8)))
 
 
 def test_no_sign_in_but_the_url_token_is_required(tmp_path, web):

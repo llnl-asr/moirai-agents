@@ -32,9 +32,9 @@ if __name__ == "__main__":
         prev = step(i, prev)
 ''')
 pid = call("pipeline_new", kind="run", name="live", source=str(src), command="python app.py")["id"]
-for s in ("explore", "smoke"):
+for s in ("plan", "explore", "smoke", "discover"):
     P.update(pid, lambda c, s=s: c["stages"][s].update(status="passed"))
-spec = {"entity_types": [{"type": "chunk", "role": "output", "description": "a chunk"}],
+spec = {"scientific_artifacts": ["chunk"], "entity_types": [{"type": "chunk", "role": "output", "description": "a chunk of the demo output", "id_scheme": "chunk<i>"}],
         "activities": [{"file": "app.py", "function": "step", "name": "step", "used": [{"type": "chunk", "key_expr": "prev"}], "generated": [{"type": "chunk", "key_expr": "result"}]}]}
 print(call("annotate_spec", pipeline=pid, spec=spec))
 print({k: v for k, v in call("annotate_apply", pipeline=pid).items() if k != "diff"})

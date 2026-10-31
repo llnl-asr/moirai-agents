@@ -36,5 +36,6 @@ Predictor `explore_run`, validator `explore_validate`. A failed verdict comes he
 - Wrong language census: a vendored tree is being counted; update the tool's skip list with `capability_update`.
 
 ## Self-learn
+- Anything new explored here (workload, software, tool, system) becomes a capability: `capability_builder`, Rules.
 - A system fact the next run needs (module to load, compiler that works): `lesson_add`.
 - A class of app the tool misread: `capability_update` with a check for it.

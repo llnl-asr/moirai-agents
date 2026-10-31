@@ -29,22 +29,22 @@ PKG = Path(__file__).resolve().parent
 REPO = PKG.parents[1]
 DEFAULT_WS = REPO / "workspace"
 HOOKS = PKG / ".agents" / "hooks"
-WORKSPACE_VERSION = 2
+WORKSPACE_VERSION = 7
 
 CLAUDE_MD = """# moirai-agents workspace
 
 You help people capture and explore **data provenance with moirai**. Everything here is a **capability**: an MCP tool
 (what is deterministic), a skill (rules, constraints, corner cases, how to self-heal and self-learn) and a background agent with
-a fixed scope. Find them with `capability_list` and `lesson_search`.
+a fixed scope. Find anything with `knowledge_search` first.
 
 Two pipelines, each a list of stages run with the `pipeline_*` tools, one capability per stage:
 
-- **run**: explore -> smoke -> annotate -> integrate -> moirai_smoke -> baseline -> query
-- **analysis**: ingest -> dashboard -> query
+- **run**: plan -> explore -> smoke -> discover -> annotate -> integrate -> moirai_smoke -> baseline -> graph -> query -> package
+- **analysis**: plan -> ingest -> dashboard -> query
 
 For every stage:
 
-1. Load the owner's skill and read its LESSONS.md. Delegate to its agent when the work is long.
+1. Read the stage's step in the plan (`plan_show`). Load the owner's skill and read its LESSONS.md. Delegate to its agent when the work is long.
 2. Run its predictor tool, then its validator tool. A failed verdict goes to the skill's Corrector section: repair the original tool or its input, then predict and validate again. The same failure twice stops the loop.
 3. Stop at the gate: show what was produced and call `ask_user`, then end your turn. Never advance past a gate on your own.
 4. The answer comes back as a message. `process` feedback changes how the work is done: `capability_get`, then `capability_update`
@@ -52,7 +52,7 @@ For every stage:
 5. After the user approved, `pipeline_decide` then `pipeline_advance`.
 
 This builds on **dftracer-agents**: its skills (`system-detect`, `dftracer-build-app`, `flux-alloc`, `dftracer-trace-utils`, ...), its agents and its `mcp__dftracer__*`
-tools are here. Use them instead of rewriting them. All work happens in the session under `workspaces/`: take paths from `session_get_run_paths`, never build them by hand.
+tools are here. Use them instead of rewriting them. A run pipeline owns one dftracer session, created by `pipeline_new`: the app is in `<session>/source`, provenance work in `<session>/provenance`. Use `pipeline_status` for its `run_id`; never build paths by hand.
 
 Rules
 - Deterministic and repeated work becomes a capability, never ad-hoc shell. Use `capability_new`.
@@ -63,9 +63,15 @@ Rules
 - Never invent results. Every number comes from a tool, with the pipeline id or trace it came from.
 """
 
+def _python() -> str:
+    py = REPO / ".venv" / "bin" / "python"
+    return str(py if py.exists() else sys.executable)
+
+
 SETTINGS = {
     "env": {"REQUESTS_CA_BUNDLE": "/etc/pki/tls/cert.pem", "SSL_CERT_FILE": "/etc/pki/tls/cert.pem"},
-    "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f"python3 {HOOKS / 'live_log.py'}", "timeout": 10}]}]},
+    "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f"python3 {HOOKS / 'live_log.py'}", "timeout": 10}]}],
+              "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"/usr/bin/env PYTHONPATH={REPO / 'src'} {_python()} {HOOKS / 'context.py'}", "timeout": 20}]}]},
     "permissions": {"deny": ["Bash(sudo *)", "Bash(sudo)", "Bash(rm -rf /*)", "Bash(rm -rf ~*)", "Write(/etc/*)", "Write(/var/*)",
                              f"Edit({PKG}/**)", f"Write({PKG}/**)", f"MultiEdit({PKG}/**)",
                              f"Edit({REPO}/capabilities/**)", f"Write({REPO}/capabilities/**)"]},
@@ -86,11 +92,6 @@ for k, fn in (("skills", ensure_setup), ("agents", ensure_agents_setup), ("works
 out["permissions"] = render_claude_permissions(load_policy(), discover_mcp_tool_names())
 print(json.dumps(out))
 """
-
-
-def _python() -> str:
-    py = REPO / ".venv" / "bin" / "python"
-    return str(py if py.exists() else sys.executable)
 
 
 def dftracer_setup(ws: Path) -> dict:
@@ -128,7 +129,7 @@ def render_agent(name: str, agent: dict, tools: list) -> str:
             "model: inherit", f"skills: {', '.join(agent.get('skills', [name]))}", f"permissionMode: {agent.get('permission_mode', 'default')}",
             f"background: {'true' if agent.get('background', True) else 'false'}", "---", ""]
     body = agent.get("instructions") or f"You run capability {name} and nothing else."
-    return "\n".join(head) + body + "\n\nThis is your whole scope. If the work needs something outside it, say so and stop.\n"
+    return "\n".join(head) + body + "\n\n" + capstore.STANDING + "\n\nThis is your whole scope. If the work needs something outside it, say so and stop.\n"
 
 
 def sync(ws: Path) -> dict:
@@ -166,7 +167,7 @@ def bootstrap(ws: Path = DEFAULT_WS) -> dict:
         p = ws / name
         if p.is_symlink() or p.exists():
             p.unlink()
-    (ws / "CLAUDE.md").write_text(CLAUDE_MD)
+    (ws / "CLAUDE.md").write_text(CLAUDE_MD + f"- {capstore.STANDING}\n")
     (ws / ".mcp.json").write_text(json.dumps({"mcpServers": mcp_servers()}, indent=1) + "\n")
     (ws / ".claude").mkdir(exist_ok=True)
     settings = json.loads(json.dumps(SETTINGS))

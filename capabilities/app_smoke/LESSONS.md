@@ -1,0 +1,3 @@
+# Lessons: app_smoke
+
+- [L-b62f45b4] Tuolumne site rule: compute nodes cannot create files under any python3.N/site-packages path (Lustre /p/lustre5, vast1, /usr/workspace); probes x/python3.13/site-packages, x/lib/python3.12/site-packages, x/lib64/python3.13/site-packages fail, x/lib/site-packages and x/lib/python3.13/other work; the login node writes all of them. So `uv venv` / pip installs for the app env must run on the login node (only with the user's explicit exception to the compute-node rule; user said "Build on the login node (I accept the exception to the compute-node rule)" for elmerfold). The smoke run itself only reads the venv and goes to compute nodes via flux run -q pdebug. A job that exits non-zero must fail the smoke stage, not report 'smoke passed'.

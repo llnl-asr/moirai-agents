@@ -1,10 +1,10 @@
-"""The moirai-agents web UI: chats, the pipelines' steps, and the live Dashboard, in ONE process on one port.
+"""The moirai-agents web UI: chats and the pipelines' steps, with dfdashboard behind the same port.
 
     scripts/webui_start.sh                 # background, with a log; prints the URL
     scripts/webui_stop.sh                  # stop it and everything it started
 
 It refreshes itself. api.py, prompts.py, core/ and the static files reload in place, even during a chat, and open pages pick the
-change up. runtime.py, dashboard.py and this file hold running chats, so the server re-executes itself on the same listening socket as soon
+change up. runtime.py, dfdash.py and this file hold running chats, so the server re-executes itself on the same listening socket as soon
 as no chat is running. A change that does not compile is refused and reported on the page.
 
 It does not outlive its use (login nodes are shared). After MOIRAI_AGENTS_WEBUI_IDLE_S (2 h) with no user action, running chat or
@@ -28,14 +28,14 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import api, dashboard, prompts, runtime as R
+from . import api, dfdash, prompts, runtime as R
 from ..core import capstore, jobs, learning, moirai_env, pipeline, provtrace, selfrefresh
 from .. import workspace
 
 PKG = Path(__file__).resolve().parents[1]
 WEB = Path(__file__).resolve().parent
 HOT = [moirai_env, pipeline, jobs, provtrace, capstore, learning, workspace, prompts, api]    # in dependency order
-COLD = [WEB / f for f in ("server.py", "runtime.py", "dashboard.py", "accounts.py", "bridge.py", "procs.py")] + [PKG / "env.py", PKG / "core" / "selfrefresh.py"]
+COLD = [WEB / f for f in ("server.py", "runtime.py", "dfdash.py", "accounts.py", "bridge.py", "procs.py")] + [PKG / "env.py", PKG / "core" / "selfrefresh.py"]
 TICK = 2.0
 JOB_CHECK = 60.0
 WARN_S = 900
@@ -224,7 +224,7 @@ def main(argv=None) -> int:
     os.environ[R.procs.TAG] = instance             # inherited by every process this server starts
     token = os.environ.get("MOIRAI_AGENTS_WEBUI_TOKEN") or R.stable_token(R.STATE)
     app = R.App(token, R.STATE)
-    app.dash = dashboard.Dashboards()
+    app.dash = dfdash.DfDash(R.STATE)
     life = Life(app)
     Handler.app, Handler.life = app, life
     print(f"workspace: {R.WS} (mcp: {R.prepare_workspace(str(R.WS))})", flush=True)
@@ -249,6 +249,7 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        app.dash.stop()
         shutdown(app, instance)
         app.bridges.stop_all()
     return 0

@@ -30,4 +30,5 @@ Predictor `ingest_traces`, validator `ingest_validate`. A failed verdict comes h
 - `files` failed: a glob needs quoting, or the path is on a file system this node cannot see.
 
 ## Self-learn
+- Anything new explored here (workload, software, tool, system) becomes a capability: `capability_builder`, Rules.
 - A trace layout the tool missed: `capability_update` with a check for it.

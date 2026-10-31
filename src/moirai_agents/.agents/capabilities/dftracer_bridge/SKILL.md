@@ -29,4 +29,5 @@ Predictor `df_call`, validator `df_validate`. A failed verdict comes here: fix t
 - Import error: `df_refresh`, and re-run `scripts/setup_env.sh` if a package is missing.
 
 ## Self-learn
+- Anything new explored here (workload, software, tool, system) becomes a capability: `capability_builder`, Rules.
 - A dftracer behaviour moirai work depends on: `lesson_add` with the tool and output.

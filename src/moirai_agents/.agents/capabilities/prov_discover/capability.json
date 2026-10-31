@@ -1,0 +1,35 @@
+{
+ "name": "prov_discover",
+ "description": "Find the scientific artifact and every place the app touches data, and prepare the questions that decide what provenance to capture. Load for the discover stage, or any question about what should be captured as provenance.",
+ "version": 1,
+ "enabled": true,
+ "stages": [
+  "discover"
+ ],
+ "tools": [
+  "discover_inventory",
+  "discover_scan",
+  "discover_cases",
+  "discover_record",
+  "discover_validate"
+ ],
+ "pvc": {
+  "predictor": [
+   "discover_inventory",
+   "discover_scan",
+   "discover_record"
+  ],
+  "validator": [
+   "discover_validate"
+  ]
+ },
+ "review": [
+  "line 187: writes or deletes files (write_text)"
+ ],
+ "history": [
+  {
+   "version": 1,
+   "why": "moved from dftracer-agents' provenance mode"
+  }
+ ]
+}

@@ -1,0 +1,16 @@
+{
+ "description": "Builds and smoke-tests the original app for the smoke stage.",
+ "level": "level_1",
+ "tools": [
+  "Read",
+  "Grep"
+ ],
+ "skills": [
+  "app_smoke",
+  "dftracer-build-app",
+  "dftracer-smoke-test"
+ ],
+ "permission_mode": "default",
+ "background": true,
+ "instructions": "Run smoke_run (build_where compute unless the user gave the login exception in words), follow the job, run smoke_validate, and report the command, runtime, rc and files written. Never report a pass when any rc is non-zero."
+}

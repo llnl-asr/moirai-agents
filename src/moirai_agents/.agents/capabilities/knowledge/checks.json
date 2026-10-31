@@ -1,0 +1,1 @@
+[{"tool": "memory_write", "args": {"name": "demo-fact", "description": "a demo fact", "body": "true here", "type": "project"}, "expect": {"contains": "ok"}}, {"tool": "memory_write", "args": {"name": "Bad Name", "description": "d", "body": "b", "type": "project"}, "expect": {"contains": "error"}}]

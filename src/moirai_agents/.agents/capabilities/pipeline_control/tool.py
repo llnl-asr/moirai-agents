@@ -1,4 +1,6 @@
 """Run the two provenance pipelines: create them, read their state, and hold every stage at the user's gate."""
+from moirai_agents.core import capstore as S
+from moirai_agents.core import dfbridge as B
 from moirai_agents.core import jobs as J
 from moirai_agents.core import learning as L
 from moirai_agents.core import pipeline as P
@@ -13,10 +15,18 @@ def _safe(fn, *a, **k):
 
 def register(mcp):
     @mcp.tool()
-    def pipeline_new(kind: str, name: str, source: str = "", command: str = "", traces: str = "", notes: str = "") -> dict:
-        """Create a pipeline. Use once, at the start. kind: run (needs source: app directory, command: a small test run) or analysis
-        (needs traces: the directory or glob the user gave). Returns {id, kind, stages, current}."""
-        return _safe(lambda: P.summary(P.new(kind, name, source, command, traces, notes)))
+    def pipeline_new(kind: str, name: str, source: str = "", command: str = "", traces: str = "", notes: str = "", ref: str = "") -> dict:
+        """Create a pipeline. Use once, at the start. kind: run (needs source: app directory or git URL, command: a small test run) or analysis (needs traces: the directory or
+        glob the user gave). A run pipeline gets a dftracer session, which holds all its work; ref: git ref of a URL. Returns {id, kind, stages, current, session}, with session_error if the session failed."""
+        def go():
+            c = P.new(kind, name, source, command, traces, notes)
+            if kind != "run" or not B.available():
+                return P.summary(c)
+            s = B.start_session(name, source, ref, f"moirai pipeline {c['id']}")
+            if s.get("status") != "ok":
+                return {**P.summary(c), "session_error": s.get("error")}
+            return P.summary(P.set_session(c["id"], s))
+        return _safe(go)
 
     @mcp.tool()
     def pipeline_status(pipeline: str = "") -> dict:
@@ -37,10 +47,10 @@ def register(mcp):
     @mcp.tool()
     def pipeline_advance(pipeline: str, stage: str) -> dict:
         """Pass a stage. Use after its validator passed and the user approved. Refused with the reason otherwise.
-        Returns {status, stage, next}."""
+        Returns {status, stage, next, standing}: standing is the rule to act on before the next stage."""
         def go():
             c = P.advance(pipeline, stage)
-            return {"status": "ok", "stage": stage, "next": P.summary(c)["current"]}
+            return {"status": "ok", "stage": stage, "next": P.summary(c)["current"], "standing": S.STANDING}
         return _safe(go)
 
     @mcp.tool()

@@ -1,4 +1,6 @@
-"""The Dashboard: point it at traces. The web UI itself tails them, in its own process, and pushes new events to the page; there is no separate service."""
+"""The Dashboard: dfdashboard, watching the pipelines tree behind the web UI's port. Point the tab at a run; traces from elsewhere are linked into the tree."""
+import os
+
 from moirai_agents.core import pipeline as P
 from moirai_agents.core import provtrace as T
 
@@ -15,6 +17,11 @@ def register(mcp):
         files = T.expand(t) if t else []
         if not files and not live:
             return {"status": "error", "error": f"no trace files under {t!r}"}
+        root = str(P.dash_root()) + os.sep
+        if not os.path.abspath(t).startswith(root) or os.path.basename(t.rstrip("/")) != "raw":      # dfdashboard reads <root>/<run>/raw: link the user's traces there
+            raw = P.pdir(pipeline) / "traces" / "analysis" / "raw"
+            P.link_traces(t, raw)
+            t = str(raw)
         P.set_dashboard(pipeline, t, live)
         if STAGE in c["stages"]:
             P.record(pipeline, STAGE, outputs={"traces": t, "live": live, "files": len(files), "opened": True}, note="dashboard open")

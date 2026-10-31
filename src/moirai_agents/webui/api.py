@@ -3,6 +3,7 @@ the Dashboard's feeds in dashboard.Dashboards, the server's lifecycle in server.
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
 import secrets
@@ -83,7 +84,10 @@ def pipelines_view(user, session):
     out = []
     for c in pipeline.list_all(session or "", user["workspace"]):
         v = pipeline.summary(c)
+        v["dash_run"] = pipeline.dash_run(c, user["workspace"])
         v["jobs"] = jobs.list_jobs(c["id"], user["workspace"])
+        for r in v["stages"]:
+            r["run"] = pipeline.traces_run(c["stages"][r["name"]]["outputs"].get("traces"), user["workspace"])
         out.append(v)
     return {"pipelines": out}
 
@@ -130,41 +134,45 @@ def sse_open(h):
     h.wfile.flush()
 
 
-def stream_dash(h, app, user, pid):
-    """Push the graph, then each new event, as the trace grows. The same stream serves live and finished traces."""
-    try:
-        d = pipeline.load(pid, user["workspace"]).get("dashboard")
-    except pipeline.PipelineError as e:
-        return send_json(h, {"error": str(e)}, 404)
-    if not d:
-        return send_json(h, {"error": "no dashboard open for this pipeline"}, 404)
-    f = app.dash.get(d["traces"])
-    sse_open(h)
-    try:
-        with f.cond:
-            view, seq = f.graph.view(), f.seq
-        h.wfile.write(f"event: snapshot\ndata: {json.dumps({**view, 'seq': seq, 'traces': d['traces'], 'live': d['live']})}\n\n".encode())
-        h.wfile.flush()
-        last = 0.0
-        while True:
-            with f.cond:
-                if f.seq <= seq:
-                    f.cond.wait(timeout=2)
-                f.viewed = __import__("time").time()
-            items, top = f.since(seq)
-            if items or f.viewed - last > 2:
-                last = f.viewed
-                seq = top if len(items) < 2000 else seq + len(items)
-                h.wfile.write(f"data: {json.dumps({'seq': seq, 'items': items, 'counts': f.counts()})}\n\n".encode())
+def proxy(h, app, user, path, method="GET", body=None):
+    """Forward to the dfdashboard child. It streams, so bytes go through as they come; a page learns its API base from the injected config."""
+    port = app.dash.ensure(str(pipeline.dash_root(user["workspace"])))
+    if port is None:
+        return send_json(h, {"error": app.dash.error}, 503)
+    c = http.client.HTTPConnection("127.0.0.1", port, timeout=None)
+    headers = {k: v for k, v in h.headers.items() if k.lower() not in ("host", "cookie", "x-moirai-token", "accept-encoding", "connection")}
+    c.request(method, path, body=body, headers=headers)
+    r = c.getresponse()
+    html = (r.getheader("Content-Type") or "").startswith("text/html")
+    h.send_response(r.status)
+    for k, v in r.getheaders():
+        if k.lower() not in ("transfer-encoding", "connection", "content-length", "server", "date"):
+            h.send_header(k, v)
+    h.send_header("Connection", "close")
+    if html:
+        data = r.read().replace(b"<head>", b'<head><script>window.__DFTRACER__={apiBase:"/dash",base:"/dash"}</script>', 1)
+        h.send_header("Content-Length", str(len(data)))
+        h.end_headers()
+        h.wfile.write(data)
+    else:
+        h.end_headers()
+        try:
+            while True:
+                chunk = r.read1(65536)
+                if not chunk:
+                    break
+                h.wfile.write(chunk)
                 h.wfile.flush()
-    except (BrokenPipeError, ConnectionResetError, OSError):
-        return
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+    c.close()
+    h.close_connection = True
 
 
 def get_route(h, app, life, u, q):
     if u.path in ("/", "/index.html"):
         return send_static(h, "index.html", set_cookie(app.token) if authorized(h, app, q) else None)
-    if u.path in ("/moirai.js", "/style.css", "/cytoscape.min.js", "/dagre.min.js", "/cytoscape-dagre.js"):
+    if u.path in ("/moirai.js", "/style.css"):
         return send_static(h, u.path[1:])
     if u.path == "/api/version":
         return send_json(h, life.snapshot())
@@ -198,6 +206,9 @@ def get_route(h, app, life, u, q):
         return send_json(h, s or {"error": "not found"}, 200 if s else 404)
     if u.path == "/api/pipelines":
         return send_json(h, pipelines_view(user, q.get("session", [""])[0]))
+    if u.path.startswith("/api/pipeline/"):
+        pid, name = u.path.split("/")[3:5]
+        return send_json(h, pipeline.stage_state(pipeline.load(pid, user["workspace"]), name))
     if u.path == "/api/capabilities":
         return send_json(h, capstore.list_capabilities())
     if u.path.startswith("/api/capability/"):
@@ -206,11 +217,9 @@ def get_route(h, app, life, u, q):
         return send_json(h, {"lessons": learning.listing()})
     if u.path.startswith("/api/stream/"):
         return stream_chat(h, app, user, u.path.rsplit("/", 1)[1], int(q.get("from", ["0"])[0]))
-    if u.path.startswith("/api/dash/") and u.path.endswith("/stream"):
-        return stream_dash(h, app, user, u.path.split("/")[3])
-    if u.path.startswith("/api/dash/") and u.path.endswith("/lineage"):
-        d = pipeline.load(u.path.split("/")[3], user["workspace"])["dashboard"]
-        return send_json(h, app.dash.get(d["traces"]).graph.lineage(q.get("entity", [""])[0], q.get("direction", ["back"])[0]))
+    if u.path == "/dash" or u.path.startswith(("/dash/", "/assets/")):
+        target = u.path[5:] if u.path.startswith("/dash") else u.path
+        return proxy(h, app, user, (target or "/") + ("?" + u.query if u.query else ""))
     return send_json(h, {"error": "not found"}, 404)
 
 
@@ -342,6 +351,12 @@ def post_route(h, app, life, u, body):
         return send_json(h, {"ok": True, "changed": sum(st.archive(sid, on) for sid in ids)})
     if u.path == "/api/feedback":
         return send_json(h, {"ok": True})
+    if u.path == "/api/dashboard/open":
+        run = pipeline.open_traces(body.get("path") or "", user["workspace"])
+        app.dash.wait_run(str(pipeline.dash_root(user["workspace"])), run)
+        return send_json(h, {"run": run})
+    if u.path.startswith("/dash/"):
+        return proxy(h, app, user, u.path[5:] + ("?" + u.query if u.query else ""), "POST", json.dumps(body).encode())
     return send_json(h, {"error": "not found"}, 404)
 
 

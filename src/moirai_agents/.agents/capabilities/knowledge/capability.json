@@ -1,0 +1,29 @@
+{
+ "name": "knowledge",
+ "description": "Find what is known and remember what is true. Load before an unfamiliar task, an unfamiliar error, or recording a fact.",
+ "version": 1,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "knowledge_search",
+  "knowledge_read",
+  "memory_write",
+  "knowledge_validate"
+ ],
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  }
+ ],
+ "pvc": {
+  "predictor": [
+   "knowledge_search",
+   "memory_write"
+  ],
+  "validator": [
+   "knowledge_validate"
+  ]
+ }
+}

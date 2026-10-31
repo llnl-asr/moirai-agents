@@ -7,7 +7,6 @@
   "annotate"
  ],
  "tools": [
-  "annotate_scan",
   "annotate_spec",
   "annotate_apply",
   "annotate_validate"
@@ -30,7 +29,6 @@
  ],
  "pvc": {
   "predictor": [
-   "annotate_scan",
    "annotate_spec",
    "annotate_apply"
   ],

@@ -183,7 +183,7 @@ def server_key() -> Optional[str]:
             if line.startswith(("LIVAI_API_KEY=", "OPENAI_API_KEY=", "ANTHROPIC_API_KEY=")):
                 key = line.split("=", 1)[1].strip().strip('"').strip("'")
                 break
-    return key
+    return None if key and key.endswith("...") else key     # the placeholder in .env.example is not a key
 
 
 def validate_key(key: str, model: str) -> dict:
@@ -665,6 +665,7 @@ class Turn:
         self.env["MOIRAI_AGENTS_WEBUI_SESSION"] = session["id"]
         self.env["MOIRAI_AGENTS_USER"] = user["name"]
         self.env["MOIRAI_AGENTS_USER_WORKSPACE"] = user["workspace"]
+        self.env["DFTRACER_WORKSPACES"] = str(Path(user["workspace"]) / "workspaces")   # sessions stay here, whatever the shell exported
         if provider_of(user.get("key")) != "login":   # the owner's own login must stay in its own config dir
             self.env["CLAUDE_CONFIG_DIR"] = str(Path(user["workspace"]) / ".claude-home")   # private transcripts
         self.cwd = user["workspace"]
@@ -1260,15 +1261,17 @@ class App:
 
     def local_user(self) -> dict:
         """Whoever started the server: there are no accounts."""
-        if self.user is None:
-            ws = str(WS.resolve())
-            prepare_workspace(ws)
-            self.user = {"name": os.environ.get("USER", "me"), "uid": "local", "owner": True, "created": _now(), "workspace": ws,
-                         "model_path": str(owner_model_config().path)}
-            resolve_model(self.user)
-            self.store(self.user)
-            prewarm_bridge(self.user)
-        return self.user
+        with self.lock:                          # a page opens with several requests at once
+            if self.user is None:
+                ws = str(WS.resolve())
+                prepare_workspace(ws)
+                user = {"name": os.environ.get("USER", "me"), "uid": "local", "owner": True, "created": _now(), "workspace": ws,
+                        "model_path": str(owner_model_config().path)}
+                resolve_model(user)
+                self.store(user)
+                prewarm_bridge(user)
+                self.user = user
+            return self.user
 
     def refresh_models(self) -> None:
         """After a model-settings change."""

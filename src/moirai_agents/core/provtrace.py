@@ -4,7 +4,7 @@ The node trace is a sequence of independent gzip members of whole lines (dftrace
 service seals a partial member at least every ``DFTRACER_PC_FLUSH_MS``, and writes each at a reserved offset, so
 for a moment a member can be missing before a later one is complete. :class:`Tail` therefore commits its position
 only at the end of a whole member and simply retries from there next time: an unfinished member or a hole is never
-misread. The same class reads finished traces, in one pass.
+misread. The same class reads finished traces, in one pass. Validators and queries use it; the live view is dfdashboard's.
 """
 from __future__ import annotations
 
@@ -21,28 +21,6 @@ ENTITY_RELATIONS = {16: "derived_from", 17: "revision_of", 18: "contains", 19: "
                     21: "alternate_of", 22: "depends_on"}
 ACTIVITY_CATS = ("moirai", "PROV")
 READ_LIMIT = 8 << 20
-IO_CATS = ("POSIX", "STDIO")
-IO_READS = {"read", "pread", "pread64", "readv", "preadv", "fread", "fgets", "getc", "fgetc", "fscanf"}
-IO_WRITES = {"write", "pwrite", "pwrite64", "writev", "pwritev", "fwrite", "fputs", "fputc", "fprintf", "ftruncate", "truncate"}
-IO_OPENS = {"open", "open64", "openat", "openat64", "creat", "creat64", "fopen", "fopen64", "freopen"}
-IO_DELETES = {"unlink", "unlinkat", "remove", "rename", "renameat"}
-NOISE_SUFFIX = (".py", ".pyc", ".pyi", ".so", ".pth", ".typed")
-NOISE_PART = ("/site-packages/", "/dist-packages/", "/__pycache__/", ".so.", "/lib/python", "/.cache/", "/comgr-", "/cache/", "/triton/", "/dace/", "openmm.cache", "/cppattn_cache")
-NOISE_PREFIX = ("/proc/", "/sys/", "/dev/", "/etc/", "/usr/lib", "/usr/share/", "/lib/", "/lib64/", "/opt/rocm", "/opt/cray/", "/collab/usr/")
-PENDING_IO = 200000                    # calls per process waiting for their activity to end
-
-
-def io_op(name: str) -> str:
-    return "read" if name in IO_READS else "write" if name in IO_WRITES else "open" if name in IO_OPENS else "delete" if name in IO_DELETES else "meta"
-
-
-def noise(path: str) -> bool:
-    """Interpreter and system files are never science data (dftracer-utils' `excluded`)."""
-    if not path.startswith("/"):
-        return True
-    if path.endswith(NOISE_SUFFIX) or any(x in path for x in NOISE_PART):
-        return True
-    return not path.startswith("/dev/shm/") and path.startswith(NOISE_PREFIX)
 
 
 def expand(traces: str) -> List[str]:
@@ -122,28 +100,12 @@ class Graph:
         self.relations: List[Dict[str, str]] = []        # entity relations: {relation, subject, object}
         self.events = Counter()                          # every other event, by category
         self.total = 0
-        self.files: Dict[str, str] = {}                  # fhash -> path, from FH records
-        self.access: Dict[Tuple[str, str, str], Dict[str, int]] = {}    # (activity, fhash, op) -> {calls, bytes}
         self._seen = set()
-        self._spans: Dict[Any, List[Tuple[int, int, str]]] = {}         # pid -> spans of activities
-        self._waiting: Dict[Any, List[Dict[str, Any]]] = {}             # pid -> I/O with no activity yet
-        self._sent = set()
-        self._out: List[Dict[str, Any]] = []             # access deltas of the record being added
 
     def add(self, r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Take one record; returns what it added to the graph (what a live view shows), or None."""
         self.total += 1
         name, cat, a = r.get("name"), r.get("cat"), r.get("args") or {}
-        if name == "FH" and a.get("value"):
-            self.files.setdefault(a["value"], a.get("name", ""))
-            for key in [k for k in self.access if k[1] == a["value"]]:
-                self._announce(key)
-            return None
-        if cat in IO_CATS:
-            self.events[cat] += 1
-            if a.get("fhash"):
-                self._io(r, a)
-            return None
         if name == "ET" and a.get("type"):
             if a["type"] in self.types:
                 return None
@@ -177,73 +139,13 @@ class Graph:
                 for e in ids if isinstance(ids, list) else [ids]:
                     self.edges.append({"activity": aid, "kind": kind, "entity": e})
             self.activities.append(act)
-            self._span(act)
             return {"kind": "activity", **act, "relations": rels}
         if r.get("ph") != 4 and cat:
             self.events[cat] += 1
         return None
 
-    def _io(self, r: Dict[str, Any], a: Dict[str, Any]) -> None:
-        """Attribute a call to the innermost activity of its process. An activity is written when it ENDS, so a call usually arrives first: it waits."""
-        pid, ts = r.get("pid"), r.get("ts") or 0
-        aid = None
-        for begin, end, sid in reversed(self._spans.get(pid, [])[-256:]):
-            if begin <= ts <= end:
-                aid = sid
-                break
-        if aid:
-            self._charge(aid, r, a)
-            return
-        waiting = self._waiting.setdefault(pid, [])
-        if len(waiting) < PENDING_IO:
-            waiting.append(r)
-
-    def _span(self, act: Dict[str, Any]) -> None:
-        pid, begin, end = act["pid"], act["ts"] or 0, (act["ts"] or 0) + (act["dur"] or 0)
-        self._spans.setdefault(pid, []).append((begin, end, act["id"]))
-        self._spans[pid].sort()
-        keep = []
-        for r in self._waiting.get(pid, []):      # inner activities end first, so the innermost one claims a call
-            if begin <= (r.get("ts") or 0) <= end:
-                self._charge(act["id"], r, r.get("args") or {})
-            else:
-                keep.append(r)
-        self._waiting[pid] = keep
-
-    def _charge(self, aid: str, r: Dict[str, Any], a: Dict[str, Any]) -> None:
-        name, calls = r.get("name", ""), int(a.get("dft_cnt") or 1)
-        op = io_op(name)
-        ret = a.get("ret") if isinstance(a.get("ret"), int) else 0
-        size = a.get("size") if name in ("fread", "fwrite") and isinstance(a.get("size"), int) else 1
-        got = self.access.setdefault((aid, a["fhash"], op), {"calls": 0, "bytes": 0})
-        got["calls"] += calls
-        got["bytes"] += ret * size if op in ("read", "write") and ret > 0 else 0
-        self._announce((aid, a["fhash"], op))
-
-    def _announce(self, key: Tuple[str, str, str]) -> None:
-        path = self.files.get(key[1], "")
-        if path and not noise(path) and key not in self._sent:
-            self._sent.add(key)
-            self._out.append({"kind": "access", "aid": key[0], "path": path, "op": key[2]})
-
-    def accesses(self) -> List[Dict[str, Any]]:
-        out = []
-        for (aid, fhash, op), n in self.access.items():
-            path = self.files.get(fhash, "")
-            if path and not noise(path):
-                out.append({"aid": aid, "path": path, "op": op, **n})
-        return out
-
     def extend(self, recs: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        for r in recs:
-            d = self.add(r)
-            if d:
-                out.append(d)
-            if self._out:
-                out.extend(self._out)
-                self._out = []
-        return out
+        return [d for d in (self.add(r) for r in recs) if d]
 
     def dangling(self) -> List[str]:
         """Entity ids an activity or relation names, with no EH record."""
@@ -252,7 +154,7 @@ class Graph:
 
     def counts(self) -> Dict[str, Any]:
         return {"activities": len(self.activities), "entities": len(self.entities), "edges": len(self.edges),
-                "relations": len(self.relations), "types": len(self.types), "records": self.total, "files": len({a[1] for a in self.access if not noise(self.files.get(a[1], ""))}),
+                "relations": len(self.relations), "types": len(self.types), "records": self.total,
                 "other_events": dict(self.events), "dangling": len(self.dangling())}
 
     def summary(self) -> Dict[str, Any]:
@@ -305,7 +207,7 @@ class Graph:
     def view(self, limit: int = 1500) -> Dict[str, Any]:
         """Everything the Dashboard needs for its first paint (later changes arrive as pushed deltas)."""
         return {"types": list(self.types.values()), "entities": list(self.entities.values())[-limit:], "activities": self.activities[-limit:],
-                "edges": self.edges[-limit * 2:], "relations": self.relations[-limit:], "accesses": self.accesses()[-limit * 2:], "counts": self.counts()}
+                "edges": self.edges[-limit * 2:], "relations": self.relations[-limit:], "counts": self.counts()}
 
 
 def read(traces: str) -> Graph:

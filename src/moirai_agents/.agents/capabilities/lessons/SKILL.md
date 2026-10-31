@@ -8,7 +8,7 @@ description: Record and find lessons. Load before recording anything, and before
 ## Rules
 - A lesson is settled knowledge: symptom, root cause, exact fix; or a rule the user stated, in their words.
 - Attach it to the capability it concerns, so the agent that needs it reads it.
-- `lesson_search` before acting on anything unfamiliar.
+- `knowledge_search` comes before acting on anything unfamiliar; `lesson_search` looks at lessons only.
 
 ## Constraints
 - No source, no lesson: `evidence` names a run, a log line, file:line, or the user's words.
@@ -28,4 +28,5 @@ Predictor `lesson_add`, validator `lesson_validate`. A failed verdict comes here
 - Conflicting lessons: ask the user which holds, then reject the other.
 
 ## Self-learn
+- Anything new explored here (workload, software, tool, system) becomes a capability: `capability_builder`, Rules.
 - A lesson that turned out wrong: tell the user and record the correction.

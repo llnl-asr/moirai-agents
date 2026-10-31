@@ -20,7 +20,7 @@ def register(mcp):
 
     @mcp.tool()
     def lesson_search(query: str, k: int = 8) -> dict:
-        """Find capabilities and lessons that match a question. Use before acting on anything unfamiliar: locating costs little, rediscovering a lot.
+        """Find capabilities and lessons that match a question, by their words alone. Use knowledge_search first; this is for lessons only.
         Returns {results: [{kind, name|id, score, ...}]}."""
         return {"results": L.search(query, k)}
 

@@ -1,7 +1,7 @@
 """Pipelines: ordered, user-gated stages, one JSON file per pipeline.
 
-    run:       explore -> smoke -> annotate -> integrate -> moirai_smoke -> baseline -> query
-    analysis:  ingest -> dashboard -> query
+    run:       plan -> explore -> smoke -> discover -> annotate -> integrate -> moirai_smoke -> baseline -> graph -> query -> package
+    analysis:  plan -> ingest -> dashboard -> query
 
 Each stage is owned by one capability. A stage passes only through :func:`advance`: its validator verdict must
 cover the current outputs, the user must have answered its gate, and all their feedback must be resolved. Feedback
@@ -9,7 +9,8 @@ Every stage runs predictor -> validator -> corrector. A capability's tool predic
 sends the agent to the capability's skill, whose Corrector section says how to repair the ORIGINAL tool or its input; then predict and validate again.
 Attempts follow progress (:func:`finish_validation`): three to start, more while the failures change, and the same failure twice stops the loop for the user.
 Feedback comes in two kinds: ``process`` (how the work is done: becomes a new or updated capability) and ``remember`` (a fact:
-becomes a lesson of the owning capability, at once). State: ``<workspace>/workspaces/pipelines/<id>/pipeline.json`` (beside the
+becomes a lesson of the owning capability, at once). The plan is kept true here, not by convention: every write syncs each stage's status and result into it,
+a failed verdict or process feedback marks that step stale, and a stale step cannot pass until the plan says what changed. State: ``<workspace>/workspaces/pipelines/<id>/pipeline.json`` (beside the
 dftracer sessions, under the path dftracer-agents' permission policy allows), written
 atomically under a lock, plus an append-only ``events.jsonl``.
 """
@@ -17,6 +18,8 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import glob
+import hashlib
 import json
 import os
 import re
@@ -25,10 +28,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 KINDS: Dict[str, List[str]] = {
-    "run": ["explore", "smoke", "annotate", "integrate", "moirai_smoke", "baseline", "query"],
-    "analysis": ["ingest", "dashboard", "query"],
+    "run": ["plan", "explore", "smoke", "discover", "annotate", "integrate", "moirai_smoke", "baseline", "graph", "query", "package"],
+    "analysis": ["plan", "ingest", "dashboard", "query"],
 }
-OWNERS: Dict[str, str] = {"explore": "app_explore", "smoke": "app_smoke", "annotate": "prov_annotate",
+OWNERS: Dict[str, str] = {"plan": "run_planner", "package": "repro_package", "explore": "app_explore", "smoke": "app_smoke", "discover": "prov_discover", "annotate": "prov_annotate", "graph": "prov_graph",
                           "integrate": "moirai_integrate", "moirai_smoke": "moirai_run", "baseline": "moirai_run",
                           "ingest": "trace_ingest", "dashboard": "prov_dashboard", "query": "prov_query"}
 STATUSES = ("pending", "running", "needs_user", "failed", "passed", "skipped")
@@ -69,14 +72,91 @@ def load(pid: str, workspace: Optional[str] = None) -> Dict[str, Any]:
     p = pdir(pid, workspace) / "pipeline.json"
     if not p.exists():
         raise PipelineError(f"no pipeline {pid!r} under {root(workspace)}")
-    return json.loads(p.read_text())
+    return _migrate(json.loads(p.read_text()))
+
+
+def _migrate(c: Dict[str, Any]) -> Dict[str, Any]:
+    """A pipeline saved before a stage existed gets that stage, pending, so old pipelines keep loading."""
+    for name in KINDS.get(c.get("kind"), []):
+        c["stages"].setdefault(name, _blank(name))
+    return c
 
 
 def _write(d: Path, c: Dict[str, Any]) -> None:
     c["updated"] = round(time.time(), 1)
+    _sync_plan(c)
     tmp = d / "pipeline.json.tmp"
     tmp.write_text(json.dumps(c, indent=1, default=str))
     os.replace(tmp, d / "pipeline.json")
+
+
+def _sync_plan(c: Dict[str, Any]) -> None:
+    """The plan shows what is actually happening: each step takes its stage's state, on every write."""
+    plan = c.get("plan")
+    if not plan:
+        return
+    for name, step in plan["steps"].items():
+        s = c["stages"].get(name) or {}
+        v = s.get("validation") or {}
+        step.update(status=s.get("status", "pending"), verdict=v.get("status"), result=s.get("outputs", {}).get("summary", ""))
+        if v.get("status") == "fail" and v.get("ts", 0) > step.get("revised", 0):
+            step["stale"] = f"validator failed: {', '.join(f['name'] for f in v.get('failed', []))[:200]}"
+        fb = [x for x in s.get("feedback", []) if x["kind"] == "process" and x["ts"] > step.get("revised", 0)]
+        if fb:
+            step["stale"] = f"process feedback: {fb[-1]['text'][:200]}"
+    plan["updated"] = c["updated"]
+    (work(c) / "PLAN.md").write_text(render_plan(c))
+
+
+def render_plan(c: Dict[str, Any]) -> str:
+    plan = c["plan"]
+    out = [f"# Plan: {c['name']}", "", f"**Goal:** {plan['goal']}", ""]
+    if plan.get("assumptions"):
+        out += ["## Assumptions", ""] + [f"- {x}" for x in plan["assumptions"]] + [""]
+    if plan.get("questions"):
+        out += ["## Open questions", ""] + [f"- {x}" for x in plan["questions"]] + [""]
+    out += ["## Steps", ""]
+    for name in KINDS[c["kind"]]:
+        st = plan["steps"].get(name) or {}
+        out += [f"### {name} ({st.get('status', 'pending')})", "", st.get("intent", ""), ""]
+        out += [f"- **{k}:** {st[f]}" for k, f in (("How", "approach"), ("Done when", "done_when"), ("Risks", "risks"), ("Result", "result"), ("Needs revising", "stale")) if st.get(f)] + [""]
+    if plan.get("revisions"):
+        out += ["## Revisions", ""] + [f"- {time.strftime('%F %T', time.localtime(r['ts']))} {r['stage']}: {r['why']}" for r in plan["revisions"]] + [""]
+    return "\n".join(out)
+
+
+def write_plan(pid: str, goal: str, steps: Dict[str, Any], assumptions: List[str], questions: List[str]) -> Dict[str, Any]:
+    def fn(c):
+        c["plan"] = {"goal": goal, "steps": {k: dict(v) for k, v in steps.items()}, "assumptions": assumptions, "questions": questions, "revisions": []}
+        s = c["stages"]["plan"]
+        s["status"] = "running"
+        s["rev"] += 1
+        s["outputs"]["summary"] = f"{len(steps)} steps: {goal[:80]}"
+        return {"kind": "plan"}
+    return update(pid, fn)
+
+
+def update_plan(pid: str, name: str, why: str, fields: Dict[str, str]) -> Dict[str, Any]:
+    """A revision: what changed and why, kept for good. It clears the stale mark."""
+    if not (why or "").strip():
+        raise PipelineError("say what changed")
+    out = {}
+
+    def fn(c):
+        plan = c.get("plan")
+        if not plan:
+            raise PipelineError("no plan yet: plan_write")
+        if name not in plan["steps"]:
+            raise PipelineError(f"the plan has no stage {name!r}; stages: {list(plan['steps'])}")
+        st, now = plan["steps"][name], round(time.time(), 1)
+        st.update(fields)
+        st.pop("stale", None)
+        st["revised"] = now
+        plan["revisions"].append({"ts": now, "stage": name, "why": why.strip()[:500], "changed": sorted(fields)})
+        out.update(status="ok", stage=name, revisions=len(plan["revisions"]))
+        return {"kind": "plan_update", "stage": name}
+    update(pid, fn)
+    return out
 
 
 def _event(d: Path, kind: str, **data) -> None:
@@ -127,7 +207,7 @@ def list_all(chat_session: str = "", workspace: Optional[str] = None) -> List[Di
     r = root(workspace)
     for p in sorted(r.glob("*/pipeline.json")) if r.exists() else []:
         try:
-            c = json.loads(p.read_text())
+            c = _migrate(json.loads(p.read_text()))
         except ValueError:
             continue
         if not chat_session or c.get("chat_session") == chat_session:
@@ -274,6 +354,9 @@ def advance(pid: str, name: str) -> Dict[str, Any]:
             raise PipelineError(f"{name}: user feedback {open_fb} not acted on yet")
         if not (s.get("gate") or {}).get("approved"):
             raise PipelineError(f"{name}: waiting for the user at the gate")
+        stale = ((c.get("plan") or {}).get("steps", {}).get(name) or {}).get("stale")
+        if stale:
+            raise PipelineError(f"{name}: the plan is out of date ({stale}): plan_update says what changed")
         s["status"], s["finished"] = "passed", round(time.time(), 1)
         return {"kind": "advance", "stage": name}
     return update(pid, fn)
@@ -313,11 +396,93 @@ def feedback_resolve(pid: str, name: str, fid: str, resolution: str, ref: str) -
 
 
 def set_dashboard(pid: str, traces: str, live: bool) -> Dict[str, Any]:
-    """Point the web UI's Dashboard tab at traces; the web server tails them and pushes events to the page."""
+    """Point the Dashboard tab at a run's raw trace folder below the pipelines root, where dfdashboard is watching."""
     def fn(c):
         c["dashboard"] = {"traces": traces, "live": bool(live), "ts": round(time.time(), 1)}
         return {"kind": "dashboard", "traces": traces, "live": bool(live)}
     return update(pid, fn)
+
+
+def link_traces(traces: str, raw: Path) -> int:
+    """Make traces from anywhere readable where dfdashboard watches: <root>/<run>/raw. A folder of traces is linked whole, so files
+    that appear in it later are seen too; a glob or a tree is linked file by file. Nothing is copied. Returns the number of files."""
+    t = os.path.abspath(os.path.expanduser(traces))
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    if os.path.isdir(t) and glob.glob(os.path.join(glob.escape(t), "*.pfw.gz")):
+        if raw.is_symlink():
+            raw.unlink()
+        if not raw.exists():
+            raw.symlink_to(t, target_is_directory=True)
+        return len(glob.glob(os.path.join(glob.escape(t), "*.pfw.gz")))
+    if os.path.isdir(t):
+        files = glob.glob(os.path.join(glob.escape(t), "**", "*.pfw.gz"), recursive=True)
+    else:
+        files = [f for f in glob.glob(t, recursive=True) if f.endswith(".pfw.gz")]
+    raw.mkdir(exist_ok=True)
+    base = os.path.commonpath(files) if len(files) > 1 else os.path.dirname(t)
+    for f in files:
+        link = raw / re.sub(r"[^\w.-]", "_", os.path.relpath(f, os.path.dirname(base)))
+        if not link.exists():
+            link.symlink_to(f)
+    return len(files)
+
+
+def open_traces(traces: str, workspace: Optional[str] = None) -> str:
+    """Open traces with no pipeline: returns the dfdashboard run they appear as, the same run for the same path."""
+    t = os.path.abspath(os.path.expanduser(traces))
+    name = re.sub(r"[^\w.-]+", "_", os.path.basename(t.rstrip("/*")) or "traces")[:40]
+    run = f"opened/{name}-{hashlib.sha1(t.encode()).hexdigest()[:8]}"
+    if not link_traces(traces, dash_root(workspace) / run / "raw"):
+        raise PipelineError(f"no .pfw.gz trace under {traces}")
+    return run
+
+
+def dash_root(workspace: Optional[str] = None) -> Path:
+    """What dfdashboard watches: every session and pipeline of this workspace."""
+    return root(workspace).parent
+
+
+def dash_run(c: Dict[str, Any], workspace: Optional[str] = None) -> str:
+    """The run dfdashboard knows this pipeline's traces by: the path below its watch root, without the raw folder."""
+    return traces_run((c.get("dashboard") or {}).get("traces"), workspace)
+
+
+def traces_run(traces: Optional[str], workspace: Optional[str] = None) -> str:
+    """The dfdashboard run of a raw trace folder."""
+    return os.path.relpath(os.path.dirname(traces.rstrip("/")), dash_root(workspace)) if traces else ""
+
+
+def set_session(pid: str, session: Dict[str, Any]) -> Dict[str, Any]:
+    """Bind the dftracer session this pipeline runs in."""
+    def fn(c):
+        c["session"] = {"run_id": session["run_id"], "workspace": session["workspace"]}
+        return {"kind": "session", "run_id": session["run_id"]}
+    return update(pid, fn)
+
+
+def work(c: Dict[str, Any]) -> Path:
+    """Where this pipeline writes: <session>/provenance beside the session's own folders, or the pipeline folder when there is no session."""
+    s = c.get("session")
+    d = Path(s["workspace"]) / "provenance" if s else pdir(c["id"])
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def source_of(c: Dict[str, Any]) -> str:
+    """The application tree to read: the session's copy, or the user's."""
+    s = c.get("session")
+    return str(Path(s["workspace"]) / "source") if s else c["source"]
+
+
+def stage_state(c: Dict[str, Any], name: str) -> Dict[str, Any]:
+    """What happened in one stage, for its state page."""
+    s = stage(c, name)
+    v = s.get("validation") or {}
+    p = (c.get("plan") or {}).get("steps", {}).get(name) or {}
+    o = s["outputs"]
+    return {"pipeline": c["id"], "name": name, "status": s["status"], "owner": s["owner"], "started": s.get("started"), "summary": o.get("summary", ""),
+            "command": o.get("command", ""), "plan": p.get("intent", ""), "plan_stale": bool(p.get("stale")), "gate": s.get("gate"), "history": s["history"],
+            "feedback": s["feedback"], "checks": {k: v.get(k) for k in ("status", "passed", "total", "failed", "unknown")}}
 
 
 def summary(c: Dict[str, Any]) -> Dict[str, Any]:
@@ -327,10 +492,11 @@ def summary(c: Dict[str, Any]) -> Dict[str, Any]:
         s = c["stages"][name]
         v = s.get("validation") or {}
         rows.append({"name": name, "status": s["status"], "owner": s["owner"], "verdict": v.get("status"),
-                     "failed": [f["name"] + ": " + f["detail"] for f in v.get("failed", [])][:6],
+                     "failed": [f["name"] + ": " + f["detail"] for f in v.get("failed", [])][:6], "plan": ((c.get("plan") or {}).get("steps", {}).get(name) or {}).get("intent", ""),
+                     "plan_stale": bool(((c.get("plan") or {}).get("steps", {}).get(name) or {}).get("stale")),
                      "summary": s["outputs"].get("summary", ""), "gate": s.get("gate"),
                      "feedback_open": len([x for x in s["feedback"] if not x.get("resolution")]),
                      "progress": s["outputs"].get("progress")})
     current = next((r["name"] for r in rows if r["status"] not in ("passed", "skipped")), None)
     return {"id": c["id"], "kind": c["kind"], "name": c["name"], "created": c["created"], "updated": c.get("updated"),
-            "chat_session": c.get("chat_session"), "current": current, "stages": rows, "dashboard": c.get("dashboard")}
+            "chat_session": c.get("chat_session"), "current": current, "stages": rows, "dashboard": c.get("dashboard"), "session": c.get("session"), "goal": (c.get("plan") or {}).get("goal", "")}

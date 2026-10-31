@@ -27,7 +27,7 @@
   <div class="composer">
     <div class="opts">
       <span class="seg" id="modeseg"><button data-m="ask" class="on" title="Questions">Ask</button><button data-m="run" title="Annotate, run and watch an application">Run</button><button data-m="analysis" title="Explore existing traces">Analysis</button></span>
-      <label>via <select id="prov" title="Model access: switch between the ones you have verified"></select></label>
+      <label>via <select id="prov" title="Switch between LivAI, Claude and OpenAI; one with no key asks for it"></select></label>
       <label>model <select id="model"></select></label><button class="btn" id="mset" title="Model settings: LivAI, Anthropic, OpenAI" style="padding:3px 8px">⚙</button>
     </div>
     <div class="chips" id="chips"></div>
@@ -40,6 +40,7 @@
   </div>
 </main>
 <section id="dashview" hidden aria-label="Provenance dashboard"></section>
+<section id="stateview" hidden aria-label="What happened in a step"></section>
 <aside class="right"><div class="panel">
   <details class="sec" data-sec="steps" open><summary><h3>Steps <span class="cnt" id="scount"></span></h3></summary><div id="steps"><div class="lesson st">no pipeline in this chat</div></div></details>
   <details class="sec" data-sec="agents" open><summary><h3>Agents</h3></summary><div id="agents"><div class="agent"><div class="s">idle</div></div></div></details>
@@ -374,17 +375,19 @@ document.addEventListener('visibilitychange',()=>{if(document.visibilityState===
  api('api/session/'+session).then(s=>{if(s.running||running)openSession(session)})});
 let me=null;
 // ---- model access: livai | anthropic | openai, each verified on save; one active, switched from the header
-const PLBL={livai:'LivAI',anthropic:'Anthropic',openai:'OpenAI'};
+const PLBL={livai:'LivAI',anthropic:'Claude',openai:'OpenAI'};
 function accessLabel(){const a=me&&me.model_access,p=a&&a.active;if(!p)return 'no model access - click ⚙';
  const e=a.providers[p];const how=p==='anthropic'?({claude:'subscription',anthropic:'API key',login:"server's Claude login"})[e.cred]||'':'key';
  return `${PLBL[p]} · ${how}${e.verified?' ✓':' (not verified)'}`}
 function fillAccess(){const a=me.model_access||{providers:{}},ps=Object.keys(a.providers);
- $('#prov').innerHTML=ps.length?ps.map(p=>`<option value="${p}" ${p===a.active?'selected':''}>${PLBL[p]}</option>`).join(''):'<option value="">-</option>';
+ $('#prov').innerHTML=(a.active?'':'<option value="" selected>choose</option>')+Object.keys(PLBL).map(p=>`<option value="${p}" ${p===a.active?'selected':''}>${PLBL[p]}${ps.includes(p)?'':' (add key)'}</option>`).join('');
  const e=a.providers[a.active]||{};const ms=e.models||[];
  $('#model').innerHTML=ms.map(m=>`<option ${m===e.model?'selected':''}>${esc(m)}</option>`).join('');
  const pp=$('#provpill');if(pp){pp.textContent=accessLabel();pp.className='pill '+(a.active?'ok':'bad')}}
 async function refreshMe(){const r=await api('api/me');if(r&&!r.error){me=r;fillAccess()}}
-$('#prov').onchange=async()=>{const r=await api('api/model/active',{provider:$('#prov').value});if(r.error)alert(r.error);await refreshMe()};
+$('#prov').onchange=async()=>{const p=$('#prov').value,a=me.model_access||{providers:{}};if(!p)return;
+ if(!a.providers[p]){fillAccess();openModel(p,`Add your ${PLBL[p]} key to use it. It is checked with a real call before it is saved.`);return}
+ const r=await api('api/model/active',{provider:p});if(r.error)alert(r.error);await refreshMe()};
 let MP=null,CST=null;
 const CSETUP=`<b style="display:block;margin-top:14px">How to set it up</b><ol>
  <li>On the login node, as the account that runs the web UI, install Claude Code:<br><code>curl -fsSL https://claude.ai/install.sh | bash</code><br><small>(it lands in <code>~/.local/bin/claude</code>; with Node.js you can use <code>npm install -g @anthropic-ai/claude-code</code> instead)</small></li>
@@ -462,9 +465,6 @@ $('#send').onclick=send;$('#stop').onclick=async()=>{const b=$('#stop');b.disabl
 $('#input').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();send()}};
 $('#newbtn').onclick=()=>{session=null;rememberChat();nTurns=0;agentsReset();pollJobs();pollLessons();if(es){es.close();es=null}setRunning(false);$('#log').innerHTML='';lastDay=null;renderEmpty();loadSessions()};
 </script>
-<script src="cytoscape.min.js"></script>
-<script src="dagre.min.js"></script>
-<script src="cytoscape-dagre.js"></script>
 <script src="moirai.js"></script>
 </body>
 </html>

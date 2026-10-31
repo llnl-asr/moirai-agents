@@ -5,7 +5,7 @@ description: Open the live provenance Dashboard tab on a running or finished tra
 
 # Dashboard
 
-The Dashboard tab is part of the web UI: same process, same port. It reads the trace directly and pushes new events to the page.
+The Dashboard tab is dfdashboard, run by the web UI on a private port and reached through the web UI's own port. Its Provenance view reads the trace directly and pushes new events to the page while the run grows: time runs top to bottom, with details on the right.
 
 ## Rules
 - A moirai run opens it by itself. Use `dashboard_open` for existing traces, with `live=false`.
@@ -14,7 +14,7 @@ The Dashboard tab is part of the web UI: same process, same port. It reads the t
 
 ## Constraints
 - Reads traces only; it never changes them.
-- Do not start a separate dashboard server: one process is the design.
+- Do not start dfdashboard yourself: the web UI owns it and stops it with everything else.
 
 ## Corner cases
 - Live view lags by the service's flush interval, 250 ms by default in our runs, or longer when the run is quiet.
@@ -35,4 +35,5 @@ Predictor `dashboard_open`, validator `dashboard_validate`. A failed verdict com
 - `graph` failed: wrong directory, or traces from before moirai with no EH records.
 
 ## Self-learn
+- Anything new explored here (workload, software, tool, system) becomes a capability: `capability_builder`, Rules.
 - A view users keep asking for: `pipeline_feedback(kind=process)`.

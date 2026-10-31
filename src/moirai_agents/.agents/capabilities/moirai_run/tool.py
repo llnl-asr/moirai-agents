@@ -37,7 +37,7 @@ def _start(pipeline, stage, command, launcher, nodes, data_dir, wait, limit):
     integ, cmd = P.stage(c, "integrate")["outputs"], command or c["command"]
     if not integ.get("env"):
         return {"status": "error", "error": "the integrate stage has not written moirai_env.sh"}
-    tdir = P.pdir(pipeline) / "traces" / stage
+    tdir = P.work(c) / "traces" / stage / "raw"     # dfdashboard's run layout: <root>/<run>/raw/*.pfw.gz
     tdir.mkdir(parents=True, exist_ok=True)
     wd = integ["annotated"]
     script = _script(integ["env"], pipeline, stage, str(tdir / "prov"), data_dir or wd, cmd, launcher, nodes)
@@ -46,7 +46,7 @@ def _start(pipeline, stage, command, launcher, nodes, data_dir, wait, limit):
     P.record(pipeline, stage, status="running", outputs={"job": j["id"], "traces": str(tdir), "command": cmd, "launcher": launcher, "nodes": nodes}, note=f"running under moirai: {cmd}")
     r = J.wait(pipeline, j["id"], wait)
     return {"status": r["status"], "job": j["id"], "rc": r["rc"], "elapsed": r["elapsed"], "traces": str(tdir), "log_tail": r.get("log_tail", "")[-2500:],
-            "note": "the Dashboard tab shows the provenance events as they arrive"}
+            "note": "the Dashboard tab shows the provenance as it arrives"}
 
 
 def register(mcp):

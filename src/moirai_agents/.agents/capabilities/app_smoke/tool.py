@@ -1,6 +1,5 @@
 """Run pipeline stage 2: build the ORIGINAL application and run the small test, so later failures can be pinned on what we changed."""
 import os
-import re
 import time
 from pathlib import Path
 
@@ -26,44 +25,34 @@ def _inventory(root):
     return out
 
 
-def _session_smoke(pipeline, c, cmd, flags, subfolder, timeout):
-    """Create, detect, configure, build and smoke-test through dftracer-agents' session tools, as its own pipeline does."""
-    o = P.stage(c, STAGE)["outputs"]
-    rid = o.get("run_id")
-    steps = {}
-    if not rid:
-        if re.match(r"^(https?://|git@|ssh://)", c["source"]):
-            steps["session"] = B.call("session_create", {"url": c["source"]})
-        else:                            # a local tree is imported into a new session
-            steps["session"] = B.call("pipeline_create_run", {"app": c["name"], "description": f"moirai pipeline {pipeline}"})
-            if steps["session"].get("run_id"):
-                B.call("session_init_structure", {"run_id": steps["session"]["run_id"]})
-                steps["import"] = B.call("session_import_local_tree", {"run_id": steps["session"]["run_id"], "local_path": c["source"], "overwrite": True})
-        rid = steps["session"].get("run_id")
-        if not rid or not B.ok(steps.get("import", steps["session"])):
-            return {"status": "error", "failed_step": "session", "steps": steps}
-    plan = [("detect", "session_detect", {"run_id": rid}), ("configure", "session_configure", {"run_id": rid, "extra_cmake_flags": flags}),
-            ("build", "session_build_install", {"run_id": rid}), ("smoke", "session_run_smoke_test", {"run_id": rid, "command": cmd, "subfolder": subfolder, "timeout": timeout})]
+def _session_smoke(pipeline, c, cmd, build, flags, subfolder, timeout):
+    """Detect, configure, build and smoke-test in the pipeline's session, through dftracer-agents' tools, as its own pipeline does."""
+    rid, wd = c["session"]["run_id"], P.source_of(c)
+    plan = [("detect", "session_detect", {"run_id": rid})]
+    if build:
+        plan += [("configure", "session_configure", {"run_id": rid, "extra_cmake_flags": flags}), ("build", "session_build_install", {"run_id": rid})]
+    plan += [("smoke", "session_run_smoke_test", {"run_id": rid, "command": cmd, "subfolder": subfolder, "timeout": timeout})]
+    before, started, steps = _inventory(wd), time.time(), {}
     for name, tool, args in plan:
-        P.record(pipeline, STAGE, status="running", note=f"dftracer session: {name}")
+        P.record(pipeline, STAGE, status="running", note=f"session: {name}")
         steps[name] = B.call(tool, args)
         if not B.ok(steps[name]):
-            P.record(pipeline, STAGE, status="failed", outputs={"run_id": rid, "session_steps": steps}, note=f"{name} failed")
+            P.record(pipeline, STAGE, status="failed", outputs={"session_steps": steps}, note=f"{name} failed")
             return {"status": "error", "failed_step": name, "run_id": rid, "steps": steps}
-    paths = B.call("session_get_run_paths", {"run_id": rid})
-    P.record(pipeline, STAGE, outputs={"run_id": rid, "session_steps": steps, "session_paths": paths, "command": cmd, "summary": f"dftracer session {rid}: smoke passed"})
-    return {"status": "ok", "run_id": rid, "steps": steps, "paths": paths}
+    new = sorted(k for k, m in _inventory(wd).items() if m[1] >= started - 1 and k not in before or before.get(k, (0, 0))[1] != m[1])
+    P.record(pipeline, STAGE, outputs={"session_steps": steps, "command": cmd, "cwd": wd, "outputs_created": new[:200], "summary": f"session {rid}: smoke passed, wrote {len(new)} file(s)"})
+    return {"status": "ok", "run_id": rid, "steps": steps, "outputs_created": new[:50]}
 
 
 def register(mcp):
     @mcp.tool()
-    def smoke_session(pipeline: str, command: str = "", extra_cmake_flags: str = "", subfolder: str = "build", timeout: int = 900) -> dict:
-        """Build and smoke-test the original app in a dftracer-agents session (session_create, detect, configure, build, smoke). Prefer this when df_status says it is available:
-        builds of any kind, cloned or local sources, site modules are handled there. Safe to re-run: it reuses the session. Returns {status, run_id, steps, paths} or {status: error, failed_step, steps}."""
-        if not B.available():
-            return {"status": "error", "error": "dftracer-agents is not installed: use smoke_run, or run scripts/setup_env.sh"}
+    def smoke_session(pipeline: str, command: str = "", build: bool = True, extra_cmake_flags: str = "", subfolder: str = "source", timeout: int = 900) -> dict:
+        """Build and smoke-test the original app in the pipeline's dftracer session. Use when pipeline_status shows a session. build=false for an app with nothing to build, such as a
+        plain script. subfolder: where the command runs, inside the session. Returns {status, run_id, steps, outputs_created} or {status: error, failed_step, steps}."""
         c = P.load(pipeline)
-        return _session_smoke(pipeline, c, command or c["command"], extra_cmake_flags, subfolder, timeout)
+        if not c.get("session"):
+            return {"status": "error", "error": "this pipeline has no session: use smoke_run"}
+        return _session_smoke(pipeline, c, command or c["command"], build, extra_cmake_flags, subfolder, timeout)
 
     @mcp.tool()
     def smoke_run(pipeline: str, build_command: str = "", command: str = "", cwd: str = "", launcher: str = "", wait: int = 600) -> dict:
@@ -72,7 +61,7 @@ def register(mcp):
         (a longer run keeps going; check with job_status, then smoke_validate). Returns {job, status, rc, log_tail}."""
         c = P.load(pipeline)
         cmd = command or c["command"]
-        wd = cwd or c["source"]
+        wd = cwd or P.source_of(c)
         script = "set -e\n" + (f"{build_command}\n" if build_command else "") + f"{launcher} {cmd}\n".lstrip()
         before = _inventory(wd)
         j = J.start(pipeline, STAGE, "smoke", script, wd)
@@ -87,10 +76,11 @@ def register(mcp):
         Use after smoke_run. Returns the verdict; the new files go to the stage outputs as 'outputs_created'."""
         o = P.stage(P.load(pipeline), STAGE)["outputs"]
         v = P.Verdict(STAGE)
-        if o.get("run_id"):
-            bad = [n for n, st in (o.get("session_steps") or {}).items() if not B.ok(st)]
+        if o.get("session_steps"):
+            bad = [n for n, st in o["session_steps"].items() if not B.ok(st)]
             v.check("session_steps", not bad, f"failed: {bad}", "fix the failed step and re-run smoke_session")
-            P.record(pipeline, STAGE, outputs={"outputs_created": o.get("outputs_created", [])})
+            if not o.get("outputs_created"):
+                v.inconclusive("outputs", "the run wrote no file in the session: ask the user where its data goes")
         elif v.check("ran", bool(o.get("job")), "smoke_run has not run", "run smoke_session or smoke_run"):
             j = J.get(pipeline, o["job"], 1500)
             if j["status"] == "running":

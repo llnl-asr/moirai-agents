@@ -72,7 +72,9 @@ def register(mcp):
         Use first in a run pipeline; it changes nothing. Returns {system, app}."""
         c = P.load(pipeline)
         P.record(pipeline, STAGE, status="running", note="exploring system and application")
-        out = {"system": _system(), "app": _app(c["source"])}
+        out = {"system": _system(), "app": _app(P.source_of(c))}
+        if c.get("session"):             # the session's own view: build tool, features
+            out["session_detect"] = B.call("session_detect", {"run_id": c["session"]["run_id"]})
         if B.available():                # dftracer-agents knows the site: modules, launcher, file systems
             out["system"]["dftracer_detect"] = B.call("system_detect")
         s = f"{'/'.join(out['app']['languages']) or 'no source'}, build: {'/'.join(sorted(set(out['app']['build_files'].values()))) or 'none'}, " \

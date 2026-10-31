@@ -41,9 +41,16 @@ FORBIDDEN_IMPORTS = {"ctypes", "pty", "telnetlib", "ftplib", "paramiko"}
 REVIEW_IMPORTS = {"socket": "opens network connections", "requests": "makes HTTP requests", "urllib": "makes HTTP requests",
                   "http": "makes HTTP requests", "subprocess": "runs commands", "shutil": "copies/removes files"}
 ABS_PATH = re.compile(r"(?:/usr/WS\d|/usr/workspace|/g/g\d+|/home/[a-z]|/p/(?:lustre|vast|gpfs)\d?/[a-z]|/Users/)")
+STANDING = ("Standing rules. knowledge_search comes first: it is how to find a capability, a skill, a past fix or a fact, before acting on anything unfamiliar. Anything explored becomes a "
+            "capability, constantly: a new workload, software, tool or system met in any stage is captured before moving on, while the evidence is at hand. Extend what exists, else capability_new "
+            "named workload_<x>, software_<x>, tools_<x> or system_<x>, structured as capability_builder says. What is deterministic goes in its tool, what needs judgement in its skill, and a user "
+            "approves it. dftracer-agents' skills are reused, not copied: only what is new here is captured. An agent without capability_new ends its report with 'Capability needed:' and what it "
+            "found, for the main thread to build.")
+FAMILIES = ("workload_", "software_", "tools_", "system_")     # what is learnt: capabilities of these need Cross-references, so the graph links them
+SKILL_STANDING = "becomes a capability"       # what every skill's Self-learn section says
 SKILL_SECTIONS = ("Rules", "Constraints", "Corner cases", "Corrector", "Self-heal", "Self-learn")
 BUILTIN_AGENT_TOOLS = {"Read", "Grep", "Glob", "Bash", "Edit", "Write", "Task", "WebFetch", "WebSearch", "TodoWrite"}
-SHARED_AGENT_TOOLS = ["pipeline_status", "pipeline_feedback", "ask_user", "lesson_add", "lesson_search"]
+SHARED_AGENT_TOOLS = ["pipeline_status", "pipeline_feedback", "ask_user", "lesson_add", "knowledge_search", "knowledge_read"]
 LEVELS = ("level_1", "level_2", "level_3")
 
 
@@ -197,6 +204,11 @@ def check_skill(skill_md: str, name: str) -> List[str]:
         out.append("SKILL.md frontmatter needs a description (it decides when the skill is loaded)")
     heads = {h.strip().lower() for h in re.findall(r"^## +(.+)$", skill_md, re.M)}
     out += [f"SKILL.md is missing the section '## {s}'" for s in SKILL_SECTIONS if s.lower() not in heads]
+    learn = re.search(r"^## +Self-learn\s*$(.*?)(?=^## |\Z)", skill_md, re.M | re.S | re.I)
+    if learn and SKILL_STANDING not in learn.group(1):
+        out.append(f"SKILL.md '## Self-learn' must say what is explored here {SKILL_STANDING}: see capability_builder")
+    if name.startswith(FAMILIES) and not re.search(r"^Cross-references: .*\[\[", skill_md, re.M):
+        out.append("SKILL.md of a learnt capability needs a 'Cross-references: [[...]]' line under its frontmatter")
     return out
 
 

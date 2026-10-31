@@ -19,6 +19,8 @@ sys.path.insert(0, str(REPO / "src"))
 def isolated(tmp_path, monkeypatch):
     """Nothing a test does reaches the real store."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("MOIRAI_AGENTS_USER_WORKSPACE", str(tmp_path / "uw"))
+    monkeypatch.setenv("MOIRAI_AGENTS_NO_SESSIONS", "1")     # a session needs dftracer-agents: test_session.py turns this off
     monkeypatch.setenv("MOIRAI_AGENTS_PIPELINES_DIR", str(tmp_path / "pipelines"))
     monkeypatch.setenv("MOIRAI_AGENTS_LEARNING_DIR", str(tmp_path / "learning"))
     monkeypatch.setenv("MOIRAI_AGENTS_USER_CAPABILITIES", str(tmp_path / "user_caps"))
@@ -47,7 +49,7 @@ def fake_moirai(root: Path) -> Path:
     b = root / "bin"
     b.mkdir(parents=True)
     py = b / "python"
-    py.write_text(f'#!/bin/sh\nexec {sys.executable} "$@"\n')
+    py.write_text(f'#!/bin/sh\nexport PYTHONPATH="{root}/fake:$PYTHONPATH"\nexec {sys.executable} "$@"\n')
     py.chmod(0o755)
     (b / "python3").symlink_to("python")
     lib = root / "fake"
@@ -80,6 +82,10 @@ class Activity:
     def __exit__(self, *a):
         _emit({"name": self.name, "cat": "moirai", "type": 128, "ph": 1, "ts": int(self.t * 1e6), "dur": int((time.time() - self.t) * 1e6), "args": {"relations": self.r}})
 ''')
+    for n in ("moirai", "dftracer"):
+        d = lib / f"{n}-1.0.dist-info"
+        d.mkdir()
+        (d / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {n}\nVersion: 1.0\n")
     svc = b / "moirai-service"
     svc.write_text('#!/bin/sh\ncase "$1" in start) head -c 100 /dev/zero > "/dev/shm$MOIRAI_SERVICE_SHM";; stop) rm -f "/dev/shm$MOIRAI_SERVICE_SHM";; esac\n')
     svc.chmod(0o755)

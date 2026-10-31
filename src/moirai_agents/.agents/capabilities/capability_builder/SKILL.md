@@ -10,7 +10,8 @@ scope), `checks.json` (known input to expected output), `LESSONS.md`. Read LESSO
 
 ## Rules
 - If two people would do it identically, it is code in `tool.py`. Prose carries only what needs judgement.
-- `capability_list` first. Extend what exists; a fingerprint twin is refused.
+- Anything explored becomes a capability, constantly: a new workload, software, tool or system is captured in the stage that met it, with what the run proved. dftracer-agents' skills are reused, not copied.
+- `knowledge_search` first, then `capability_list`. Extend what exists; a fingerprint twin is refused. One subject per capability: do not widen one to fit.
 - Every capability is a predictor-validator-corrector loop. Declare `pvc`. The validator is a separate deterministic tool returning a verdict (`finish_validation` for stages); a tool never judges its own output. The skill's `## Corrector` maps each failed check to the fix of the original tool.
 - A failed assumption is `Verdict.assume`: inconclusive, never a failure.
 - A verdict names each fault and the fix, so nobody has to diagnose it again.
@@ -21,7 +22,28 @@ scope), `checks.json` (known input to expected output), `LESSONS.md`. Read LESSO
 - Never edit capability files directly: edits skip validation and the human gate.
 - No `eval`, `exec`, `shell=True`, `os.system`. No machine-specific paths: take them as arguments.
 - `agent.json` declares `level_1|2|3`, never a model. Bash must be scoped, for example `Bash(git diff:*)`.
-- The skill needs all of: Rules, Constraints, Corner cases, Self-heal, Self-learn.
+- The skill needs all of: Rules, Constraints, Corner cases, Self-heal, Self-learn, and its Self-learn says what is explored there becomes a capability.
+
+## What is learnt
+The same families as dftracer-agents, with `_` where its skills use `-`:
+
+| Family | For | Its skill holds |
+|---|---|---|
+| `workload_<app>` | a scientific or HPC application under study | build, run configuration, annotation pitfalls, what its provenance looks like |
+| `software_<x>` | a library, a service, or a DL application that is instrumented rather than studied | versions that work, build, tuning, how it is traced |
+| `tools_<x>` | a tool of this stack: moirai, dftracer, dfdashboard | install sources, what it really is, failure modes |
+| `system_<x>` | a machine | key constraints, module load order, scheduler, storage, debugging |
+
+If unsure between `workload_` and `software_`: is it studied, or instrumented? Ask if it is really ambiguous.
+
+The skill follows dftracer-agents' shape, so its headings are what `knowledge_search` finds:
+- The description says what it covers and when to load it, with the words someone would search.
+- Directly under the frontmatter: `Cross-references: [[workload_x]] [[software-hdf5]]`, one link for each related capability or dftracer skill. It is required.
+- After the required sections, topic sections: `## Build`, `## Run`, `## Scheduler`, each with one `### <the problem, in the words of the error>` per pitfall.
+- Each pitfall gives the exact error, the cause, the exact fix and a command to verify it, and says `(confirmed YYYY-MM-DD)` with the run that proved it.
+- Its tool holds what can be checked: a predictor that reads the facts (versions, modules, paths) and a validator that rules on them. The same rule as any capability.
+
+Corrections and one-off fixes found later go to its LESSONS.md, not the skill.
 
 ## Corner cases
 - Tool names are global: a name another capability owns is refused.
@@ -39,4 +61,5 @@ Predictor `capability_new`, `capability_update`, validator `capability_verify`. 
 - An update made it worse: `capability_rollback`. No quick fix: `capability_disable` and tell the user.
 
 ## Self-learn
+- Anything new explored here (workload, software, tool, system) becomes a capability: `capability_builder`, Rules.
 - A mistake in how capabilities are built becomes a lesson here with `lesson_add`, citing the failed proposal or check.

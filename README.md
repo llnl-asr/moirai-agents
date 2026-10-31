@@ -6,6 +6,10 @@ Capability-centric agents for [moirai](https://github.com/llnl-asr/moirai) data 
 
 A capability is one folder in `src/moirai_agents/.agents/capabilities/<name>/`. The kernel has no tools of its own.
 
+The standing rule: anything explored becomes a capability, constantly. A new workload, software, tool or system met in any stage is captured as `workload_<x>`, `software_<x>`, `tools_<x>` or `system_<x>`, or extends one that exists. The rule is `capstore.STANDING`: every chat prompt, rendered agent and `CLAUDE.md` carries it, `pipeline_advance` repeats it after each stage, and a skill whose Self-learn section omits it is refused. These families and their skill shape match dftracer-agents; `capability_builder` has the template.
+
+`knowledge_search` is the first place to look. It walks one graphify graph over every capability, lesson and memory, and dftracer-agents' workload, software, system and tools skills and memories, then reads lessons and memory directly, because the graph matches headings and symbols rather than body text. The graph rebuilds itself when anything it covers changes. A `UserPromptSubmit` hook puts the best rows not yet shown in the session in front of each prompt. `memory_write` keeps what is true here, in `~/.moirai-agents/learning/memory/`.
+
 | File | Holds |
 |---|---|
 | `tool.py` | the MCP tools: predictors, and the validators that rule on what they produced |
@@ -27,8 +31,10 @@ Each stage has one owning capability and stops at a user gate.
 
 | Pipeline | Stages |
 |---|---|
-| run | explore, smoke, annotate, integrate, moirai_smoke, baseline, query |
-| analysis | ingest, dashboard, query |
+| run | plan, explore, smoke, discover, annotate, integrate, moirai_smoke, baseline, graph, query, package |
+| analysis | plan, ingest, dashboard, query |
+
+Planning comes first: `PLAN.md`, in the session, has a step per stage. The engine syncs each stage's status and result into it as the run goes, and a failed verdict or process feedback marks a step stale until the plan says what changed. The last stage writes `final_provenance/`, a folder that reproduces the run for someone else, verified from a fresh copy in a clean login shell.
 
 At a gate the user can approve, give **process** feedback (becomes a new or updated capability, which they approve) or say **remember** (becomes a lesson of that capability at once). A stage passes only with a passing verdict of its current outputs, an approval, and all feedback resolved.
 
@@ -43,17 +49,17 @@ scripts/webui_stop.sh         # stops it and everything it started
 
 You run it yourself, as yourself: there are no accounts and no sign-in. Open the printed link; its private token only keeps other people on a shared login node out of an agent running as you.
 
-Chats on the left, Chat and Dashboard in the middle, and Steps, Agents, Jobs, Lessons and Capabilities on the right. Models: Claude, OpenAI or LivAI, each verified before it is saved. Every chat runs Claude Code in your workspace.
+Chats on the left, Chat and Dashboard in the middle, and Steps, Agents, Jobs, Lessons and Capabilities on the right. Each step is one row: its name opens what happened in it, and a step with traces links to their timeline and provenance in the Dashboard. Models: Claude, OpenAI or LivAI, each verified before it is saved. Every chat runs Claude Code in your workspace.
 
-**The Dashboard is part of the web server**: one process, one port. A running `moirai-service` already produces the trace, so the server tails it and pushes new events to the page. The trace is a sequence of independent gzip members and the service seals one at least every `MOIRAI_PC_FLUSH_MS`; the tail commits only whole members, so an unfinished member or a gap is simply read next time. Finished traces take the same path. Its view is the provenance graph of dftracer-utils' viewer, simplified: pick entities grouped by type, and show or hide activities, each entity type and I/O. I/O is attributed to activities as the server does, in streaming form.
+**The Dashboard is [dfdashboard](https://github.com/llnl-asr/dfdashboard).** The web UI starts it on first use, on a private port, and forwards `/dash/` to it, so there is one URL and one tunnel, and it stops with the server. Its Provenance view follows a run while `moirai-service` writes the trace: time runs top to bottom, a bar on the right describes what you select, and you can pick entities by type and show or hide activities, entity types and I/O. To look at any traces, paste a directory, a `.pfw.gz` file or a glob into the box at the top of the tab: they are linked, not copied, and a folder still being written stays live.
 
-**It refreshes itself.** A capability's `tool.py` reloads in the MCP server, which tells the client. A change to the kernel re-executes the MCP server in place, with its connection intact. In the web UI, `api.py`, `prompts.py`, `core/` and static files reload during a chat, and open pages follow. `runtime.py`, `dashboard.py` and `server.py` re-execute on the same socket once no chat is running, and logins survive. An edit that does not compile is refused and shown on the page; the running code stays.
+**It refreshes itself.** A capability's `tool.py` reloads in the MCP server, which tells the client. A change to the kernel re-executes the MCP server in place, with its connection intact. In the web UI, `api.py`, `prompts.py`, `core/` and static files reload during a chat, and open pages follow. `runtime.py`, `dfdash.py` and `server.py` re-execute on the same socket once no chat is running, and logins survive. An edit that does not compile is refused and shown on the page; the running code stays.
 
 **It does not outlive its use.** After `MOIRAI_AGENTS_WEBUI_IDLE_S` (2 h) with no user action, chat or job, and in any case after `MOIRAI_AGENTS_WEBUI_MAX_S` (12 h), it stops its chats, sweeps every process it started and exits. Page polling does not count as activity. Background jobs have their own limit (`limit`, default `MOIRAI_AGENTS_JOB_LIMIT_S`, 1 h); on expiry they get SIGTERM, so their traps stop `moirai-service`.
 
 ## dftracer-agents
 
-`scripts/setup_env.sh` installs it editable. The workspace uses its skills and agents, its permission policy, and its MCP server beside ours. Sessions and pipelines both live under `<workspace>/workspaces/`, the path that policy allows. `smoke_session` runs dftracer's own session tools, and `df_call` reaches any other. Without it, the capabilities fall back to their own tools.
+`scripts/setup_env.sh` installs it editable. The workspace uses its skills and agents, its permission policy, and its MCP server beside ours. A run pipeline owns one dftracer session from `pipeline_new`: the app is in `<session>/source`, and provenance work (the annotated copy, spec, traces, graph) in `<session>/provenance`, beside the session's own folders. Sessions live under `<workspace>/workspaces/`, the path that policy allows, whatever `DFTRACER_WORKSPACES` is set to in your shell. `smoke_session` runs dftracer's build and smoke tools there, and `df_call` reaches any other. An analysis pipeline has no app to build, so it has no session. Without it, the capabilities fall back to their own tools.
 
 moirai and dftracer-utils are never imported here: capabilities run them through the Python in `MOIRAI_AGENTS_MOIRAI_PYTHON`.
 

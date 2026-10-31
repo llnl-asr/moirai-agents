@@ -1,0 +1,30 @@
+{
+ "name": "app_smoke",
+ "description": "Build and smoke-test the original application, unchanged. Load for the smoke stage of a run pipeline.",
+ "version": 1,
+ "enabled": true,
+ "stages": [
+  "smoke"
+ ],
+ "tools": [
+  "smoke_session",
+  "smoke_run",
+  "smoke_validate"
+ ],
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  }
+ ],
+ "pvc": {
+  "predictor": [
+   "smoke_session",
+   "smoke_run"
+  ],
+  "validator": [
+   "smoke_validate"
+  ]
+ }
+}

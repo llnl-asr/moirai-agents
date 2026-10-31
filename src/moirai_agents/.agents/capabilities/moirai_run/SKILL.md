@@ -40,5 +40,6 @@ Predictor `moirai_smoke_run`, `moirai_baseline_run`, validator `moirai_validate`
 - Service does not start: read the service log next to the trace prefix (`No space left on device` means the ring).
 
 ## Self-learn
+- Anything new explored here (workload, software, tool, system) becomes a capability: `capability_builder`, Rules.
 - Run settings that worked for this app: `lesson_add`.
 - A failure mode the validator missed: `capability_update` with a check for it.

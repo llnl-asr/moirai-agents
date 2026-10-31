@@ -1,0 +1,31 @@
+{
+ "name": "run_planner",
+ "description": "Plan a pipeline before it runs and keep the plan true while it runs. Load at the start of every pipeline, and whenever reality differs from the plan.",
+ "version": 1,
+ "enabled": true,
+ "stages": [
+  "plan"
+ ],
+ "tools": [
+  "plan_write",
+  "plan_update",
+  "plan_show",
+  "plan_validate"
+ ],
+ "pvc": {
+  "predictor": [
+   "plan_write",
+   "plan_update"
+  ],
+  "validator": [
+   "plan_validate"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "why": "from dftracer-agents' planner and reproduction packages"
+  }
+ ]
+}

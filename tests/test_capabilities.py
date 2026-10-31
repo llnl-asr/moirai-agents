@@ -1,4 +1,5 @@
 import json
+import json
 
 import pytest
 
@@ -33,7 +34,7 @@ c
 ## Self-heal
 s
 ## Self-learn
-l
+- What is explored here becomes a capability.
 """
 AGENT = {"description": "demo", "level": "level_1", "tools": ["Read"], "skills": ["demo_cap"]}
 PVC = {"predictor": ["demo_ping"], "validator": ["demo_check"]}
@@ -79,6 +80,7 @@ def test_propose_then_approve_goes_live_without_restart():
     ({"tool_code": TOOL.replace("x + 1", "len('/usr/WS2/a') + x")}, "machine-specific"),
     ({"skill_md": SKILL.replace("## Self-heal\ns\n", "")}, "Self-heal"),
     ({"skill_md": SKILL.replace("## Corrector\nc\n", "")}, "Corrector"),
+    ({"skill_md": SKILL.replace("becomes a capability", "is noted")}, "becomes a capability"),
     ({"pvc": {"predictor": ["demo_ping"]}}, "validator"),
     ({"pvc": {"predictor": ["demo_ping"], "validator": ["nope"]}}, "does not define"),
     ({"pvc": {"predictor": ["demo_ping"], "validator": ["demo_ping"]}}, "judge its own output"),
@@ -141,6 +143,32 @@ def test_the_bundled_store_is_never_written():
     S.disable("app_smoke")
     assert bundled.read_text() == before
     assert S.all_caps()["app_smoke"][0] == "user" and S.all_caps()["app_smoke"][2]["enabled"] is False
+
+
+def test_the_standing_rule_reaches_everything(tmp_path):
+    from moirai_agents import workspace
+    from moirai_agents.webui import prompts
+    ws = tmp_path / "ws"
+    workspace.bootstrap(ws)
+    assert S.STANDING in (ws / "CLAUDE.md").read_text()
+    assert S.STANDING in (ws / ".claude/agents/moirai_run.md").read_text()
+    assert all(S.STANDING in prompts.system_prompt(m, {}) for m in ("ask", "run", "analysis"))
+    for name, (_, d, _m) in S.all_caps().items():
+        assert S.check_skill((d / "SKILL.md").read_text(), name) == []
+
+
+def test_each_prompt_gets_context_from_the_hook(tmp_path):
+    from moirai_agents import workspace
+    ws = tmp_path / "ws"
+    workspace.bootstrap(ws)
+    cmd = json.loads((ws / ".claude/settings.json").read_text())["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert cmd.endswith("hooks/context.py")
+
+
+def test_a_learnt_capability_needs_cross_references():
+    skill = SKILL.replace("demo_cap", "system_demo")
+    assert any("Cross-references" in p for p in S.check_skill(skill, "system_demo"))
+    assert S.check_skill(skill.replace("## Rules", "Cross-references: [[software-mpi]]\n\n## Rules"), "system_demo") == []
 
 
 def test_workspace_renders_scoped_agents(tmp_path):

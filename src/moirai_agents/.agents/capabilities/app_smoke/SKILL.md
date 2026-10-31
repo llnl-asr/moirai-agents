@@ -6,7 +6,7 @@ description: Build and smoke-test the original application, unchanged. Load for 
 # Smoke test
 
 ## Rules
-- With dftracer-agents installed use `smoke_session`: everything then lives in one dftracer session under `workspaces/`, with its build skills (`dftracer-build-app`, `software-cmake`, ...). `smoke_run` is for plain commands.
+- A pipeline with a session uses `smoke_session`, with `build=false` for a plain script, and the session's build skills (`dftracer-build-app`, `software-cmake`, ...). `smoke_run` is for a pipeline with no session.
 - Run the app exactly as the user does, before any change. A failure here is not ours.
 - Show at the gate: the command, the runtime, what it wrote. Ask whether that is the expected result: exit 0 with the wrong output is not a working app.
 - The files listed in `outputs_created` are the first candidates for entities.
@@ -35,5 +35,6 @@ Predictor `smoke_session`, `smoke_run`, validator `smoke_validate`. A failed ver
 - `lost` job: the process died with the shell's allocation; re-run under a real allocation.
 
 ## Self-learn
+- Anything new explored here (workload, software, tool, system) becomes a capability: `capability_builder`, Rules.
 - A build fix for this app or site: `lesson_add` with the log line.
 - A step you had to do by hand every time: `capability_update`.
