@@ -5,13 +5,19 @@ against a pinned app, and a standalone checker judges the result. It is verified
 
 Two modes. generic: the app runs in the shell that runs 04_run.sh, under a moirai-service started there. batch: the app is launched by its own generator as a `flux batch` whose chunk jobs run on
 compute nodes; each chunk job runs a wrapper that starts its own moirai-service, so 04_run.sh never starts a service on the login node and waits for and judges the batch job.
+
+Publishing: provenance-repro/<app>/ holds the package (run AS IT IS from there to verify it), provenance-traces/<app>/<job start>/ holds one run each (raw traces, README.md, run.json,
+run.sh, graph_summary.json), then the site's chgperm.sh sets the group. Every publishing step takes publish_root as an argument and refuses any path outside it.
 """
+import grp
+import hashlib
 import json
 import math
 import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -553,6 +559,538 @@ def _selftest():
     return {"status": "ok" if all(cases.values()) else "error", "line": line, "cases": cases, "notes": notes}
 
 
+# ------------------------------------------------------------------ publishing (pure cores take every path as an argument; the tools wrap them)
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+TS_RE = re.compile(r"^\d{8}_\d{6}$")
+SKIP_DIRS = {".chgperm_logs"}
+KINDS = ("baseline", "verification")
+PKG_FILES = ("README.md", "config.ini", "scripts/run_all.sh")
+
+
+def _inside(root, p):
+    """True when p resolves to root or below it."""
+    r, q = Path(root).resolve(), Path(p).resolve()
+    return q == r or r in q.parents
+
+
+def _names(app, ts=None):
+    if not NAME_RE.match(app or ""):
+        raise ValueError(f"app {app!r} must match {NAME_RE.pattern}")
+    if ts is not None and not TS_RE.match(ts or ""):
+        raise ValueError(f"timestamp {ts!r} must be YYYYMMDD_HHMMSS")
+
+
+def _sha(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def tree_hashes(d):
+    """{relative path: sha256 (or link:<target>)} of every file under d, skipping chgperm's log folders."""
+    out = {}
+    for dp, dn, fn in os.walk(d):
+        dn[:] = sorted(x for x in dn if x not in SKIP_DIRS)
+        for f in fn:
+            p = Path(dp) / f
+            out[str(p.relative_to(d))] = "link:" + os.readlink(p) if p.is_symlink() else _sha(p)
+    return out
+
+
+def _du(d):
+    return sum((Path(dp) / f).lstat().st_size for dp, _, fn in os.walk(d) for f in fn)
+
+
+def _stamp(epoch):
+    return time.strftime("%Y%m%d_%H%M%S", time.localtime(float(epoch)))
+
+
+def _flux_field(job, fmt):
+    """One `flux jobs -n -o <fmt> <job>` query (read-only); '' when flux or the job is unavailable."""
+    try:
+        r = subprocess.run(["flux", "jobs", "-n", "-o", fmt, job], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def _find_flux_id(text):
+    """The flux batch id in a log: 04_run.sh logs 'batch job <id> (<scale>, ...)'."""
+    m = re.search(r"batch job:?\s+(f[1-9A-Za-z]{9,})", text or "")
+    if m:
+        return m.group(1)
+    m = JOBID.search(text or "")
+    return m.group(0) if m else ""
+
+
+def cfg_values(path, env):
+    """Pure: config.ini values with ${VAR} expanded; env overrides the file, as lib_load_config.sh does."""
+    vals = {}
+    for line in Path(path).read_text().splitlines():
+        s = line.strip()
+        if not s or s[0] in "#[":
+            continue
+        k, _, v = s.partition("=")
+        vals[k.strip()] = v
+    scope = {**vals, **env}
+
+    def ex(t):
+        for _ in range(8):
+            n = re.sub(r"\$\{(\w+)\}", lambda m: scope.get(m.group(1), m.group(0)), t)
+            if n == t:
+                break
+            t = n
+        return t
+    return {k: ex(scope[k]) for k in vals}
+
+
+def plan_core(src_pkg, root, app, stamps, group_script, group="moirai"):
+    """Pure (reads only): the publish tree. stamps = {'baseline': ts or '', 'verification': ts or ''}. Returns {status, problems, ...}."""
+    problems = []
+    try:
+        _names(app)
+    except ValueError as e:
+        return {"status": "error", "problems": [str(e)]}
+    root = Path(root)
+    if not root.is_dir():
+        problems.append(f"publish_root {root} is not a directory")
+    if not Path(src_pkg).is_dir():
+        problems.append(f"package {src_pkg} is missing: run repro_build")
+    pkg_t = root / "provenance-repro" / app
+    targets = {"package": str(pkg_t)}
+    existing = [str(pkg_t)] if pkg_t.exists() else []
+    runs = []
+    for kind in KINDS:
+        ts = stamps.get(kind) or ""
+        if not ts:
+            runs.append({"kind": kind, "timestamp": "", "target": "", "note": "unknown yet"})
+            continue
+        if not TS_RE.match(ts):
+            problems.append(f"{kind} timestamp {ts!r} is not YYYYMMDD_HHMMSS")
+            continue
+        t = root / "provenance-traces" / app / ts
+        runs.append({"kind": kind, "timestamp": ts, "target": str(t), "gets": ["raw/*.pfw.gz", "raw/.dftindex (if present)", "README.md", "run.json", "run.sh", "graph_summary.json"] + (["verification.json"] if kind == "verification" else [])})
+        if t.exists():
+            existing.append(str(t))
+    if existing:
+        problems.append("targets exist, nothing will be overwritten: " + ", ".join(existing))
+    if stamps.get("baseline") and stamps.get("baseline") == stamps.get("verification"):
+        problems.append("baseline and verification have the same timestamp")
+    probe = root
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    free = shutil.disk_usage(probe).free if probe.exists() else 0
+    size = _du(src_pkg) if Path(src_pkg).is_dir() else 0
+    gs = Path(group_script)
+    if not _inside(root, gs):
+        problems.append(f"group_script {gs} is outside publish_root")
+    elif not gs.is_file():
+        problems.append(f"group_script {gs} not found")
+    dirs = [str(pkg_t)] + [r["target"] for r in runs if r["target"]]
+    cmds = [f"{shlex.quote(str(gs))} --local -q -g {group} {shlex.quote(d)}" for d in dirs]
+    return {"status": "error" if problems else "ok", "problems": problems, "targets": targets, "runs": runs, "existing": existing, "package_bytes": size, "free_bytes": free,
+            "chgperm_commands": cmds, "unknown_timestamps": [r["kind"] for r in runs if not r["timestamp"]]}
+
+
+def copy_package_core(src, root, app, ws=None):
+    """cp -a src to <root>/provenance-repro/<app> (new dir only), compare hashes with src, run the portable check on the copy."""
+    _names(app)
+    root = Path(root)
+    if not root.is_dir():
+        raise ValueError(f"publish_root {root} is not a directory")
+    tgt = root / "provenance-repro" / app
+    if not _inside(root, tgt):
+        raise ValueError("target is outside publish_root")
+    if tgt.exists():
+        raise FileExistsError(f"{tgt} exists: refusing to overwrite")
+    tgt.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(["cp", "-a", str(src), str(tgt)], capture_output=True, text=True)
+    if r.returncode:
+        shutil.rmtree(tgt, ignore_errors=True)
+        raise OSError("cp -a failed: " + r.stderr[:300])
+    a, b = tree_hashes(src), tree_hashes(tgt)
+    diff = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+    portable = lint(tgt, Path(ws) if ws else Path("/nonexistent-session"))
+    return {"target": str(tgt), "files": len(b), "hash_mismatch": diff, "portable_findings": portable, "ok": not diff and not portable}
+
+
+def _metaval(meta, k):
+    v = meta.get(k)
+    return str(v) if v not in (None, "") else "not recorded"
+
+
+def render_run_files(kind, app, ts, s, info, meta):
+    """Pure: README.md, run.json and graph_summary.json texts from a graph summary dict (Graph.summary()), file info and metadata. Nothing is typed in: a missing fact reads 'not recorded'."""
+    types = {t["type"]: {"role": t.get("role", ""), "description": t.get("description", "")} for t in s.get("types", [])}
+    by_type, by_store, rel = s.get("by_type", {}), s.get("by_store", {}), s.get("relation_kinds", {})
+    secs = meta.get("seconds")
+    run = {"kind": kind, "jobid": _metaval(meta, "job_id"), "queue": _metaval(meta, "queue"), "result": _metaval(meta, "result"), "start": _metaval(meta, "start_iso"),
+           "runtime_s": secs if secs not in (None, "") else "not recorded", "scale": _metaval(meta, "scale"), "input": _metaval(meta, "input"), "timestamp": ts}
+    doc = {"app": {"name": app, "source_commit": _metaval(meta, "app_commit")}, "run": run,
+           "software": {"dftracer": _metaval(meta, "dftracer"), "moirai": _metaval(meta, "moirai")}, "env": meta.get("env") or {},
+           "captured": {"trace_files": info["files"], "trace_bytes": info["bytes"], "record_counts": {"events_total": s.get("records", 0), "other_events": s.get("other_events", {})},
+                        "graph": {"entities": s["entities"], "activities": s["activities"], "edges": s["edges"], "relations": s.get("relations", 0), "dangling_hashes": s["dangling"], "types_described": len([t for t in types.values() if t["description"]])},
+                        "entities_by_type": by_type, "entity_relations": rel, "entities_by_store": by_store, "entity_types": types}}
+    if "verification" in meta:
+        doc["verification"] = meta["verification"]
+    graph = {"summary": {k: v for k, v in s.items() if k not in ("types", "relation_kinds")}, "entity_relations": rel, "types": s.get("types", [])}
+    what = "the pipeline's baseline run" if kind == "baseline" else "the in-place verification run of the published package"
+    L = [f"# {app} provenance trace -- {ts}", "",
+         f"{kind.capitalize()} run ({what}), traced with the dftracer entity/relation API. Job {run['jobid']} ({run['queue']}), {run['runtime_s']} s, {run['result']}.", "",
+         "## Layout", "", "- `raw/` -- dftracer traces, one `.pfw.gz` per process", "- `run.json` -- everything below, machine-readable", "- `run.sh` -- exact launch script; `graph_summary.json` -- graph summary"]
+    if kind == "verification":
+        L.append("- `verification.json` -- the record of running the published package as it is (job, scale, counts vs expected, exit codes, package file hashes)")
+    L += ["", "## What was run", "", f"- Input: {run['input']} (scale {run['scale']})", f"- App source commit: {doc['app']['source_commit']}",
+          f"- dftracer: {doc['software']['dftracer']}", f"- moirai: {doc['software']['moirai']}"]
+    L.append("- Env: " + (", ".join(f"`{k}={v}`" for k, v in sorted(doc["env"].items())) if doc["env"] else "not recorded"))
+    L += ["", "## What was captured", "", f"- {info['files']} trace files, {info['bytes']} bytes, {s.get('records', 0)} events",
+          f"- {s['entities']} entities, {s['activities']} activities, {s['edges']} edges; {s['dangling']} dangling",
+          "- Entity relations: " + (", ".join(f"{k} {v}" for k, v in sorted(rel.items())) or "none"), "- Stores: " + (", ".join(f"{k} {v}" for k, v in sorted(by_store.items())) or "none"),
+          "", "## Entity types", "", "| type | role | count | description |", "|---|---|---|---|"]
+    for t in sorted(types):
+        L.append(f"| {t} | {types[t]['role']} | {by_type.get(t, 0)} | {types[t]['description']} |")
+    L.append("")
+    return {"README.md": _site("\n".join(L)), "run.json": _site(json.dumps(doc, indent=2)), "graph_summary.json": _site(json.dumps(graph, indent=2))}
+
+
+def publish_traces_core(root, app, run_dir, ts, kind, summary, meta, run_sh=""):
+    """Copy a run's raw traces (+ .dftindex) and write README.md, run.json, run.sh, graph_summary.json into <root>/provenance-traces/<app>/<ts>/ (new dir only).
+    run_sh: the exact launch script; default <run_dir>/run.sh, else <run_dir>/../../work/<scale>/run.sh (the package layout)."""
+    _names(app, ts)
+    if kind not in KINDS:
+        raise ValueError(f"kind must be one of {KINDS}")
+    root, run_dir = Path(root), Path(run_dir)
+    if not root.is_dir():
+        raise ValueError(f"publish_root {root} is not a directory")
+    raw = run_dir / "raw" if (run_dir / "raw").is_dir() else run_dir
+    pf = sorted(raw.glob("*.pfw.gz"))
+    if not pf:
+        raise ValueError(f"no *.pfw.gz in {raw}")
+    rs = next((Path(p) for p in (run_sh, run_dir / "run.sh", run_dir.parent.parent / "work" / run_dir.name / "run.sh") if p and Path(p).is_file()), None)
+    if rs is None:
+        raise ValueError(f"no run.sh for {run_dir}: the exact launch script is part of a run folder (pass run_sh)")
+    rec = next((p for p in (run_dir / "verification.json", run_dir.parent.parent / "verification.json") if p.is_file()), None)
+    if kind == "verification" and rec is None:
+        raise ValueError("no verification.json beside the run: run repro_verify with in_place and wait for it to finish")
+    tgt = root / "provenance-traces" / app / ts
+    if not _inside(root, tgt):
+        raise ValueError("target is outside publish_root")
+    if tgt.exists():
+        raise FileExistsError(f"{tgt} exists: refusing to overwrite")
+    tmp = tgt.parent / f".tmp-{ts}"
+    shutil.rmtree(tmp, ignore_errors=True)
+    (tmp / "raw").mkdir(parents=True)
+    try:
+        for f in pf + ([raw / ".dftindex"] if (raw / ".dftindex").exists() else []):
+            subprocess.run(["cp", "-a", str(f), str(tmp / "raw" / f.name)], check=True, capture_output=True)
+        subprocess.run(["cp", "-a", str(rs), str(tmp / "run.sh")], check=True, capture_output=True)
+        if kind == "verification" and rec is not None:
+            subprocess.run(["cp", "-a", str(rec), str(tmp / "verification.json")], check=True, capture_output=True)
+        info = {"files": len(pf), "bytes": sum(f.stat().st_size for f in pf)}
+        meta = dict(meta)
+        if kind == "verification" and rec is not None:
+            meta["verification"] = json.loads(rec.read_text())
+        for name, text in render_run_files(kind, app, ts, summary, info, meta).items():
+            (tmp / name).write_text(text)
+        tmp.rename(tgt)
+    except Exception:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return {"target": str(tgt), "files": sorted(str(p.relative_to(tgt)) for p in tgt.rglob("*") if p.is_file()), "trace_files": info["files"], "trace_bytes": info["bytes"]}
+
+
+def perm_check_core(paths, group):
+    """Pure (reads only): group = <group>, directories setgid, g=u, no 'other' bits, files without setgid. Returns the list of exceptions."""
+    try:
+        gid = grp.getgrnam(group).gr_gid
+    except KeyError:
+        return [f"group {group!r} does not exist here"]
+    bad = []
+    for top in paths:
+        for dp, dn, fn in os.walk(top):
+            dn[:] = [x for x in dn if x not in SKIP_DIRS]
+            for name in [""] + list(fn):
+                p = Path(dp) / name if name else Path(dp)
+                st = os.lstat(p)
+                if stat.S_ISLNK(st.st_mode):
+                    continue
+                m, isdir = stat.S_IMODE(st.st_mode), stat.S_ISDIR(st.st_mode)
+                if st.st_gid != gid:
+                    bad.append(f"{p}: group is not {group}")
+                if m & 0o007:
+                    bad.append(f"{p}: has 'other' bits {oct(m & 7)}")
+                if (m >> 3) & 7 != (m >> 6) & 7:
+                    bad.append(f"{p}: group bits {oct((m >> 3) & 7)} differ from user bits {oct((m >> 6) & 7)}")
+                if isdir and not m & stat.S_ISGID:
+                    bad.append(f"{p}: directory is not setgid")
+                if not isdir and m & stat.S_ISGID:
+                    bad.append(f"{p}: file has setgid")
+    return bad[:60]
+
+
+def published_dirs(root, app, stamps=None):
+    root = Path(root)
+    runs = root / "provenance-traces" / app
+    if stamps:
+        ts = list(stamps)
+    else:
+        ts = sorted(d.name for d in runs.iterdir() if d.is_dir() and TS_RE.match(d.name) and (d / "run.json").is_file()) if runs.is_dir() else []
+    return root / "provenance-repro" / app, [runs / t for t in ts]
+
+
+def permissions_core(root, script, group, app, stamps=None):
+    """Run `<script> --local -q -g <group> <dir>` on provenance-repro/<app> and each run folder only, then verify with perm_check_core."""
+    _names(app)
+    for t in stamps or []:
+        _names(app, t)
+    root, script = Path(root), Path(script)
+    if not _inside(root, script):
+        raise ValueError(f"group_script {script} is outside publish_root: refusing")
+    if not (script.is_file() and os.access(script, os.X_OK)):
+        raise ValueError(f"group_script {script} is not an executable file")
+    pkg, runs = published_dirs(root, app, stamps)
+    dirs = [pkg] + runs
+    missing = [str(d) for d in dirs if not d.is_dir()]
+    if missing:
+        raise ValueError("not published yet: " + ", ".join(missing))
+    for d in dirs:
+        if not _inside(root, d) or d.resolve() == root.resolve():
+            raise ValueError(f"{d} is not below publish_root: refusing")
+    results = []
+    for d in dirs:
+        r = subprocess.run([str(script), "--local", "-q", "-g", group, str(d)], capture_output=True, text=True, timeout=3600)
+        results.append({"dir": str(d), "rc": r.returncode, "tail": (r.stdout + r.stderr)[-300:]})
+    bad = perm_check_core(dirs, group)
+    return {"ok": not bad and all(x["rc"] == 0 for x in results), "ran": results, "exceptions": bad}
+
+
+def publish_checks(src_pkg, root, app, group, counts_of):
+    """Pure (reads only): [(name, ok, detail, fix)] of the published tree. counts_of(raw_dir) -> {'activities','entities','edges',...} comes from the graph tools."""
+    out = []
+    root = Path(root)
+    pkg, runs = published_dirs(root, app)
+    missing = [f for f in PKG_FILES if not (pkg / f).is_file()] + ([] if (pkg / "scripts").is_dir() else ["scripts/"])
+    out.append(("published_package", pkg.is_dir() and not missing, f"{pkg}: missing {missing}" if pkg.is_dir() else f"{pkg} does not exist", "repro_publish_package"))
+    kinds = {}
+    for d in runs:
+        try:
+            kinds[d.name] = json.loads((d / "run.json").read_text())["run"]["kind"]
+        except (OSError, ValueError, KeyError):
+            kinds[d.name] = "?"
+    out.append(("published_runs", "baseline" in kinds.values() and "verification" in kinds.values(), f"run folders: {kinds}", "repro_publish_traces for kind=baseline and kind=verification"))
+    ph = tree_hashes(pkg) if pkg.is_dir() else {}
+    if src_pkg and Path(src_pkg).is_dir():
+        sh = tree_hashes(src_pkg)
+        diff = sorted(k for k in set(sh) | set(ph) if sh.get(k) != ph.get(k))
+        out.append(("package_equals_source", not diff, f"differs: {diff[:8]}", "the published copy changed after the copy: remove it only with the user's approval, then repro_publish_package again"))
+    if pkg.is_dir():
+        found = lint(pkg, Path("/nonexistent-session"))
+        out.append(("portable", not found, "; ".join(found)[:380], "repro_build puts values in config.ini; publish the rebuilt package"))
+    files = [str(f) for f in sorted((pkg / "scripts").glob("*.sh"))] if pkg.is_dir() else []
+    files += [str(d / "run.sh") for d in runs if (d / "run.sh").is_file()]
+    parse = [p for p in files if subprocess.run(["bash", "-n", p], capture_output=True).returncode]
+    out.append(("scripts_parse", bool(files) and not parse, f"bash -n fails: {parse}" if parse else "no scripts found", "regenerate the package or the run folder"))
+    incomplete, count_bad = [], []
+    for d in runs:
+        need = ["README.md", "run.json", "run.sh", "graph_summary.json"]
+        lack = [n for n in need if not (d / n).is_file()] + ([] if list((d / "raw").glob("*.pfw.gz")) else ["raw/*.pfw.gz"])
+        if lack:
+            incomplete.append(f"{d.name}: {lack}")
+            continue
+        got = counts_of(str(d / "raw"))
+        g = json.loads((d / "run.json").read_text())["captured"]["graph"]
+        readme = (d / "README.md").read_text()
+        line = f"{got['entities']} entities, {got['activities']} activities, {got['edges']} edges"
+        if (g["entities"], g["activities"], g["edges"]) != (got["entities"], got["activities"], got["edges"]) or line not in readme:
+            count_bad.append(f"{d.name}: run.json {g}, README has {line in readme}, graph tool {got}")
+    out.append(("run_folders_complete", bool(runs) and not incomplete, "; ".join(incomplete), "repro_publish_traces"))
+    out.append(("readme_counts", bool(runs) and not count_bad, "; ".join(count_bad)[:380], "regenerate: the README/run.json must come from graph tool counts"))
+    vrec, vdetail = False, "no verification folder with verification.json"
+    for d in runs:
+        if kinds.get(d.name) == "verification" and (d / "verification.json").is_file():
+            rec = json.loads((d / "verification.json").read_text())
+            same = rec.get("package_hashes") == ph
+            vrec = same and rec.get("ok") is True and rec.get("in_place") is True
+            vdetail = f"{d.name}: hashes equal={same}, ok={rec.get('ok')}, in_place={rec.get('in_place')}"
+    out.append(("verification_record", vrec, vdetail, "repro_verify(in_place=<published package>) again; the package must not change after it"))
+    bad = perm_check_core([pkg] + runs, group) if pkg.is_dir() else ["package missing"]
+    out.append(("permissions", not bad, "; ".join(bad[:5]), "repro_publish_permissions"))
+    return out
+
+
+FAKE_CHGPERM = r'''#!/bin/bash
+# fake chgperm.sh for the sandbox: same interface as the site script (--local -q -g GROUP DIR), same effect, no allocation
+grp=moirai; dir=
+while [ $# -gt 0 ]; do case "$1" in -g) grp="$2"; shift;; --local|-q|--mpi) ;; -n) shift;; *) dir="$1";; esac; shift; done
+[ -d "$dir" ] || { echo "no dir $dir" >&2; exit 2; }
+echo "$dir" >> "$(dirname "$0")/chgperm.calls"
+chgrp -R "$grp" "$dir" || exit 3
+find "$dir" -type d -exec chmod g=u,o-rwx,g+s {} +
+find "$dir" -type f -exec chmod g=u,o-rwx,g-s {} +
+mkdir -p "$dir/.chgperm_logs"
+'''
+
+
+def _sh(path, text):
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text)
+    p.chmod(0o755)
+    return p
+
+
+def publish_selftest():
+    """Sandbox for publishing: a fake publish_root, fake package and traces, a fake chgperm.sh and the current user's own group as the fake group."""
+    cases = {}
+    fake_group = grp.getgrgid(os.getgid()).gr_name
+    with tempfile.TemporaryDirectory(prefix="repro_publish_selftest_") as td:
+        td = Path(td).resolve()
+        root = td / "vast"
+        root.mkdir()
+        _sh(root / "chgperm.sh", FAKE_CHGPERM)
+        outside = _sh(td / "other_chgperm.sh", FAKE_CHGPERM)
+        src = td / "final_provenance"
+        _sh(src / "scripts" / LOADER, "#!/bin/bash\nexit 0\n")
+        _sh(src / "scripts" / "run_all.sh", '#!/bin/bash\nsource "$(dirname "$0")/' + LOADER + '"\n')
+        (src / "config.ini").write_text("OUTPUT_ROOT=${HOME}/demo/${APP}\nAPP=demo\n")
+        (src / "README.md").write_text("# demo\n")
+        (src / "inputs").mkdir()
+        (src / "inputs" / "expected.json").write_text("{}")
+        gs = str(root / "chgperm.sh")
+        pl = plan_core(src, root, "demo", {"baseline": "20260101_010101", "verification": ""}, gs, fake_group)
+        cases["plan_ok_writes_nothing"] = pl["status"] == "ok" and not (root / "provenance-repro").exists() and not (root / "provenance-traces").exists() and pl["unknown_timestamps"] == ["verification"]
+        cases["plan_has_chgperm_command"] = any("--local -q -g " + fake_group in c and "provenance-repro/demo" in c for c in pl["chgperm_commands"]) and pl["free_bytes"] > 0
+        cases["plan_refuses_script_outside_root"] = plan_core(src, root, "demo", {}, str(outside))["status"] == "error"
+        cases["plan_refuses_bad_app"] = plan_core(src, root, "../x", {}, gs)["status"] == "error"
+        cases["plan_refuses_bad_timestamp"] = plan_core(src, root, "demo", {"baseline": "yesterday"}, gs)["status"] == "error"
+        cp = copy_package_core(src, root, "demo")
+        cases["package_copied_equal"] = cp["ok"] and cp["files"] == len(tree_hashes(src)) and not cp["hash_mismatch"]
+        try:
+            copy_package_core(src, root, "demo")
+            cases["package_refuses_existing"] = False
+        except FileExistsError:
+            cases["package_refuses_existing"] = True
+        cases["plan_reports_existing"] = plan_core(src, root, "demo", {}, gs)["existing"] == [str(root / "provenance-repro" / "demo")]
+        bad_src = td / "bad_pkg"
+        _sh(bad_src / "scripts" / "x.sh", "#!/bin/bash\nsource lib_load_config.sh\necho " + os.path.expanduser("~") + "/y\n")
+        (bad_src / "config.ini").write_text("A=1\n")
+        cases["package_portable_check_catches_home"] = bool(copy_package_core(bad_src, root, "bad")["portable_findings"])
+
+        run_dir = td / "run" / "traces" / "smoke"
+        (run_dir / "raw").mkdir(parents=True)
+        for n in range(2):
+            (run_dir / "raw" / f"p{n}.pfw.gz").write_bytes(b"x" * (10 + n))
+        (run_dir / "raw" / ".dftindex").write_text("idx")
+        _sh(td / "run" / "work" / "smoke" / "run.sh", "#!/bin/bash\necho run\n")
+        summary = {"activities": 7, "entities": 9, "edges": 21, "relations": 2, "types": [{"type": "sequence", "role": "input", "description": "a sequence"}, {"type": "out", "role": "output", "description": "an output"}],
+                   "records": 123, "other_events": {}, "dangling": 0, "by_type": {"sequence": 4, "out": 5}, "by_store": {"parallel_fs": 9}, "relation_kinds": {"contains": 2}}
+        meta = {"job_id": "fFAKE", "queue": "pdebug", "seconds": 12.5, "result": "COMPLETED", "scale": "baseline", "env": {"MOIRAI_PC_BLOCKS": "16"}}
+        r = publish_traces_core(root, "demo", run_dir, "20260101_010101", "baseline", summary, meta)
+        tdir = Path(r["target"])
+        readme = (tdir / "README.md").read_text()
+        rj = json.loads((tdir / "run.json").read_text())
+        gj = json.loads((tdir / "graph_summary.json").read_text())
+        cases["traces_files_copied"] = sorted(p.name for p in (tdir / "raw").glob("*")) == [".dftindex", "p0.pfw.gz", "p1.pfw.gz"] and (tdir / "run.sh").is_file()
+        cases["traces_readme_from_counts"] = "9 entities, 7 activities, 21 edges" in readme and "| sequence | input | 4 | a sequence |" in readme and "fFAKE" in readme and "12.5 s" in readme
+        cases["traces_run_json_from_counts"] = rj["captured"]["graph"]["entities"] == 9 and rj["captured"]["trace_files"] == 2 and rj["run"]["kind"] == "baseline" and rj["captured"]["entities_by_store"] == {"parallel_fs": 9}
+        cases["traces_graph_summary_keys"] = set(gj) == {"summary", "entity_relations", "types"} and gj["entity_relations"] == {"contains": 2}
+        cases["traces_missing_fact_not_invented"] = "not recorded" in readme
+        try:
+            publish_traces_core(root, "demo", run_dir, "20260101_010101", "baseline", summary, meta)
+            cases["traces_refuses_existing"] = False
+        except FileExistsError:
+            cases["traces_refuses_existing"] = True
+        (td / "empty").mkdir(exist_ok=True)
+        for label, args in (("bad_timestamp", (run_dir, "../../etc", "baseline")), ("bad_kind", (run_dir, "20260101_010102", "other")),
+                            ("no_traces", (td / "empty", "20260101_010103", "baseline")), ("verification_needs_record", (run_dir, "20260101_010104", "verification"))):
+            try:
+                publish_traces_core(root, "demo", args[0], args[1], args[2], summary, meta)
+                cases["traces_refuses_" + label] = False
+            except ValueError:
+                cases["traces_refuses_" + label] = True
+        hashes = tree_hashes(root / "provenance-repro" / "demo")
+        (run_dir.parent.parent / "verification.json").write_text(json.dumps({"in_place": True, "ok": True, "package_hashes": hashes, "kind": "verification"}))
+        publish_traces_core(root, "demo", run_dir, "20260101_020202", "verification", summary, meta)
+        vdir = root / "provenance-traces" / "demo" / "20260101_020202"
+        cases["verification_record_copied"] = (vdir / "verification.json").is_file() and "verification.json" in (vdir / "README.md").read_text() and (vdir / "run.sh").is_file()
+        shutil.rmtree(root / "provenance-repro" / "bad")
+
+        counts_of = lambda raw: {"activities": 7, "entities": 9, "edges": 21}
+        before = {n: ok for n, ok, _, _ in publish_checks(src, root, "demo", fake_group, counts_of)}
+        cases["validate_permissions_fail_before_chgperm"] = before["permissions"] is False
+        try:
+            permissions_core(root, outside, fake_group, "demo")
+            cases["permissions_refuses_script_outside_root"] = False
+        except ValueError:
+            cases["permissions_refuses_script_outside_root"] = True
+        try:
+            permissions_core(root, gs, fake_group, "../demo")
+            cases["permissions_refuses_bad_app"] = False
+        except ValueError:
+            cases["permissions_refuses_bad_app"] = True
+        pr = permissions_core(root, gs, fake_group, "demo")
+        calls = (root / "chgperm.calls").read_text().split()
+        cases["permissions_applied_and_verified"] = pr["ok"] and not pr["exceptions"]
+        cases["permissions_only_published_dirs"] = sorted(calls) == sorted([str(root / "provenance-repro" / "demo"), str(tdir), str(vdir)])
+        some = root / "provenance-repro" / "demo" / "README.md"
+        some.chmod(0o664 | 0o004)
+        cases["permissions_check_catches_other_bits"] = any("other" in x for x in perm_check_core([root / "provenance-repro" / "demo"], fake_group))
+        some.chmod(0o660)
+        cases["permissions_check_catches_unknown_group"] = bool(perm_check_core([root], "no_such_group_zz"))
+        d0 = root / "provenance-repro" / "demo" / "inputs"
+        d0.chmod(0o770)
+        cases["permissions_check_catches_missing_setgid"] = any("setgid" in x for x in perm_check_core([root / "provenance-repro" / "demo"], fake_group))
+        d0.chmod(0o2770)
+        after = {n: ok for n, ok, _, _ in publish_checks(src, root, "demo", fake_group, counts_of)}
+        cases["validate_all_pass_on_good_tree"] = all(after.values()) and len(after) >= 8
+        (root / "provenance-repro" / "demo" / "README.md").write_text("changed\n")
+        changed = {n: ok for n, ok, _, _ in publish_checks(src, root, "demo", fake_group, counts_of)}
+        cases["validate_catches_changed_package"] = not changed["package_equals_source"] and not changed["verification_record"]
+        (tdir / "README.md").write_text("no counts here\n")
+        cases["validate_catches_readme_counts"] = not {n: ok for n, ok, _, _ in publish_checks(src, root, "demo", fake_group, counts_of)}["readme_counts"]
+        cases["cfg_values_expand"] = cfg_values(src / "config.ini", {"HOME": "/h"})["OUTPUT_ROOT"] == "/h/demo/demo"
+        cases["flux_id_found"] = _find_flux_id("x\n[10:00:00] 04_run.sh: batch job f3babTaxk3eF (smoke, 28 min, queue pdebug)\n") == "f3babTaxk3eF"
+    bad = [k for k, v in cases.items() if not v]
+    line = "repro publish selftest PASS " + " ".join(f"{k}=ok" for k in cases) if not bad else "repro publish selftest FAIL " + ",".join(bad)
+    return {"status": "ok" if not bad else "error", "line": line, "cases": cases}
+
+
+def _verification_record(pipeline):
+    """Write <OUTPUT_ROOT>/verification.json once the in-place job has finished. Returns {status, ...}; status 'running' while it runs."""
+    c = P.load(pipeline)
+    o = P.stage(c, STAGE)["outputs"]
+    vf = o.get("verify") or {}
+    if not vf.get("in_place"):
+        return {"status": "error", "error": "no in-place verification was started: repro_verify(in_place=...)"}
+    j = J.get(pipeline, vf["job"], 40000)
+    if j["status"] == "running":
+        return {"status": "running"}
+    out, pkg = Path(vf["output_root"]), Path(vf["in_place"])
+    run = out / "run.json"
+    rj = json.loads(run.read_text()) if run.exists() else {}
+    flux = _find_flux_id(j.get("log_tail", ""))
+    t_run = _flux_field(flux, "{t_run}") if flux else ""
+    secs = _flux_field(flux, "{runtime}") if flux else ""
+    rsh = out / "work" / vf["scale"] / "run.sh"
+    try:
+        start = float(t_run)
+        src = "flux jobs {t_run}"
+    except ValueError:
+        start = rsh.stat().st_mtime if rsh.exists() else time.time()
+        src = "mtime of run.sh (flux unavailable)"
+    now = tree_hashes(pkg)
+    rec = {"kind": "verification", "in_place": True, "package": "provenance-repro", "scale": vf["scale"], "job": vf["job"], "flux_job": flux, "job_start": _stamp(start), "job_start_source": src,
+           "seconds": float(secs) if secs else j.get("elapsed"), "exit_codes": {"run_all": j["rc"]}, "counts": rj.get("counts"), "expected": rj.get("expected"), "failures": rj.get("failures"),
+           "ok": bool(rj.get("ok")) and j["rc"] == 0, "overrides": vf.get("overrides", {}), "not_exercised": vf.get("not_exercised", []), "package_hashes_before": vf.get("hashes_before"),
+           "package_hashes": now, "package_unchanged": now == vf.get("hashes_before"), "login_shell": "env -i bash -l"}
+    rec["ok"] = rec["ok"] and rec["package_unchanged"]
+    (out / "verification.json").write_text(json.dumps(rec, indent=2))
+    P.record(pipeline, STAGE, outputs={"verify": {**vf, "record": str(out / "verification.json"), "job_start": rec["job_start"], "flux_job": flux, "ok": rec["ok"]}}, note="in-place verification record written")
+    return {"status": "ok", "record": str(out / "verification.json"), **{k: rec[k] for k in ("job_start", "ok", "counts", "expected", "package_unchanged", "flux_job")}}
+
+
 def register(mcp):
     @mcp.tool()
     def repro_build(pipeline: str, output_root: str = "${HOME}/moirai_repro/${APP}", mode: str = "") -> dict:
@@ -687,21 +1225,64 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
         return {"status": "ok", "package": str(pkg), "mode": "batch" if batch else "generic", "files": files, "source": url or "bundled", "pins": pins, "warnings": warnings}
 
     @mcp.tool()
-    def repro_verify(pipeline: str, isolation_root: str, scale: str = "smoke", reuse_venv: str = "", limit: int = 3600, wait: int = 300, moirai_venv: str = "") -> dict:
-        """Prove the package works: copy it to a new folder outside the session and run it in a clean login shell, with nothing inherited (env -i, bash -l). Use after repro_build. isolation_root:
-        a parent folder outside the session, on a file system a compute node can see. scale: smoke or baseline. reuse_venv: a venv to reuse instead of building one (batch mode: the app's own venv).
-        moirai_venv: batch mode only, the moirai venv to reuse (needed with reuse_venv). limit: seconds for the whole run; in batch mode the flux batch time limit is derived from it. wait: seconds to
-        wait now; the run goes on in the background (a batch run takes ~8 min) and repro_validate judges it later. Batch mode never starts a service on the login node.
-        Returns {status, job, iso_dir, mode, not_exercised, log_tail}."""
+    def repro_verify(pipeline: str, isolation_root: str = "", scale: str = "smoke", reuse_venv: str = "", limit: int = 3600, wait: int = 300, moirai_venv: str = "", in_place: str = "") -> dict:
+        """Prove the package works: run it in a clean login shell, with nothing inherited (env -i, bash -l). Use after repro_build (copy mode) or after repro_publish_package (in_place).
+        Copy mode: isolation_root, a parent folder outside the session on a file system compute nodes can see; the package is copied to a new folder there. In-place mode (in_place = the
+        published package folder, e.g. <publish_root>/provenance-repro/<app>): the package is run AS IT IS, no copy; only HOME, USER, TERM and SCALE are passed, plus the venv/limit overrides
+        you give (they are written into the record). Its trace output goes to the package's own OUTPUT_ROOT (config.ini). When the job has finished a verification record
+        <OUTPUT_ROOT>/verification.json is written (job ids, scale, seconds, counts vs expected.json, exit codes, the package's file hashes before and after, whether unchanged); call again
+        with the same in_place after a timeout to complete the record. scale: smoke or baseline. reuse_venv: a venv to reuse instead of building one (batch mode: the app's own venv).
+        moirai_venv: batch mode only, the moirai venv to reuse (needed with reuse_venv). limit: seconds for the whole run; in batch mode the flux batch time limit is derived from it.
+        wait: seconds to wait now; the run goes on in the background (a batch run takes ~8 min) and repro_validate judges it later. Batch mode never starts a service on the login node.
+        Returns {status, job, iso_dir or in_place, mode, not_exercised, log_tail, record (in_place)}."""
         c = P.load(pipeline)
         o = P.stage(c, STAGE)["outputs"]
+        if scale not in ("smoke", "baseline"):
+            return {"status": "error", "error": "scale is smoke or baseline"}
+        if in_place:
+            pk = Path(in_place).resolve()
+            prev = o.get("verify") or {}
+            if prev.get("in_place") == str(pk) and prev.get("scale") == scale and not prev.get("record"):
+                r = J.wait(pipeline, prev["job"], wait)
+                return {"status": r["status"], "job": prev["job"], "in_place": str(pk), "record": _verification_record(pipeline)}
+            if not (pk / "config.ini").is_file() or not (pk / "scripts" / "run_all.sh").is_file():
+                return {"status": "error", "error": f"{pk} is not a package folder (config.ini, scripts/run_all.sh)"}
+            if str(pk).startswith(str(P.work(c).parent.resolve()) + os.sep):
+                return {"status": "error", "error": "in_place must be the published folder, outside the session workspace"}
+            batch = bool(re.search(r"^MODE=batch\s*$", (pk / "config.ini").read_text(), re.M))
+            if batch and bool(reuse_venv) != bool(moirai_venv):
+                return {"status": "error", "error": "batch mode reuses both venvs or neither: give reuse_venv (the app venv) and moirai_venv together"}
+            env = {k: os.environ[k] for k in ("HOME", "USER") if k in os.environ}
+            env.update(TERM="dumb", SCALE=scale)
+            overrides, not_exercised = {}, []
+            if reuse_venv:
+                overrides.update(REUSE_VENV="1", VENV=reuse_venv)
+                not_exercised.append("app environment build and moirai install" if batch else "environment build")
+            if batch:
+                if moirai_venv:
+                    overrides["MOIRAI_VENV"] = moirai_venv
+                overrides[f"LIMIT_MIN_{scale}"] = str(max(1, int(limit) // 60 - 2))
+            env.update(overrides)
+            out_root = cfg_values(pk / "config.ini", dict(env)).get("OUTPUT_ROOT", "")
+            if not out_root or "${" in out_root:
+                return {"status": "error", "error": f"cannot resolve OUTPUT_ROOT from config.ini: {out_root!r}"}
+            (Path(out_root) / "verification.json").unlink(missing_ok=True)
+            hashes = tree_hashes(pk)
+            cmd = f"cd {shlex.quote(str(pk))} && bash scripts/run_all.sh"
+            args = " ".join(shlex.quote(f"{k}={v}") for k, v in env.items())
+            j = J.start(pipeline, STAGE, "in-place-verify", f"env -i {args} bash -lc {shlex.quote(cmd)}\n", str(pk.parent), limit=limit)
+            P.record(pipeline, STAGE, outputs={"verify": {"job": j["id"], "in_place": str(pk), "output_root": out_root, "scale": scale, "mode": "batch" if batch else "generic",
+                                                           "overrides": overrides, "not_exercised": not_exercised, "hashes_before": hashes}}, note=f"in-place run of {scale} from {pk}")
+            r = J.wait(pipeline, j["id"], wait)
+            return {"status": r["status"], "job": j["id"], "rc": r["rc"], "in_place": str(pk), "output_root": out_root, "mode": "batch" if batch else "generic", "not_exercised": not_exercised,
+                    "log_tail": r.get("log_tail", "")[-2500:], "record": _verification_record(pipeline)}
         if not o.get("package"):
             return {"status": "error", "error": "run repro_build first"}
+        if not isolation_root:
+            return {"status": "error", "error": "give isolation_root (copy mode) or in_place (the published package)"}
         batch = o.get("mode") == "batch"
         if batch and bool(reuse_venv) != bool(moirai_venv):
             return {"status": "error", "error": "batch mode reuses both venvs or neither: give reuse_venv (the app venv) and moirai_venv together"}
-        if scale not in ("smoke", "baseline"):
-            return {"status": "error", "error": "scale is smoke or baseline"}
         root = Path(os.path.expanduser(isolation_root)).resolve()
         if str(root).startswith(str(P.work(c).parent.resolve()) + os.sep):
             return {"status": "error", "error": "isolation_root must be outside the session workspace"}
@@ -729,7 +1310,8 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
     @mcp.tool()
     def repro_validate(pipeline: str) -> dict:
         """Validate the package: it holds no user, workspace or job path, its scripts parse and source the loader, a batch package starts no service in 04_run.sh, and an isolated run passed with the
-        original counts. Use before the last gate. Returns the verdict {status, failed, unknown, passed, total}."""
+        original counts. When the package was published (repro_publish_package recorded publish_root) the published tree is checked too, as repro_publish_validate does (group moirai).
+        Use before the last gate. Returns the verdict {status, failed, unknown, passed, total}."""
         c = P.load(pipeline)
         o = P.stage(c, STAGE)["outputs"]
         v = P.Verdict(STAGE)
@@ -752,10 +1334,13 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
             v.inconclusive("isolated_run", "still running")
             return P.finish_validation(pipeline, v)
         v.check("isolated_run", j["rc"] == 0, f"rc={j['rc']}: {j.get('log_tail', '')[-300:]}", "read the log: something the session provided is missing from the package")
-        run = Path(vf["iso_dir"]) / "out" / "run.json"
+        run = (Path(vf["output_root"]) if vf.get("in_place") else Path(vf["iso_dir"]) / "out") / "run.json"
         if v.check("reproduced", run.exists() and json.loads(run.read_text()).get("ok"), run.read_text()[:300] if run.exists() else "no run.json", "the counts differ: is the app deterministic? Is the input the same?"):
             note = f"; NOT exercised: {', '.join(vf['not_exercised'])}" if vf.get("not_exercised") else ""
             P.record(pipeline, STAGE, outputs={"summary": f"reproduced in a clean shell ({vf.get('scale')}): {json.loads(run.read_text())['counts']}{note}"})
+        if o.get("publish_root"):
+            for name, ok, detail, fix in publish_checks(o["package"], o["publish_root"], o.get("publish_app", ""), "moirai", lambda d: T.read(d).counts()):
+                v.check("published_" + name, ok, detail, fix)
         return P.finish_validation(pipeline, v)
 
     @mcp.tool()
@@ -763,3 +1348,140 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
         """Check the batch mode on pure renders, with no cluster: the per-chunk wrapper template, the 04_run text (both scales), the chunk-failure patterns on the real failing run.out text and a clean
         one, the command parse and config render, and that no script holds a user, workspace, session or job path. Use after changing repro_package. Returns {status, line, cases, notes}."""
         return _selftest()
+
+    @mcp.tool()
+    def repro_publish_selftest() -> dict:
+        """Sandbox test of publishing, nothing on the cluster and no real chgperm.sh: a temp publish_root, a fake package and fake traces, a fake chgperm.sh and the caller's own group as the
+        fake group. Covers the dry-run plan (writes nothing; refuses a script outside the root, a bad app name or timestamp), the package copy (hash equal, refuses an existing target, catches a
+        home path), the traces copy and the README / run.json / graph_summary.json made from fake counts (refuses an existing target, bad timestamp, bad kind, no traces, a verification without
+        its record), permission application (only the published folders; refuses a script outside the root) and verification (other bits, wrong group, missing setgid), and the validator checks
+        (changed package, wrong README counts). Use after any change to the publishing code. Returns {status, line, cases}: line is 'repro publish selftest PASS ...' or 'FAIL <cases>'."""
+        return publish_selftest()
+
+    @mcp.tool()
+    def repro_publish_plan(pipeline: str, publish_root: str, app: str = "elmerfold", group_script: str = "", group: str = "moirai", baseline_flux_job: str = "", baseline_timestamp: str = "") -> dict:
+        """DRY RUN of publishing: starts nothing and writes nothing. Use after repro_build, before repro_publish_package. publish_root: the shared root (it must exist; it holds provenance-repro/
+        and provenance-traces/). app: the folder name. group_script: the site's chgperm.sh (must be inside publish_root; default <publish_root>/chgperm.sh). group: its -g value. baseline_flux_job:
+        the flux job id of the baseline batch (default: the id in the baseline stage's job log); baseline_timestamp: YYYYMMDD_HHMMSS override of its job start (default `flux jobs -o {t_run}`
+        of that job). The verification run's job start is known only after repro_verify(in_place) ran (taken from the pipeline record then). Returns {status, problems, targets, runs (kind,
+        timestamp, target, gets), existing (nothing is overwritten), package_bytes, free_bytes, chgperm_commands, unknown_timestamps, baseline_source}; status error when anything exists or is outside publish_root."""
+        c = P.load(pipeline)
+        o = P.stage(c, STAGE)["outputs"]
+        if not o.get("package"):
+            return {"status": "error", "error": "run repro_build first"}
+        base = P.stage(c, "baseline")["outputs"]
+        src = ""
+        ts = baseline_timestamp
+        if not ts:
+            fid = baseline_flux_job
+            if not fid and base.get("job"):
+                fid = _find_flux_id(J.get(pipeline, base["job"], 40000).get("log_tail", ""))
+                src = "flux id from the baseline job log"
+            t = _flux_field(fid, "{t_run}") if fid else ""
+            try:
+                ts = _stamp(float(t))
+                src = f"flux jobs -o {{t_run}} {fid} ({src or 'given'})"
+            except ValueError:
+                ts = ""
+                src = f"unknown: flux id {fid or 'not found'}; pass baseline_flux_job or baseline_timestamp"
+        vf = o.get("verify") or {}
+        vts = vf.get("job_start", "") if vf.get("in_place") else ""
+        r = plan_core(o["package"], publish_root, app, {"baseline": ts, "verification": vts}, group_script or str(Path(publish_root) / "chgperm.sh"), group)
+        r["baseline_source"] = src or "given"
+        if not ts and r["status"] != "error":
+            r["status"] = "needs_input"
+        return r
+
+    @mcp.tool()
+    def repro_publish_package(pipeline: str, publish_root: str, app: str = "elmerfold") -> dict:
+        """Copy final_provenance to <publish_root>/provenance-repro/<app>/ with cp -a (new dir only: refuses an existing target), then compare every file hash with the source and run the
+        portable check (no user, home, session path, job id; scripts parse and source the loader) on the copy. Use after repro_publish_plan said ok. Writes under publish_root only. Records
+        publish_root and app in the stage outputs. Returns {status, target, files, hash_mismatch, portable_findings}; status error when anything differs or is found."""
+        c = P.load(pipeline)
+        o = P.stage(c, STAGE)["outputs"]
+        if not o.get("package"):
+            return {"status": "error", "error": "run repro_build first"}
+        try:
+            r = copy_package_core(o["package"], publish_root, app, P.work(c).parent.resolve())
+        except (ValueError, FileExistsError, OSError) as e:
+            return {"status": "error", "error": str(e)}
+        P.record(pipeline, STAGE, outputs={"publish_root": str(Path(publish_root).resolve()), "publish_app": app, "published_package": r["target"]}, note=f"package published to {r['target']}")
+        return {"status": "ok" if r["ok"] else "error", **r}
+
+    @mcp.tool()
+    def repro_publish_traces(pipeline: str, publish_root: str, app: str, run_dir: str = "", timestamp: str = "", kind: str = "baseline", flux_job: str = "") -> dict:
+        """Copy a run's raw traces (+ .dftindex) and write README.md, run.json, run.sh, graph_summary.json into <publish_root>/provenance-traces/<app>/<timestamp>/ (new dir only). Every
+        count comes from the graph tools (moirai trace reader), never typed; a missing fact reads 'not recorded'. kind=baseline: the pipeline's baseline run (run_dir default: the folder
+        holding the baseline stage's raw traces; run.sh: the baseline stage's run script; timestamp default: its flux job start, as repro_publish_plan). kind=verification: the in-place run of the
+        published package (run_dir default: <OUTPUT_ROOT>/traces/<scale>; run.sh from <OUTPUT_ROOT>/work/<scale>; timestamp default: the job start in the verification record, which is written
+        first if the job has finished; verification.json is copied along). flux_job: the flux id of the run, for job id / runtime / start. Returns {status, target, files, trace_files, trace_bytes, counts}."""
+        c = P.load(pipeline)
+        meta, run_sh, wrapper = {}, "", None
+        try:
+            if kind == "baseline":
+                base = P.stage(c, "baseline")["outputs"]
+                rd = Path(run_dir) if run_dir else Path(base["traces"]).parent
+                fid = flux_job or (_find_flux_id(J.get(pipeline, base["job"], 40000).get("log_tail", "")) if base.get("job") else "")
+                meta.update(queue=base.get("queue"), scale="baseline")
+                run_sh = base.get("run_script") or base.get("batch_script") or ""
+                wrapper = base.get("wrapper")
+            elif kind == "verification":
+                st = _verification_record(pipeline)
+                if st["status"] != "ok":
+                    return {"status": "error", "error": f"the in-place verification is not finished or not started: {st}"}
+                vf = P.stage(P.load(pipeline), STAGE)["outputs"]["verify"]
+                rd = Path(run_dir) if run_dir else Path(vf["output_root"]) / "traces" / vf["scale"]
+                fid = flux_job or vf.get("flux_job", "")
+                timestamp = timestamp or vf.get("job_start", "")
+                meta.update(scale=vf["scale"], queue=cfg_values(Path(vf["in_place"]) / "config.ini", {}).get("QUEUE"))
+                wrapper = str(Path(vf["output_root"]) / "submit_moirai.sh")
+            else:
+                return {"status": "error", "error": f"kind must be one of {KINDS}"}
+            if fid:
+                meta["job_id"] = fid
+                meta["seconds"] = _flux_field(fid, "{runtime}") or None
+                meta["result"] = _flux_field(fid, "{result}") or None
+                t = _flux_field(fid, "{t_run}")
+                if t:
+                    meta["start_iso"] = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(float(t)))
+                    timestamp = timestamp or _stamp(float(t))
+            if not timestamp:
+                return {"status": "error", "error": "no timestamp: pass timestamp or flux_job (the job start)"}
+            pkgcfg = Path(publish_root) / "provenance-repro" / app / "config.ini"
+            if pkgcfg.is_file():
+                cv = cfg_values(pkgcfg, {})
+                meta.update(app_commit=cv.get("APP_REF"), dftracer=cv.get("DFTRACER_SPEC"), moirai=cv.get("MOIRAI_SPEC"), input=cv.get("INCHUNKS") if kind == "baseline" else None)
+            if wrapper and Path(wrapper).is_file():
+                meta["env"] = {m.group(1): _site(m.group(2).strip('"')) for m in re.finditer(r"^export ((?:MOIRAI|DFTRACER)_\w+)=(\S+)", Path(wrapper).read_text(), re.M)}
+            raw = rd / "raw" if (rd / "raw").is_dir() else rd
+            g = T.read(str(raw))
+            summary = g.summary()
+            r = publish_traces_core(publish_root, app, rd, timestamp, kind, summary, meta, run_sh)
+        except (ValueError, FileExistsError, OSError, KeyError, subprocess.CalledProcessError) as e:
+            return {"status": "error", "error": f"{type(e).__name__}: {e}"}
+        P.record(pipeline, STAGE, outputs={f"published_{kind}": r["target"]}, note=f"{kind} traces published to {r['target']}")
+        return {"status": "ok", **r, "counts": g.counts()}
+
+    @mcp.tool()
+    def repro_publish_permissions(publish_root: str, group_script: str, group: str = "moirai", app: str = "elmerfold", timestamps: str = "") -> dict:
+        """Set the group on the PUBLISHED trees only: runs `<group_script> --local -q -g <group> <dir>` on provenance-repro/<app> and on each provenance-traces/<app>/<ts> (timestamps: a comma
+        list; default every run folder holding a run.json), then verifies: group = <group>, directories setgid, group bits equal user bits, no 'other' bits, files without setgid; every exception
+        is returned. Refuses a group_script outside publish_root or a folder outside it. Run only after publish_package and publish_traces. Use once, after the user agreed; it changes
+        permissions under publish_root. Returns {status, ok, ran (dir, rc), exceptions}."""
+        try:
+            r = permissions_core(publish_root, group_script, group, app, [t.strip() for t in timestamps.split(",") if t.strip()] or None)
+        except (ValueError, OSError, subprocess.TimeoutExpired) as e:
+            return {"status": "error", "error": f"{type(e).__name__}: {e}"}
+        return {"status": "ok" if r["ok"] else "error", **r}
+
+    @mcp.tool()
+    def repro_publish_validate(pipeline: str, publish_root: str, app: str = "elmerfold", group: str = "moirai") -> dict:
+        """Validator of the published tree: the package and run folders are complete; the package copy equals final_provenance; the package is portable and its scripts (and each run.sh) parse
+        (bash -n); each run folder's README.md and run.json counts equal the graph tool's counts of its raw traces; a verification record exists, ran in place, passed, and its package hashes equal
+        the published files; permissions are as set by chgperm (group, setgid, g=u, no other). Use after repro_publish_permissions. Returns the verdict {status, failed, unknown, passed, total}."""
+        c = P.load(pipeline)
+        o = P.stage(c, STAGE)["outputs"]
+        v = P.Verdict(STAGE)
+        for name, ok, detail, fix in publish_checks(o.get("package"), publish_root, app, group, lambda d: T.read(d).counts()):
+            v.check(name, ok, detail, fix)
+        return P.finish_validation(pipeline, v)
