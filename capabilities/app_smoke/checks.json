@@ -1,0 +1,191 @@
+[
+ {
+  "tool": "smoke_validate",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "smoke_rc_verdict",
+  "args": {
+   "steps": {
+    "detect": {
+     "status": "ok"
+    },
+    "smoke": {
+     "status": "ok",
+     "rc": 2,
+     "log_tail": "error: Failed to create virtual environment\nflux-job: task(s) exited with exit code 2"
+    }
+   }
+  },
+  "expect": {
+   "contains": "rc=2"
+  }
+ },
+ {
+  "tool": "smoke_rc_verdict",
+  "args": {
+   "steps": {
+    "detect": {
+     "status": "ok"
+    },
+    "smoke": {
+     "status": "ok",
+     "rc": 2,
+     "log_tail": "error: Failed to create virtual environment\nflux-job: task(s) exited with exit code 2"
+    }
+   }
+  },
+  "expect": {
+   "contains": "exited with exit code 2"
+  }
+ },
+ {
+  "tool": "smoke_rc_verdict",
+  "args": {
+   "steps": {
+    "detect": {
+     "status": "ok"
+    },
+    "smoke": {
+     "status": "ok",
+     "rc": 0
+    }
+   }
+  },
+  "expect": {
+   "contains": "pass"
+  }
+ },
+ {
+  "tool": "smoke_build_plan",
+  "args": {
+   "command": "./run.sh",
+   "build_command": "./setup-env.sh",
+   "launcher": "flux run -q pdebug",
+   "build_where": "login"
+  },
+  "expect": {
+   "contains": "big builds go to compute nodes unless the user says so"
+  }
+ },
+ {
+  "tool": "smoke_build_plan",
+  "args": {
+   "command": "./run.sh",
+   "build_command": "./setup-env.sh",
+   "launcher": "flux run -q pdebug",
+   "build_where": "login",
+   "user_approved_login_build": "Build on the login node (I accept the exception to the compute-node rule)"
+  },
+  "expect": {
+   "contains": "# build_where=login"
+  }
+ },
+ {
+  "tool": "smoke_build_plan",
+  "args": {
+   "command": "./run.sh",
+   "build_command": "./setup-env.sh",
+   "launcher": "",
+   "build_where": "compute"
+  },
+  "expect": {
+   "contains": "needs a launcher"
+  }
+ },
+ {
+  "tool": "smoke_data_inventory",
+  "args": {
+   "data_dir": "/nonexistent-moirai-smoke-data-dir"
+  },
+  "expect": {
+   "contains": "does not exist"
+  }
+ },
+ {
+  "tool": "smoke_data_inventory",
+  "args": {
+   "data_dir": ""
+  },
+  "expect": {
+   "contains": "does not exist"
+  }
+ },
+ {
+  "tool": "smoke_data_verdict",
+  "args": {
+   "inventory": {
+    "status": "ok",
+    "data_dir": "/d",
+    "files": 10,
+    "bytes": 1048576,
+    "by_suffix": {
+     ".tar": 10
+    },
+    "paths": [
+     "/d/a.tar"
+    ]
+   }
+  },
+  "expect": {
+   "contains": "data_dir has 10 .tar files, 1048576 bytes"
+  }
+ },
+ {
+  "tool": "smoke_data_verdict",
+  "args": {
+   "inventory": {
+    "status": "ok",
+    "data_dir": "/d",
+    "files": 10,
+    "bytes": 1048576,
+    "by_suffix": {
+     ".tar": 10
+    },
+    "paths": [
+     "/d/a.tar"
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "pass"
+   }
+  }
+ },
+ {
+  "tool": "smoke_data_verdict",
+  "args": {
+   "inventory": {
+    "status": "ok",
+    "data_dir": "/d",
+    "files": 0,
+    "bytes": 0,
+    "by_suffix": {},
+    "paths": []
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "inconclusive"
+   }
+  }
+ },
+ {
+  "tool": "smoke_data_verdict",
+  "args": {
+   "inventory": {
+    "status": "error",
+    "error": "data_dir does not exist"
+   }
+  },
+  "expect": {
+   "contains": "inconclusive"
+  }
+ }
+]

@@ -1,0 +1,13 @@
+{
+ "description": "Generates final_provenance, proves it in a clean shell, and publishes the verified package and its traces to a shared group root; batch mode for apps launched by a generated flux batch run.sh.",
+ "level": "level_2",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "repro_package"
+ ],
+ "permission_mode": "default",
+ "background": true,
+ "instructions": "Run repro_build, repro_verify and repro_validate, and report the counts of the isolated run. Never edit the package by hand. In batch mode run repro_batch_selftest after any change and say what the isolated run did not exercise. To publish: repro_publish_plan (dry run, show it), then only after the user agreed repro_publish_package, repro_verify(in_place), repro_publish_traces (baseline and verification), repro_publish_permissions, repro_publish_validate. Never run chgperm.sh yourself."
+}

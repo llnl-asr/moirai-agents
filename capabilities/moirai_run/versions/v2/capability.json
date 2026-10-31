@@ -1,0 +1,46 @@
+{
+ "name": "moirai_run",
+ "description": "Run the annotated application under moirai-service, a smoke run then the baseline, with live provenance on the Dashboard. Load for the moirai_smoke and baseline stages.",
+ "version": 2,
+ "enabled": true,
+ "stages": [
+  "moirai_smoke",
+  "baseline"
+ ],
+ "tools": [
+  "moirai_smoke_run",
+  "moirai_baseline_run",
+  "moirai_batch_plan",
+  "moirai_trace_hosts",
+  "moirai_run_status",
+  "moirai_run_stop",
+  "moirai_validate"
+ ],
+ "pvc": {
+  "predictor": [
+   "moirai_smoke_run",
+   "moirai_baseline_run",
+   "moirai_batch_plan"
+  ],
+  "validator": [
+   "moirai_validate",
+   "moirai_trace_hosts"
+  ]
+ },
+ "review": [
+  "line 216: writes or deletes files (write_text)"
+ ],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  },
+  {
+   "version": 2,
+   "ts": 1793427193.7803764,
+   "by": "haridev",
+   "proposal": "104127322057",
+   "why": "Elmerfold is launched as `flux batch run.sh` (2 nodes + Rabbit, launch node drained). The old _script runs `flux run -N n moirai-service start`, which cannot place work on the drained launch node and never returns. Adds a batch mode (batch_script, queue) with a generated run-moirai.sh, a dry-run tool, and a per-host trace report."
+  }
+ ]
+}

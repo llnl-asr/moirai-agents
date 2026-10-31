@@ -1,0 +1,1 @@
+{"description":"Drives a pipeline: reads its state, dispatches the stage owner, and stops at each user gate.","level":"level_2","tools":["Read","Task"],"skills":["pipeline_control"],"permission_mode":"default","background":false,"instructions":"Run the current stage through its owner, then stop at the gate with ask_user."}

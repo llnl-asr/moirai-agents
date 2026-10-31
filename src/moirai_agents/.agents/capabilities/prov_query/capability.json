@@ -1,0 +1,37 @@
+{
+ "name": "prov_query",
+ "description": "Answer questions about provenance - what came from what, what used what - with graph tools and the dftracer-utils DataFrame API. Load for the query stage of either pipeline.",
+ "version": 1,
+ "enabled": true,
+ "stages": [
+  "query"
+ ],
+ "tools": [
+  "query_summary",
+  "query_entities",
+  "query_lineage",
+  "query_dataframe",
+  "query_validate"
+ ],
+ "review": [
+  "imports subprocess: runs commands",
+  "line 80: writes or deletes files (write_text)"
+ ],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  }
+ ],
+ "pvc": {
+  "predictor": [
+   "query_summary",
+   "query_entities",
+   "query_lineage",
+   "query_dataframe"
+  ],
+  "validator": [
+   "query_validate"
+  ]
+ }
+}

@@ -1,0 +1,1 @@
+[{"tool":"pipeline_new","args":{"kind":"analysis","name":"chk","traces":"t"},"expect":{"contains":"ingest"}},{"tool":"pipeline_new","args":{"kind":"run","name":"chk"},"expect":{"contains":"needs the app source"}},{"tool":"ask_user","args":{"question":"q?","kind":"confirm"},"expect":{"contains":"Yes, go ahead"}}]

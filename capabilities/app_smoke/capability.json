@@ -1,0 +1,52 @@
+{
+ "name": "app_smoke",
+ "description": "Build and smoke-test the original application, unchanged. Load for the smoke stage of a run pipeline, when the smoke run wrote its data outside the session (data_dir), or for a flux batch smoke job.",
+ "version": 3,
+ "enabled": true,
+ "stages": [
+  "smoke"
+ ],
+ "tools": [
+  "smoke_rc_verdict",
+  "smoke_data_inventory",
+  "smoke_data_verdict",
+  "smoke_build_plan",
+  "smoke_session",
+  "smoke_run",
+  "smoke_validate"
+ ],
+ "pvc": {
+  "predictor": [
+   "smoke_session",
+   "smoke_run",
+   "smoke_build_plan"
+  ],
+  "validator": [
+   "smoke_validate",
+   "smoke_rc_verdict",
+   "smoke_data_inventory",
+   "smoke_data_verdict"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  },
+  {
+   "version": 2,
+   "ts": 1793411491.1125956,
+   "by": "haridev",
+   "proposal": "c921cf1ae905",
+   "why": "Job smoke-933998287 (pipeline elmerfold-prov-20261030-125944) exited rc 2 at 'uv venv --relocatable /p/lustre5/haridev/elmerfold/openfoldenv' (failed to create file .../lib/python3.13/site-packages/_virtualenv.py: No such file or directory, flux-job: task(s) exited with exit code 2) on tuolumne1009, yet the summary said 'smoke passed, wrote 0 file(s)'. Fix: the summary and smoke_validate fail on any non-zero rc (shared helper smoke_rc_verdict); smoke_run gets explicit build_where (compute default; login only with a quoted user approval, recorded in the job log header; login build is a background job and the smoke run stays on compute). Lessons L-b62f45b4, L-d4e3d3ef."
+  },
+  {
+   "version": 3,
+   "ts": 1793419677.732861,
+   "by": "haridev",
+   "proposal": "a69e05330a45",
+   "why": "Job smoke-934167821 (pipeline elmerfold-prov-20261030-125944, flux batch f3hERTfUyEVd, rc 0, 457.4 s) wrote 10 tars to /p/lustre5/haridev/elmerfold/runs/smoke/output/chunk_000000, outside the session; smoke_validate said inconclusive 'ask the user where its data goes' and the user answered with the dir, but neither smoke_run nor smoke_validate could take it, so pipeline_advance stayed blocked. Fix: optional data_dir on smoke_run (recorded) and smoke_validate (argument, else the recorded one) inventoried into outputs_created/summary and judged as the outputs check; pure helpers smoke_data_inventory and smoke_data_verdict carry the checks; rc check kept, batch rc noted."
+  }
+ ]
+}

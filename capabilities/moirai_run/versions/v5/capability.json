@@ -1,0 +1,71 @@
+{
+ "name": "moirai_run",
+ "description": "Run the annotated application under moirai-service, a smoke run then the baseline, with live provenance on the Dashboard; also apps launched by a generated `flux batch` run.sh (Elmerfold): the app job runs a generated per-chunk submit wrapper (submit_moirai.sh, passed to run.sh as --submit-script) that starts moirai-service in its own shell; dry-run first. Load for the moirai_smoke and baseline stages, for 'flux batch', 'run.sh', 'submit-script', 'bulksubmit', 'drain', 'dftracer_service not found', 'spill-only', 'exclusive'.",
+ "version": 5,
+ "enabled": true,
+ "stages": [
+  "moirai_smoke",
+  "baseline"
+ ],
+ "tools": [
+  "moirai_smoke_run",
+  "moirai_baseline_run",
+  "moirai_batch_plan",
+  "moirai_batch_render",
+  "moirai_service_resolve",
+  "moirai_run_status",
+  "moirai_run_stop",
+  "moirai_validate"
+ ],
+ "pvc": {
+  "predictor": [
+   "moirai_smoke_run",
+   "moirai_baseline_run",
+   "moirai_batch_plan",
+   "moirai_batch_render",
+   "moirai_service_resolve"
+  ],
+  "validator": [
+   "moirai_validate"
+  ]
+ },
+ "review": [
+  "imports shutil: copies/removes files",
+  "line 262: writes or deletes files (write_text)",
+  "line 264: writes or deletes files (unlink)"
+ ],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  },
+  {
+   "version": 2,
+   "ts": 1793427193.7803764,
+   "by": "haridev",
+   "proposal": "104127322057",
+   "why": "Elmerfold is launched as `flux batch run.sh` (2 nodes + Rabbit, launch node drained). The old _script runs `flux run -N n moirai-service start`, which cannot place work on the drained launch node and never returns. Adds a batch mode (batch_script, queue) with a generated run-moirai.sh, a dry-run tool, and a per-host trace report."
+  },
+  {
+   "version": 3,
+   "ts": 1793427196.4089513,
+   "by": "haridev",
+   "proposal": "beb5bc3f6965",
+   "why": "User approved a 2-sequence smoke of Elmerfold on 2 nodes + Rabbit (40 min). Elmerfold launches as `flux batch run.sh` and drains the launch node, so the generic `flux run -N n moirai-service start` script cannot place services. Add a batch mode (run.sh rewritten with a moirai preamble and per-node pinned services), a dry-run tool, a dftracer_service resolver, and multi-host validation."
+  },
+  {
+   "version": 4,
+   "ts": 1793427666.8168838,
+   "by": "haridev",
+   "proposal": "d83c22b0b097",
+   "why": "v3 starts the per-node moirai-service with a pinned detached `flux submit --requires=host:<h>`. A flux-submitted service is a scheduled job holding cores, so the app's own `flux bulksubmit --nodes 1 --exclusive` jobs may wait forever. Replaced by ONE mechanism, `flux exec -r all` (setsid nohup, detached), which bypasses the scheduler. Verified on Tuolumne 2026-10-30 (pdebug, 1-node alloc; /p/lustre5/haridev/elmerfold/runs/flux-exec-test.out and flux-exec-env.out): flux exec returns in 1 s, the process survives, `flux resource list` still shows 96 cores free and 0 allocated, `flux run -N1 --exclusive hostname` still runs, flux exec passes the caller's env and cwd, `-r all` reaches every rank, no `flux idset` exists. Same rank set for start, ring wait and stop, so no host drift."
+  },
+  {
+   "version": 5,
+   "ts": 1793427668.2597702,
+   "by": "haridev",
+   "proposal": "fafb14bbbb5e",
+   "why": "Design change decided by the user. v3 rewrote the generated Elmerfold run.sh to start moirai-service as pinned detached `flux submit` jobs after the drain. Verified in the real run.sh (runs/moirai-smoke/run.sh, runs/smoke/run.sh): after the drain, prestage (`flux run --nodes $num_nodes --tasks-per-node 1`), the dbcast `flux run ... --exclusive` steps and the app job (`flux bulksubmit --nodes 1 --exclusive ... submit_smsp.sh '{}' ::: chunk.csv`) all need the whole worker node, so a one-core service job there blocks them until the limit. New design: a per-chunk submit wrapper (submit_moirai.sh) passed to the UNMODIFIED run.sh via --submit-script; it runs on the exclusive worker node, starts moirai-service in the background of its own shell, waits for the ring, runs the original submit_smsp.sh as a child, stops the service, keeps the rc. run.sh is no longer rewritten."
+  }
+ ]
+}

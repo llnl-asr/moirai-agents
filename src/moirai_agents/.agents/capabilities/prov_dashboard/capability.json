@@ -1,0 +1,28 @@
+{
+ "name": "prov_dashboard",
+ "description": "Open the live provenance Dashboard tab on a running or finished trace. Load for the dashboard stage, or when a user wants to see a run's events.",
+ "version": 1,
+ "enabled": true,
+ "stages": [
+  "dashboard"
+ ],
+ "tools": [
+  "dashboard_open",
+  "dashboard_validate"
+ ],
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  }
+ ],
+ "pvc": {
+  "predictor": [
+   "dashboard_open"
+  ],
+  "validator": [
+   "dashboard_validate"
+  ]
+ }
+}

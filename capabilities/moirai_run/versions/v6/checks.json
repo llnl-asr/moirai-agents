@@ -1,0 +1,185 @@
+[
+ {
+  "tool": "moirai_validate",
+  "args": {
+   "pipeline": "nope-1",
+   "stage": "baseline"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "moirai_service_resolve",
+  "args": {
+   "binary": "/nonexistent/moirai-service",
+   "venv": "/nonexistent-venv"
+  },
+  "expect": {
+   "json": {
+    "exists": false,
+    "path": ""
+   }
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "moirai wrapper selftest PASS"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "idempotent=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "mismatch_rewritten=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "mode_755=ok"
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "original": "/src/monomer-structure-prediction/submit_smsp.sh",
+   "env": "/p/env/moirai_env.sh",
+   "stage_dir": "/t/moirai_smoke",
+   "shm_base": "/moirai-agents-t-moirai_smoke",
+   "data_dir": "/data"
+  },
+  "expect": {
+   "contains": "moirai-service start >"
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "original": "/src/monomer-structure-prediction/submit_smsp.sh",
+   "env": "/p/env/moirai_env.sh",
+   "stage_dir": "/t/moirai_smoke",
+   "shm_base": "/moirai-agents-t-moirai_smoke",
+   "data_dir": "/data"
+  },
+  "expect": {
+   "contains": "not visible on"
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "original": "/src/monomer-structure-prediction/submit_smsp.sh",
+   "env": "/p/env/moirai_env.sh",
+   "stage_dir": "/t/moirai_smoke",
+   "shm_base": "/moirai-agents-t-moirai_smoke",
+   "data_dir": "/data"
+  },
+  "expect": {
+   "contains": "trap '_stop' EXIT"
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "original": "/src/monomer-structure-prediction/submit_smsp.sh",
+   "env": "/p/env/moirai_env.sh",
+   "stage_dir": "/t/moirai_smoke",
+   "shm_base": "/moirai-agents-t-moirai_smoke",
+   "data_dir": "/data"
+  },
+  "expect": {
+   "contains": "exit ${rc}"
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "original": "/src/monomer-structure-prediction/submit_smsp.sh",
+   "env": "/p/env/moirai_env.sh",
+   "stage_dir": "/t/moirai_smoke",
+   "shm_base": "/moirai-agents-t-moirai_smoke",
+   "data_dir": "/data"
+  },
+  "expect": {
+   "contains": "/moirai-agents-t-moirai_smoke-${_job}"
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "original": "/src/monomer-structure-prediction/submit_smsp.sh",
+   "env": "/p/env/moirai_env.sh",
+   "stage_dir": "/t/moirai_smoke",
+   "shm_base": "/moirai-agents-t-moirai_smoke",
+   "data_dir": "/data",
+   "run_sh": "#!/bin/bash\n#flux: --nodes 2\nexport ELMER_SRC_DIR=/ann/source\nflux bulksubmit --nodes 1 --exclusive --flags=waitable --job-name '{./}' /t/moirai_smoke/submit_moirai.sh '{}' ::: /r/inchunks/chunk_000000.csv\n",
+   "annotated": "/ann/source",
+   "run_script": "/r/run.sh",
+   "limit": 2400,
+   "queue": "pdebug"
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "minutes": 40,
+    "submit_command": "flux batch -t 40 --queue pdebug /r/run.sh"
+   }
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "original": "/src/monomer-structure-prediction/submit_smsp.sh",
+   "env": "/p/env/moirai_env.sh",
+   "stage_dir": "/t/moirai_smoke",
+   "shm_base": "/moirai-agents-t-moirai_smoke",
+   "data_dir": "/data",
+   "run_sh": "#!/bin/bash\n#flux: --nodes 2\nexport ELMER_SRC_DIR=/ann/source\nflux bulksubmit --nodes 1 --exclusive --job-name '{./}' /ann/source/monomer-structure-prediction/submit_smsp.sh '{}' ::: /r/inchunks/chunk_000000.csv\n",
+   "annotated": "/ann/source",
+   "run_script": "/r/run.sh"
+  },
+  "expect": {
+   "contains": "does not reference the wrapper"
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "original": "/src/monomer-structure-prediction/submit_smsp.sh",
+   "env": "/p/env/moirai_env.sh",
+   "stage_dir": "/t/moirai_smoke",
+   "shm_base": "/moirai-agents-t-moirai_smoke",
+   "data_dir": "/data",
+   "run_sh": "#!/bin/bash\nexport ELMER_SRC_DIR=/orig/source\nflux bulksubmit --nodes 1 /t/moirai_smoke/submit_moirai.sh '{}' ::: /r/c.csv\n",
+   "annotated": "/ann/source",
+   "run_script": "/r/run.sh"
+  },
+  "expect": {
+   "contains": "annotated tree"
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "original": "/o.sh",
+   "env": "/e",
+   "stage_dir": "/t/s",
+   "run_sh": "#!/bin/bash\nflux bulksubmit --nodes 1 /t/s/submit_moirai.sh '{}' /r/c.csv\n",
+   "run_script": "/r/run.sh"
+  },
+  "expect": {
+   "contains": "no ':::' input list"
+  }
+ }
+]

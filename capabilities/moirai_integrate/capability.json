@@ -1,0 +1,60 @@
+{
+ "name": "moirai_integrate",
+ "description": "Wire the annotated application to moirai - environment (with a symlink shim so the app's own Python imports moirai without installing it into the app venv), compile and link flags, build; checks that moirai_env.sh puts the shim and annotated root on PYTHONPATH and that the generated provenance helper imports under the app's Python. Load for the integrate stage.",
+ "version": 3,
+ "enabled": true,
+ "stages": [
+  "integrate"
+ ],
+ "tools": [
+  "integrate_apply",
+  "integrate_env_check",
+  "integrate_validate",
+  "integrate_shim_selftest"
+ ],
+ "pvc": {
+  "predictor": [
+   "integrate_apply"
+  ],
+  "validator": [
+   "integrate_validate",
+   "integrate_env_check",
+   "integrate_shim_selftest"
+  ]
+ },
+ "review": [
+  "imports shutil: copies/removes files",
+  "imports subprocess: runs commands",
+  "line 120: writes or deletes files (unlink)",
+  "line 128: writes or deletes files (unlink)",
+  "line 166: writes or deletes files (write_text)",
+  "line 335: writes or deletes files (write_text)",
+  "line 336: writes or deletes files (write_text)",
+  "line 338: writes or deletes files (write_text)",
+  "line 342: writes or deletes files (write_text)",
+  "line 366: writes or deletes files (write_text)",
+  "line 370: writes or deletes files (write_text)",
+  "line 372: writes or deletes files (write_text)",
+  "line 381: writes or deletes files (write_text)"
+ ],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  },
+  {
+   "version": 2,
+   "ts": 1793423379.4622355,
+   "by": "haridev",
+   "proposal": "5caaf6144e69",
+   "why": "Tool-design fault found at the annotate gate (pipeline elmerfold-prov-20261030-125944): annotate_validate could not pass because it tried to check moirai_env.sh, which this stage writes after annotate. The PYTHONPATH rule belongs here. integrate_validate now checks that moirai_env.sh exists, exports PYTHONPATH naming the annotated root (env_pythonpath), and that `import moirai, _moirai_prov` resolves when that env file is sourced in a clean environment with no inherited PYTHONPATH (env_import); the old python_import check injected PYTHONPATH itself and so never proved the env file works. Adds integrate_env_check so the check is testable without a pipeline. Companion to the prov_annotate proposal that turns helper_on_pythonpath into a deferred note."
+  },
+  {
+   "version": 3,
+   "ts": 1793425631.2459307,
+   "by": "haridev",
+   "proposal": "3d12b7b4020e",
+   "why": "Integrate gate weakness (pipeline elmerfold-prov-20261030-125944): env_import ran the moirai venv's own Python, not the app's (/p/lustre5/haridev/elmerfold/openfoldenv/bin/python), and the moirai venv must stay separate from the app venv. moirai_env.sh put the moirai venv bin FIRST on PATH, so bare `python` was the wrong interpreter, and the whole moirai site-packages on PYTHONPATH would shadow the app's typing_extensions/packaging/setuptools. integrate_apply now takes app_python: it builds <provenance>/moirai_shim with symlinks to only the top-level packages in moirai's requirement closure (derived from importlib.metadata, skipping names the app already provides), exports PYTHONPATH=shim:annotated, appends the moirai bin to PATH end and sets MOIRAI_SERVICE, appends to LD_LIBRARY_PATH. integrate_env_check/integrate_validate import under the app Python in a clean env and fail on import error, numpy/scipy/torch pulled in by the helper import, a shadowed app package, or the moirai bin ahead of the app on PATH. Adds plan_shim (pure) and integrate_shim_selftest."
+  }
+ ]
+}

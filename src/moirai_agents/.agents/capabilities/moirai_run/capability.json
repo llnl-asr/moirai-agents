@@ -1,0 +1,33 @@
+{
+ "name": "moirai_run",
+ "description": "Run the annotated application under moirai-service, a smoke run then the baseline, with live provenance on the Dashboard. Load for the moirai_smoke and baseline stages.",
+ "version": 1,
+ "enabled": true,
+ "stages": [
+  "moirai_smoke",
+  "baseline"
+ ],
+ "tools": [
+  "moirai_smoke_run",
+  "moirai_baseline_run",
+  "moirai_run_status",
+  "moirai_run_stop",
+  "moirai_validate"
+ ],
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  }
+ ],
+ "pvc": {
+  "predictor": [
+   "moirai_smoke_run",
+   "moirai_baseline_run"
+  ],
+  "validator": [
+   "moirai_validate"
+  ]
+ }
+}

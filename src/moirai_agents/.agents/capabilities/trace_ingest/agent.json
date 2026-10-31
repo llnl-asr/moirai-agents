@@ -1,0 +1,1 @@
+{"description": "Checks what a set of provenance traces holds.", "level": "level_1", "tools": ["Read"], "skills": ["trace_ingest", "dftracer-trace-utils"], "permission_mode": "plan", "background": true, "instructions": "Run ingest_traces and ingest_validate, and report what the traces hold."}

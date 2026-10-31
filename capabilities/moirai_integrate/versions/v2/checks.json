@@ -1,0 +1,32 @@
+[
+ {
+  "tool": "integrate_validate",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "integrate_env_check",
+  "args": {
+   "env_file": "/nonexistent-dir/moirai_env.sh",
+   "annotated": "/nonexistent-dir/source",
+   "python": "python3"
+  },
+  "expect": {
+   "json": {
+    "status": "fail",
+    "checks": [
+     {
+      "name": "env_pythonpath",
+      "ok": false,
+      "detail": "/nonexistent-dir/moirai_env.sh does not exist",
+      "fix": "run integrate_apply: it writes moirai_env.sh"
+     }
+    ]
+   }
+  }
+ }
+]

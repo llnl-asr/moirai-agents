@@ -1,0 +1,32 @@
+{
+ "name": "prov_graph",
+ "description": "Build the provenance graph of the baseline run and gate on its health - every artifact produced and rooted in real inputs. Load for the graph stage.",
+ "version": 1,
+ "enabled": true,
+ "stages": [
+  "graph"
+ ],
+ "tools": [
+  "graph_check",
+  "graph_compare",
+  "graph_validate"
+ ],
+ "pvc": {
+  "predictor": [
+   "graph_check",
+   "graph_compare"
+  ],
+  "validator": [
+   "graph_validate"
+  ]
+ },
+ "review": [
+  "line 76: writes or deletes files (write_text)"
+ ],
+ "history": [
+  {
+   "version": 1,
+   "why": "moved from dftracer-agents' provenance mode"
+  }
+ ]
+}

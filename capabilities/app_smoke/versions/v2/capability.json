@@ -1,0 +1,41 @@
+{
+ "name": "app_smoke",
+ "description": "Build and smoke-test the original application, unchanged. Load for the smoke stage of a run pipeline.",
+ "version": 2,
+ "enabled": true,
+ "stages": [
+  "smoke"
+ ],
+ "tools": [
+  "smoke_rc_verdict",
+  "smoke_build_plan",
+  "smoke_session",
+  "smoke_run",
+  "smoke_validate"
+ ],
+ "pvc": {
+  "predictor": [
+   "smoke_session",
+   "smoke_run",
+   "smoke_build_plan"
+  ],
+  "validator": [
+   "smoke_validate",
+   "smoke_rc_verdict"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  },
+  {
+   "version": 2,
+   "ts": 1793411491.1125956,
+   "by": "haridev",
+   "proposal": "c921cf1ae905",
+   "why": "Job smoke-933998287 (pipeline elmerfold-prov-20261030-125944) exited rc 2 at 'uv venv --relocatable /p/lustre5/haridev/elmerfold/openfoldenv' (failed to create file .../lib/python3.13/site-packages/_virtualenv.py: No such file or directory, flux-job: task(s) exited with exit code 2) on tuolumne1009, yet the summary said 'smoke passed, wrote 0 file(s)'. Fix: the summary and smoke_validate fail on any non-zero rc (shared helper smoke_rc_verdict); smoke_run gets explicit build_where (compute default; login only with a quoted user approval, recorded in the job log header; login build is a background job and the smoke run stays on compute). Lessons L-b62f45b4, L-d4e3d3ef."
+  }
+ ]
+}

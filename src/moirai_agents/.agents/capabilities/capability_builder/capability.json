@@ -1,0 +1,36 @@
+{
+ "name": "capability_builder",
+ "description": "Build or change a capability (MCP tool + skill + scoped agent). Load before capability_new or capability_update, for process feedback, and to repair a failing tool.",
+ "version": 1,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "capability_list",
+  "capability_get",
+  "capability_new",
+  "capability_update",
+  "capability_refine",
+  "capability_verify",
+  "capability_apply",
+  "capability_reject",
+  "capability_rollback",
+  "capability_disable",
+  "capability_enable"
+ ],
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  }
+ ],
+ "pvc": {
+  "predictor": [
+   "capability_new",
+   "capability_update"
+  ],
+  "validator": [
+   "capability_verify"
+  ]
+ }
+}

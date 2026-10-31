@@ -1,0 +1,33 @@
+{
+ "name": "lessons",
+ "description": "Record and find lessons. Load before recording anything, and before an unfamiliar task, to look up what is already known.",
+ "version": 1,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "lesson_add",
+  "lesson_list",
+  "lesson_search",
+  "lesson_revise",
+  "lesson_validate",
+  "consolidation_report",
+  "lesson_merge",
+  "consolidation_keep",
+  "lesson_decide"
+ ],
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  }
+ ],
+ "pvc": {
+  "predictor": [
+   "lesson_add"
+  ],
+  "validator": [
+   "lesson_validate"
+  ]
+ }
+}

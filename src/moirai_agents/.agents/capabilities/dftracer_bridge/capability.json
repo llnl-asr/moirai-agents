@@ -1,0 +1,28 @@
+{
+ "name": "dftracer_bridge",
+ "description": "Reach dftracer-agents' tools from a capability.",
+ "version": 1,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "df_status",
+  "df_validate",
+  "df_call",
+  "df_refresh"
+ ],
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  }
+ ],
+ "pvc": {
+  "predictor": [
+   "df_call"
+  ],
+  "validator": [
+   "df_validate"
+  ]
+ }
+}

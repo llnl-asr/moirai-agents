@@ -1,0 +1,43 @@
+{
+ "name": "repro_package",
+ "description": "Generate final_provenance/, the folder that reproduces a run for someone else, and prove it in a clean shell. Load for the package stage.",
+ "version": 1,
+ "enabled": true,
+ "stages": [
+  "package"
+ ],
+ "tools": [
+  "repro_build",
+  "repro_verify",
+  "repro_validate"
+ ],
+ "pvc": {
+  "predictor": [
+   "repro_build",
+   "repro_verify"
+  ],
+  "validator": [
+   "repro_validate"
+  ]
+ },
+ "review": [
+  "imports shutil: copies/removes files",
+  "imports subprocess: runs commands",
+  "line 220: writes or deletes files (rmtree)",
+  "line 224: writes or deletes files (write_text)",
+  "line 225: writes or deletes files (write_text)",
+  "line 229: writes or deletes files (write_text)",
+  "line 253: writes or deletes files (write_text)",
+  "line 254: writes or deletes files (write_text)",
+  "line 255: writes or deletes files (write_text)",
+  "line 258: writes or deletes files (write_text)",
+  "line 259: writes or deletes files (write_text)",
+  "line 263: writes or deletes files (write_text)"
+ ],
+ "history": [
+  {
+   "version": 1,
+   "why": "from dftracer-agents' planner and reproduction packages"
+  }
+ ]
+}

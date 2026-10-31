@@ -1,0 +1,46 @@
+[
+ {
+  "tool": "graph_validate",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "graph_compare_selftest",
+  "args": {},
+  "expect": {
+   "contains": "\"compared_members\": 3"
+  }
+ },
+ {
+  "tool": "graph_compare_selftest",
+  "args": {},
+  "expect": {
+   "contains": "\"member\": \"0/h.hhr\""
+  }
+ },
+ {
+  "tool": "graph_compare_selftest",
+  "args": {},
+  "expect": {
+   "contains": "\"different\": [\"t3.tar::0/x.txt\"]"
+  }
+ },
+ {
+  "tool": "graph_compare_selftest",
+  "args": {},
+  "expect": {
+   "contains": "\"missing\": [\"t4.tar\"]"
+  }
+ },
+ {
+  "tool": "graph_compare_selftest",
+  "args": {},
+  "expect": {
+   "contains": "\"states\": {\"identical\": \"pass\", \"timestamp_only\": \"inconclusive\", \"different\": \"fail\"}"
+  }
+ }
+]

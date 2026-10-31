@@ -1,0 +1,28 @@
+{
+ "name": "trace_ingest",
+ "description": "Take provenance traces from the user and check what they hold. Load for the ingest stage of an analysis pipeline.",
+ "version": 1,
+ "enabled": true,
+ "stages": [
+  "ingest"
+ ],
+ "tools": [
+  "ingest_traces",
+  "ingest_validate"
+ ],
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  }
+ ],
+ "pvc": {
+  "predictor": [
+   "ingest_traces"
+  ],
+  "validator": [
+   "ingest_validate"
+  ]
+ }
+}
