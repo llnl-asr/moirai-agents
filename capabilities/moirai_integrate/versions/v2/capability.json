@@ -1,0 +1,40 @@
+{
+ "name": "moirai_integrate",
+ "description": "Wire the annotated application to moirai - environment, compile and link flags, build. Load for the integrate stage.",
+ "version": 2,
+ "enabled": true,
+ "stages": [
+  "integrate"
+ ],
+ "tools": [
+  "integrate_apply",
+  "integrate_env_check",
+  "integrate_validate"
+ ],
+ "pvc": {
+  "predictor": [
+   "integrate_apply"
+  ],
+  "validator": [
+   "integrate_validate",
+   "integrate_env_check"
+  ]
+ },
+ "review": [
+  "imports subprocess: runs commands",
+  "line 28: writes or deletes files (write_text)"
+ ],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  },
+  {
+   "version": 2,
+   "ts": 1793423379.4622355,
+   "by": "haridev",
+   "proposal": "5caaf6144e69",
+   "why": "Tool-design fault found at the annotate gate (pipeline elmerfold-prov-20261030-125944): annotate_validate could not pass because it tried to check moirai_env.sh, which this stage writes after annotate. The PYTHONPATH rule belongs here. integrate_validate now checks that moirai_env.sh exists, exports PYTHONPATH naming the annotated root (env_pythonpath), and that `import moirai, _moirai_prov` resolves when that env file is sourced in a clean environment with no inherited PYTHONPATH (env_import); the old python_import check injected PYTHONPATH itself and so never proved the env file works. Adds integrate_env_check so the check is testable without a pipeline. Companion to the prov_annotate proposal that turns helper_on_pythonpath into a deferred note."
+  }
+ ]
+}

@@ -23,7 +23,7 @@ if __package__ in (None, ""):
     __package__ = "moirai_agents"
 
 from . import __version__                                           # noqa: E402
-from .core import capstore, selfrefresh                             # noqa: E402
+from .core import capstore, knowledge, selfrefresh                             # noqa: E402
 from .env import group_umask, load_env                              # noqa: E402
 
 PROTOCOL = "2024-11-05"
@@ -68,11 +68,13 @@ def handle(req: dict):
         if not t:
             return {"isError": True, "content": [{"type": "text", "text": f"unknown tool {p.get('name')}"}]}
         try:
-            res = t["fn"](**(p.get("arguments") or {}))
+            res = knowledge.on_failure(p["name"], t["fn"](**(p.get("arguments") or {})))
             text = res if isinstance(res, str) else json.dumps(res, indent=1, default=str)
             return {"content": [{"type": "text", "text": text}]}
         except Exception as e:
-            return {"isError": True, "content": [{"type": "text", "text": f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}"}]}
+            known = knowledge.on_failure(p["name"], {"status": "error", "error": f"{type(e).__name__}: {e}"}).get("known_lessons")
+            text = f"{type(e).__name__}: {e}\n{traceback.format_exc(limit=3)}" + (f"\nknown_lessons: {json.dumps(known)}" if known else "")
+            return {"isError": True, "content": [{"type": "text", "text": text}]}
     raise KeyError(m)
 
 

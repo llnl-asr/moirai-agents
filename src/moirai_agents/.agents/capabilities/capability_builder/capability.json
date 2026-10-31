@@ -9,6 +9,7 @@
   "capability_get",
   "capability_new",
   "capability_update",
+  "capability_refine",
   "capability_verify",
   "capability_apply",
   "capability_reject",

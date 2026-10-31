@@ -67,6 +67,12 @@ def add(capability: str, text: str, source: str = "agent", evidence: str = "", s
     return {"status": rec["status"], "id": lid, "capability": capability}
 
 
+def _unwrite(cap: str, lid: str) -> None:
+    """Take a lesson out of its capability's LESSONS.md."""
+    f = capstore.shadow(cap) / "LESSONS.md"
+    f.write_text(re.sub(rf"\n?- \[{re.escape(lid)}\] .*?(?=\n+- \[L-|\Z)", "", f.read_text(), flags=re.S).rstrip() + "\n")
+
+
 def decide(lid: str, approve: bool, by: str = "") -> dict:
     o = all_lessons().get(lid)
     if not o:
@@ -74,9 +80,56 @@ def decide(lid: str, approve: bool, by: str = "") -> dict:
     if o["status"] != "pending":
         return {"status": "error", "error": f"lesson {lid} is already {o['status']}"}
     if approve:
+        replaced = o.get("supersedes") or []
+        for oid in [replaced] if isinstance(replaced, str) else replaced:
+            old = all_lessons().get(oid)
+            if old and old["status"] in ("applied", "pending"):
+                if old["status"] == "applied":
+                    _unwrite(old["capability"], oid)
+                _append({"id": oid, "status": "superseded", "superseded_by": lid})
         _write(o["capability"], o["text"], lid)
     _append({"id": lid, "status": "applied" if approve else "rejected", "decided_by": by, "decided": round(time.time(), 1)})
     return {"status": "ok", "id": lid, "applied": approve}
+
+
+def merge(ids: List[str], text: str, capability: str, note: str, by: str = "") -> dict:
+    """One pending lesson to replace several: they stay in force until a person accepts it."""
+    rows = all_lessons()
+    missing = [i for i in ids if i not in rows]
+    if len(ids) < 2 or missing:
+        return {"status": "error", "error": f"name at least two known lessons; unknown: {missing}"}
+    if capability not in capstore.all_caps():
+        return {"status": "error", "error": f"unknown capability {capability}"}
+    if not (text or "").strip():
+        return {"status": "error", "error": "a lesson needs its text"}
+    lid = "L-" + uuid.uuid4().hex[:8]
+    _append({"id": lid, "ts": round(time.time(), 1), "capability": capability, "text": text.strip(), "source": "agent", "evidence": "merge of " + ", ".join(ids),
+             "status": "pending", "supersedes": list(ids), "revisions": [{"by": by or "agent", "note": note, "ts": round(time.time(), 1)}]})
+    return {"status": "ok", "id": lid, "replaces": list(ids)}
+
+
+def revise(lid: str, text: str, capability: str = "", note: str = "", approve: bool = False, by: str = "") -> dict:
+    """Refine a lesson. Pending: edited in place. Rejected: reopened with the edit. Applied: a pending correction that replaces it when accepted,
+    or at once with approve. approve is a person's decision: only the panel passes it."""
+    o = all_lessons().get(lid)
+    if not o:
+        return {"status": "error", "error": f"unknown lesson {lid}"}
+    if o["status"] == "superseded":
+        return {"status": "error", "error": f"lesson {lid} was replaced by {o.get('superseded_by')}: refine that one"}
+    text, capability = (text or o["text"]).strip(), capability.strip() or o["capability"]
+    if capability not in capstore.all_caps():
+        return {"status": "error", "error": f"unknown capability {capability}"}
+    if text == o["text"] and capability == o["capability"] and not approve:
+        return {"status": "error", "error": "nothing changed"}
+    revisions = o.get("revisions", []) + [{"by": by or "agent", "note": note, "ts": round(time.time(), 1)}]
+    if o["status"] == "applied":
+        new = "L-" + uuid.uuid4().hex[:8]
+        _append({**{k: v for k, v in o.items() if k not in ("decided_by", "decided")}, "id": new, "ts": round(time.time(), 1), "capability": capability, "text": text, "status": "pending",
+                 "supersedes": lid, "revisions": revisions})
+        lid = new
+    else:
+        _append({"id": lid, "text": text, "capability": capability, "status": "pending", "revisions": revisions})
+    return decide(lid, True, by) if approve else {"status": "ok", "id": lid, "applied": False}
 
 
 def listing(status: Optional[str] = None, limit: int = 200) -> List[dict]:

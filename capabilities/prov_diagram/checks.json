@@ -1,0 +1,78 @@
+[
+ {
+  "tool": "diagram_publish_graph",
+  "args": {
+   "pipeline": "nope-1",
+   "stage": "annotate",
+   "name": "x",
+   "title": "t",
+   "graph": {
+    "nodes": [
+     {
+      "id": "a"
+     }
+    ],
+    "edges": []
+   }
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "diagram_publish_annotation",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "diagram_list",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "diagram_check",
+  "args": {
+   "pipeline": "nope-1",
+   "name": "x"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "diagram_publish_chart",
+  "args": {
+   "pipeline": "nope-1",
+   "stage": "annotate",
+   "name": "c",
+   "title": "t",
+   "kind": "pie",
+   "x": [
+    "a"
+   ],
+   "y": {
+    "n": [
+     1
+    ]
+   }
+  },
+  "expect": {
+   "contains": "use bar, hbar, line or scatter"
+  }
+ },
+ {
+  "tool": "diagram_selftest",
+  "args": {},
+  "expect": {
+   "contains": "nodes=6 edges=6 conditional=1 kinds=generated:2,invalidated:1,relation:1,used:2 artifacts=1 problems=0 bad_graph_faults=2 diff=-n1/+n1/-e1/+e1/r1 chart=ok"
+  }
+ }
+]

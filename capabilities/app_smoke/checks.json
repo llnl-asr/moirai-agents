@@ -97,5 +97,95 @@
   "expect": {
    "contains": "needs a launcher"
   }
+ },
+ {
+  "tool": "smoke_data_inventory",
+  "args": {
+   "data_dir": "/nonexistent-moirai-smoke-data-dir"
+  },
+  "expect": {
+   "contains": "does not exist"
+  }
+ },
+ {
+  "tool": "smoke_data_inventory",
+  "args": {
+   "data_dir": ""
+  },
+  "expect": {
+   "contains": "does not exist"
+  }
+ },
+ {
+  "tool": "smoke_data_verdict",
+  "args": {
+   "inventory": {
+    "status": "ok",
+    "data_dir": "/d",
+    "files": 10,
+    "bytes": 1048576,
+    "by_suffix": {
+     ".tar": 10
+    },
+    "paths": [
+     "/d/a.tar"
+    ]
+   }
+  },
+  "expect": {
+   "contains": "data_dir has 10 .tar files, 1048576 bytes"
+  }
+ },
+ {
+  "tool": "smoke_data_verdict",
+  "args": {
+   "inventory": {
+    "status": "ok",
+    "data_dir": "/d",
+    "files": 10,
+    "bytes": 1048576,
+    "by_suffix": {
+     ".tar": 10
+    },
+    "paths": [
+     "/d/a.tar"
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "pass"
+   }
+  }
+ },
+ {
+  "tool": "smoke_data_verdict",
+  "args": {
+   "inventory": {
+    "status": "ok",
+    "data_dir": "/d",
+    "files": 0,
+    "bytes": 0,
+    "by_suffix": {},
+    "paths": []
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "inconclusive"
+   }
+  }
+ },
+ {
+  "tool": "smoke_data_verdict",
+  "args": {
+   "inventory": {
+    "status": "error",
+    "error": "data_dir does not exist"
+   }
+  },
+  "expect": {
+   "contains": "inconclusive"
+  }
  }
 ]

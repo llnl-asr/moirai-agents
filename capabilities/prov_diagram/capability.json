@@ -1,0 +1,36 @@
+{
+ "name": "prov_diagram",
+ "description": "Show diagrams in the web UI as pipeline outputs: an interactive, editable Cytoscape graph (download SVG, PNG, PDF, JSON) of what an annotation covers or any lineage, and interactive Bokeh charts. Load at the annotate gate to give the user the picture to approve, when a stage's result is easier to see than to read, or when a user asks for a diagram, graph or chart in the UI.",
+ "version": 1,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "diagram_publish_graph",
+  "diagram_publish_annotation",
+  "diagram_publish_chart",
+  "diagram_list",
+  "diagram_check",
+  "diagram_selftest"
+ ],
+ "pvc": {
+  "predictor": [
+   "diagram_publish_annotation",
+   "diagram_publish_graph",
+   "diagram_publish_chart"
+  ],
+  "validator": [
+   "diagram_check",
+   "diagram_selftest"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1793423511.2078276,
+   "by": "haridev",
+   "proposal": "50960773510c",
+   "why": "User feedback in pipeline elmerfold-prov-20261030-125944, stage annotate (fb-3422517747, fb-3422805308 and the messages after it): build the entity-type relationship diagram of what was annotated and give it as evidence for approving the annotation; show diagrams directly in the web UI; make them Bokeh based, downloadable as SVG or PDF and interactive; graphs Cytoscape again, downloadable and editable; the annotate row in Steps links to the diagram as a pipeline output kept for later. prov_annotate.annotate_diagram only emits Mermaid text, which the page cannot draw. The tools here publish structured graphs and Bokeh items that the page serves (api/diagram) and draws (static/diagrams.js)."
+  }
+ ]
+}

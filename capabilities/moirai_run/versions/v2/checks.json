@@ -1,0 +1,129 @@
+[
+ {
+  "tool": "moirai_validate",
+  "args": {
+   "pipeline": "nope-1",
+   "stage": "baseline"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "moirai_batch_plan",
+  "args": {
+   "run_sh_text": "#!/bin/bash\n#flux: --nodes 2\n#flux: --exclusive\n\nexport A=1\ncrit_ranks=$(flux getattr broker.critical-ranks)\ncrit_nodes=$(flux hostlist --nth=\"${crit_ranks}\" local)\nnum_nodes=$(flux hostlist -c local)\nnum_nodes=$((num_nodes - num_crit_nodes))\nflux resource drain \"${crit_ranks}\"\nflux run -N1 hostname\n",
+   "queue": "pbatch",
+   "limit": 2400,
+   "env_file": "/x/moirai_env.sh",
+   "traces_dir": "/x/traces/moirai_smoke"
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "minutes": 40,
+    "nodes": 2,
+    "submit_command": "flux batch -t 40m --queue pbatch /x/traces/moirai_smoke/run-moirai.sh"
+   }
+  }
+ },
+ {
+  "tool": "moirai_batch_plan",
+  "args": {
+   "run_sh_text": "#!/bin/bash\n#flux: --nodes 2\n\ncrit_nodes=a\nnum_nodes=$((num_nodes - num_crit_nodes))\nflux resource drain \"${crit_ranks}\"\n",
+   "queue": "pbatch",
+   "limit": 60,
+   "env_file": "/x/e.sh",
+   "traces_dir": "/x/t"
+  },
+  "expect": {
+   "contains": "MOIRAI_SERVICES_READY"
+  }
+ },
+ {
+  "tool": "moirai_batch_plan",
+  "args": {
+   "run_sh_text": "#!/bin/bash\n#flux: --nodes 2\nexport A=1\nflux run hostname\n",
+   "limit": 60,
+   "env_file": "/x/e.sh",
+   "traces_dir": "/x/t"
+  },
+  "expect": {
+   "contains": "expected exactly one `flux resource drain"
+  }
+ },
+ {
+  "tool": "moirai_batch_plan",
+  "args": {
+   "run_sh_text": "#!/bin/bash\nexport A=1\nflux resource drain \"${crit_ranks}\"\n",
+   "limit": 60,
+   "env_file": "/x/e.sh",
+   "traces_dir": "/x/t"
+  },
+  "expect": {
+   "contains": "no `#flux:` header"
+  }
+ },
+ {
+  "tool": "moirai_batch_plan",
+  "args": {
+   "run_sh_text": "#!/bin/bash\n#flux: --nodes 2\ncrit_nodes=a\nnum_nodes=$((num_nodes - num_crit_nodes))\nflux resource drain \"${crit_ranks}\"\ntrap 'echo x' EXIT\n",
+   "limit": 60,
+   "env_file": "/x/e.sh",
+   "traces_dir": "/x/t"
+  },
+  "expect": {
+   "contains": "already sets a trap"
+  }
+ },
+ {
+  "tool": "moirai_batch_plan",
+  "args": {
+   "run_sh_text": "#!/bin/bash\n#flux: --nodes 2\ncrit_nodes=a\nnum_nodes=$((num_nodes - num_crit_nodes))\nflux resource drain \"${crit_ranks}\"\n",
+   "limit": 60,
+   "env_file": "/x/e.sh",
+   "traces_dir": "/x/t"
+  },
+  "expect": {
+   "contains": "module load mpifileutils/0.11.1"
+  }
+ },
+ {
+  "tool": "moirai_batch_plan",
+  "args": {
+   "run_sh_text": "#!/bin/bash\n#flux: --nodes 2\ncrit_nodes=a\nnum_nodes=$((num_nodes - num_crit_nodes))\nflux resource drain \"${crit_ranks}\"\n",
+   "limit": 60,
+   "env_file": "/x/e.sh",
+   "traces_dir": "/x/t",
+   "dftracer_service": "/real/dftracer_service"
+  },
+  "expect": {
+   "contains": "/real/dftracer_service"
+  }
+ },
+ {
+  "tool": "moirai_trace_hosts",
+  "args": {
+   "files": [
+    "/t/raw/prov-nodeA-11-spill.pfw.gz",
+    "/t/raw/prov-nodeB-22.pfw.gz",
+    "/t/raw/prov-nodeB-23-spill.pfw.gz"
+   ],
+   "hosts": [
+    "nodeA",
+    "nodeB",
+    "nodeC"
+   ]
+  },
+  "expect": {
+   "json": {
+    "spill_only_hosts": [
+     "nodeA"
+    ],
+    "missing_hosts": [
+     "nodeC"
+    ]
+   }
+  }
+ }
+]

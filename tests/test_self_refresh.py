@@ -181,6 +181,19 @@ def test_a_step_links_to_its_state_and_its_run(tmp_path, monkeypatch, web):
         assert e.code == 400
 
 
+def test_a_server_started_inside_a_chat_leaves_that_chat_alive(tmp_path):
+    env = {**os.environ, "MOIRAI_AGENTS_WEBUI_INSTANCE": "the-chat"}
+    chat = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env=env)
+    try:
+        w = Web(tmp_path, MOIRAI_AGENTS_WEBUI_INSTANCE="the-chat")
+        w.stop()
+        time.sleep(0.5)
+        assert chat.poll() is None
+    finally:
+        chat.kill()
+        chat.wait()
+
+
 def test_a_path_opens_directly_without_a_pipeline(tmp_path, web):
     w = web()
     tr = tmp_path / "my traces"

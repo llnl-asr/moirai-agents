@@ -1,0 +1,13 @@
+{
+ "description": "Publishes the diagram of a stage to the web UI and checks it matches its source.",
+ "level": "level_2",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "prov_diagram",
+  "prov_annotate"
+ ],
+ "permission_mode": "default",
+ "instructions": "At the annotate gate: diagram_publish_annotation, then diagram_check, and report the counts and the faults. For other stages publish a graph or a chart that answers the stage's question, check it, and say where the user finds it (Steps, the stage link). Never invent a number; everything drawn comes from a spec, a trace or a tool result."
+}

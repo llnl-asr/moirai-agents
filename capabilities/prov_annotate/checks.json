@@ -1,0 +1,1305 @@
+[
+ {
+  "tool": "annotate_validate",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "annotate_diagram",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "files": {
+    "app.py": "def prepare(path):\n    return path\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "raw"
+    ],
+    "entity_types": [
+     {
+      "type": "raw",
+      "role": "output",
+      "description": "the raw data the app prepares",
+      "id_scheme": "path"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "prepare",
+      "name": "prepare",
+      "generated": [
+       {
+        "type": "raw",
+        "key_expr": "path",
+        "store": "local_disk"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "missing": []
+   },
+   "contains": "@_moirai_prov.activity('prepare', used=[], generated=[('raw', lambda path=None, **_: path, 'LOCAL_DISK', lambda path=None, **_: path)])"
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "import os\n\n\nclass ServerTask:\n    def start(self, seq_id, model):\n        return seq_id + '/' + model\n\n\nclass Server:\n    def run_inference(self, seq_id, model):\n        return seq_id\n\n\nif __name__ == '__main__':\n    ServerTask().start('s1', 'model_1')\n    Server().run_inference('s1', 'model_1')\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "prediction"
+    ],
+    "entity_types": [
+     {
+      "type": "inference_request",
+      "role": "intermediate",
+      "description": "one request from the driver to the inference server",
+      "id_scheme": "seq_id/model"
+     },
+     {
+      "type": "prediction",
+      "role": "output",
+      "description": "the structure predicted for one sequence",
+      "id_scheme": "seq_id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "mode": "patch",
+      "target": "ServerTask.start",
+      "name": "submit_inference",
+      "generated": [
+       {
+        "type": "inference_request",
+        "key_expr": "seq_id + '/' + model",
+        "store": "network"
+       }
+      ]
+     },
+     {
+      "file": "app.py",
+      "function": "Server.run_inference",
+      "name": "run_inference",
+      "used": [
+       {
+        "type": "inference_request",
+        "key_expr": "seq_id + '/' + model",
+        "store": "network"
+       }
+      ],
+      "generated": [
+       {
+        "type": "prediction",
+        "key_expr": "result",
+        "store": "memory"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "missing": [],
+    "unresolved": [],
+    "rc": 0,
+    "events": [
+     {
+      "activity": "submit_inference",
+      "relations": [
+       [
+        "GENERATED",
+        "inference_request",
+        "s1/model_1"
+       ]
+      ]
+     },
+     {
+      "activity": "run_inference",
+      "relations": [
+       [
+        "USED",
+        "inference_request",
+        "s1/model_1"
+       ],
+       [
+        "GENERATED",
+        "prediction",
+        "s1"
+       ]
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "import os\n\n\nclass ServerTask:\n    def start(self, seq_id, model):\n        return seq_id + '/' + model\n\n\nclass Server:\n    def run_inference(self, seq_id, model):\n        return seq_id\n\n\nif __name__ == '__main__':\n    ServerTask().start('s1', 'model_1')\n    Server().run_inference('s1', 'model_1')\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "prediction"
+    ],
+    "entity_types": [
+     {
+      "type": "inference_request",
+      "role": "intermediate",
+      "description": "one request from the driver to the inference server",
+      "id_scheme": "seq_id/model"
+     },
+     {
+      "type": "prediction",
+      "role": "output",
+      "description": "the structure predicted for one sequence",
+      "id_scheme": "seq_id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "mode": "subclass",
+      "base": "ServerTask",
+      "method": "start",
+      "class_name": "ProvServerTask",
+      "rebind": true,
+      "params": [
+       "self",
+       "seq_id",
+       "model"
+      ],
+      "name": "submit_inference",
+      "generated": [
+       {
+        "type": "inference_request",
+        "key_expr": "seq_id + '/' + model",
+        "store": "network"
+       }
+      ]
+     },
+     {
+      "file": "app.py",
+      "function": "Server.run_inference",
+      "name": "run_inference",
+      "used": [
+       {
+        "type": "inference_request",
+        "key_expr": "seq_id + '/' + model",
+        "store": "network"
+       }
+      ],
+      "generated": [
+       {
+        "type": "prediction",
+        "key_expr": "result",
+        "store": "memory"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "missing": [],
+    "rc": 0,
+    "events": [
+     {
+      "activity": "submit_inference",
+      "relations": [
+       [
+        "GENERATED",
+        "inference_request",
+        "s1/model_1"
+       ]
+      ]
+     },
+     {
+      "activity": "run_inference",
+      "relations": [
+       [
+        "USED",
+        "inference_request",
+        "s1/model_1"
+       ],
+       [
+        "GENERATED",
+        "prediction",
+        "s1"
+       ]
+      ]
+     }
+    ]
+   },
+   "contains": "class ProvServerTask(ServerTask)"
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "import os\n\n\ndef merge(path):\n    with open(path, 'w') as f:\n        f.write('m')\n    return path\n\n\ndef cleanup(path):\n    os.remove(path)\n\n\nif __name__ == '__main__':\n    cleanup(merge('m.txt'))\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "merged_msa"
+    ],
+    "entity_types": [
+     {
+      "type": "merged_msa",
+      "role": "output",
+      "description": "the merged alignment written for one sequence",
+      "id_scheme": "path"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "merge",
+      "name": "merge",
+      "generated": [
+       {
+        "type": "merged_msa",
+        "key_expr": "result",
+        "store": "local_disk"
+       }
+      ]
+     },
+     {
+      "file": "app.py",
+      "function": "cleanup",
+      "name": "cleanup",
+      "invalidated": [
+       {
+        "type": "merged_msa",
+        "key_expr": "path",
+        "store": "local_disk"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "rc": 0,
+    "events": [
+     {
+      "activity": "merge",
+      "relations": [
+       [
+        "GENERATED",
+        "merged_msa",
+        "m.txt"
+       ]
+      ]
+     },
+     {
+      "activity": "cleanup",
+      "relations": [
+       [
+        "INVALIDATED",
+        "merged_msa",
+        "m.txt"
+       ]
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "def pipeline(argv):\n    config = argv[0]\n    seed = 7\n    return seed\n\n\nif __name__ == '__main__':\n    pipeline(['preset'])\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "run_seed"
+    ],
+    "entity_types": [
+     {
+      "type": "preset",
+      "role": "parameter",
+      "description": "the model preset chosen for the run",
+      "id_scheme": "preset name"
+     },
+     {
+      "type": "run_seed",
+      "role": "output",
+      "description": "the random seed the run used",
+      "id_scheme": "seed=N"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "mode": "statement",
+      "in": "pipeline",
+      "anchor": "seed = 7",
+      "at": "after",
+      "name": "configure",
+      "used": [
+       {
+        "type": "preset",
+        "key_expr": "config",
+        "store": "memory"
+       }
+      ],
+      "generated": [
+       {
+        "type": "run_seed",
+        "key_expr": "'seed=' + str(seed)",
+        "store": "memory"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "missing": [],
+    "unresolved": [],
+    "rc": 0,
+    "events": [
+     {
+      "activity": "configure",
+      "relations": [
+       [
+        "USED",
+        "preset",
+        "preset"
+       ],
+       [
+        "GENERATED",
+        "run_seed",
+        "seed=7"
+       ]
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "files": {
+    "app.py": "def pipeline(argv):\n    config = argv[0]\n    seed = 7\n    return seed\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "run_seed"
+    ],
+    "entity_types": [
+     {
+      "type": "preset",
+      "role": "parameter",
+      "description": "the model preset chosen for the run",
+      "id_scheme": "preset name"
+     },
+     {
+      "type": "run_seed",
+      "role": "output",
+      "description": "the random seed the run used",
+      "id_scheme": "seed=N"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "mode": "statement",
+      "in": "pipeline",
+      "anchor": "seed = 7",
+      "at": "before",
+      "name": "configure",
+      "used": [
+       {
+        "type": "preset",
+        "key_expr": "config",
+        "store": "memory"
+       }
+      ],
+      "generated": [
+       {
+        "type": "run_seed",
+        "key_expr": "'seed=' + str(seed)",
+        "store": "memory"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok"
+   },
+   "contains": "not in scope there"
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "def predict(seq_id, extra):\n    return {'model_1_ptm': extra}\n\n\nif __name__ == '__main__':\n    predict('s1', 'feat.a3m')\n    predict('s2', '')\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "prediction"
+    ],
+    "entity_types": [
+     {
+      "type": "extra_feature",
+      "role": "reference",
+      "description": "an optional extra feature file of one sequence",
+      "id_scheme": "path"
+     },
+     {
+      "type": "prediction",
+      "role": "output",
+      "description": "the structure predicted for one sequence",
+      "id_scheme": "seq_id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "predict",
+      "name": "predict",
+      "used": [
+       {
+        "type": "extra_feature",
+        "key_expr": "extra",
+        "store": "local_disk",
+        "when": "extra"
+       }
+      ],
+      "generated": [
+       {
+        "type": "prediction",
+        "key_expr": "seq_id",
+        "store": "memory"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "rc": 0,
+    "events": [
+     {
+      "activity": "predict",
+      "relations": [
+       [
+        "USED",
+        "extra_feature",
+        "feat.a3m"
+       ],
+       [
+        "GENERATED",
+        "prediction",
+        "s1"
+       ]
+      ]
+     },
+     {
+      "activity": "predict",
+      "relations": [
+       [
+        "GENERATED",
+        "prediction",
+        "s2"
+       ]
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "def predict(seq_id, extra):\n    return {'model_1_ptm': extra}\n\n\nif __name__ == '__main__':\n    predict('s1', 'feat.a3m')\n    predict('s2', '')\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "prediction"
+    ],
+    "entity_types": [
+     {
+      "type": "input_chunk",
+      "role": "input",
+      "description": "one chunk of the input csv",
+      "id_scheme": "path"
+     },
+     {
+      "type": "sequence",
+      "role": "input",
+      "description": "one query sequence of the run",
+      "id_scheme": "seq_id"
+     },
+     {
+      "type": "prediction",
+      "role": "output",
+      "description": "the structure predicted for one sequence",
+      "id_scheme": "seq_id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "predict",
+      "name": "predict",
+      "generated": [
+       {
+        "type": "prediction",
+        "key_expr": "seq_id",
+        "store": "memory"
+       }
+      ],
+      "relations": [
+       {
+        "relation": "contains",
+        "when": "extra",
+        "subject": {
+         "type": "input_chunk",
+         "key_expr": "extra",
+         "store": "local_disk"
+        },
+        "object": {
+         "type": "sequence",
+         "key_expr": "seq_id",
+         "store": "memory"
+        }
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "rc": 0,
+    "links": [
+     [
+      "CONTAINS",
+      "input_chunk",
+      "feat.a3m",
+      "sequence",
+      "s1"
+     ]
+    ]
+   }
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "files": {
+    "app.py": "def f(x):\n    return x\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "prediction"
+    ],
+    "entity_types": [
+     {
+      "type": "prediction",
+      "role": "output",
+      "description": "the structure predicted for one sequence",
+      "id_scheme": "seq_id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "mode": "statement",
+      "anchor": "no such line",
+      "name": "f",
+      "generated": [
+       {
+        "type": "prediction",
+        "key_expr": "1",
+        "store": "memory"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "error"
+   },
+   "contains": "matched 0"
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "files": {
+    "app.py": "def f(x):\n    return x\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "prediction"
+    ],
+    "entity_types": [
+     {
+      "type": "prediction",
+      "role": "output",
+      "description": "the structure predicted for one sequence",
+      "id_scheme": "seq_id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "mode": "patch",
+      "target": "Nope.start",
+      "name": "f",
+      "generated": [
+       {
+        "type": "prediction",
+        "key_expr": "1",
+        "store": "memory"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "error"
+   },
+   "contains": "not a name"
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "files": {
+    "m.c": "int rm(const char *path) {\n  return 0;\n}\n\nint main(void) {\n  return rm(\"x\");\n}\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "o"
+    ],
+    "entry": "m.c",
+    "entity_types": [
+     {
+      "type": "o",
+      "role": "output",
+      "description": "the output file of the test",
+      "id_scheme": "path"
+     },
+     {
+      "type": "tmp",
+      "role": "intermediate",
+      "description": "a temporary file the test removes",
+      "id_scheme": "path"
+     }
+    ],
+    "activities": [
+     {
+      "file": "m.c",
+      "function": "rm",
+      "name": "rm",
+      "generated": [
+       {
+        "type": "o",
+        "key_expr": "path",
+        "store": "local_disk"
+       }
+      ],
+      "invalidated": [
+       {
+        "type": "tmp",
+        "key_expr": "path",
+        "store": "local_disk",
+        "when": "path != NULL"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "missing": []
+   },
+   "contains": "if (path != NULL) { moirai_activity_relate_entity(moirai_rm, MOIRAI_REL_INVALIDATED"
+  }
+ },
+ {
+  "tool": "annotate_diagram_preview",
+  "args": {
+   "spec": {
+    "scientific_artifacts": [
+     "merged"
+    ],
+    "entity_types": [
+     {
+      "type": "raw",
+      "role": "input",
+      "description": "the raw input of the test",
+      "id_scheme": "path"
+     },
+     {
+      "type": "cfg",
+      "role": "parameter",
+      "description": "the configuration of the test",
+      "id_scheme": "name"
+     },
+     {
+      "type": "tmp",
+      "role": "intermediate",
+      "description": "a temporary file the test removes",
+      "id_scheme": "path"
+     },
+     {
+      "type": "merged",
+      "role": "output",
+      "description": "the merged file the test writes",
+      "id_scheme": "path"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "merge",
+      "name": "merge",
+      "used": [
+       {
+        "type": "raw",
+        "key_expr": "a"
+       },
+       {
+        "type": "cfg",
+        "key_expr": "b"
+       }
+      ],
+      "generated": [
+       {
+        "type": "merged",
+        "key_expr": "result"
+       }
+      ],
+      "relations": [
+       {
+        "relation": "contains",
+        "when": "a",
+        "subject": {
+         "type": "raw",
+         "key_expr": "a"
+        },
+        "object": {
+         "type": "tmp",
+         "key_expr": "a"
+        }
+       }
+      ]
+     },
+     {
+      "file": "app.py",
+      "function": "cleanup",
+      "name": "cleanup",
+      "invalidated": [
+       {
+        "type": "merged",
+        "key_expr": "p"
+       },
+       {
+        "type": "tmp",
+        "key_expr": "p",
+        "when": "p"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "counts": {
+     "types": 4,
+     "activities": 2,
+     "edges": 6,
+     "type_nodes_drawn": 4,
+     "edges_drawn": 6,
+     "conditional_edges": 2,
+     "edges_by_kind": {
+      "used": 2,
+      "generated": 1,
+      "invalidated": 2,
+      "updated": 0,
+      "entity_relation": 1
+     }
+    },
+    "marks": {
+     "invalidated": 2,
+     "updated": 0,
+     "conditional": 2
+    },
+    "labels_dropped": 0,
+    "collapsed": []
+   },
+   "contains": "invalidated when"
+  }
+ },
+ {
+  "tool": "annotate_diagram_preview",
+  "args": {
+   "spec": {
+    "scientific_artifacts": [
+     "merged"
+    ],
+    "entity_types": [
+     {
+      "type": "merged",
+      "role": "output",
+      "description": "the merged file the test writes",
+      "id_scheme": "path"
+     },
+     {
+      "type": "tmp",
+      "role": "intermediate",
+      "description": "a temporary file the test removes",
+      "id_scheme": "path"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "merge",
+      "name": "merge",
+      "generated": [
+       {
+        "type": "merged",
+        "key_expr": "result"
+       }
+      ]
+     },
+     {
+      "file": "app.py",
+      "function": "cleanup",
+      "name": "cleanup",
+      "invalidated": [
+       {
+        "type": "merged",
+        "key_expr": "p"
+       },
+       {
+        "type": "tmp",
+        "key_expr": "p",
+        "when": "p"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "contains": "c0392b"
+  }
+ },
+ {
+  "tool": "annotate_diagram_preview",
+  "args": {
+   "spec": {
+    "scientific_artifacts": [
+     "prediction"
+    ],
+    "entity_types": [
+     {
+      "type": "inference_request",
+      "role": "intermediate",
+      "description": "one request from the driver to the server",
+      "id_scheme": "seq_id/model"
+     },
+     {
+      "type": "prediction",
+      "role": "output",
+      "description": "the structure predicted for one sequence",
+      "id_scheme": "seq_id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "tasks.py",
+      "mode": "patch",
+      "target": "ServerTask.start",
+      "name": "submit_inference",
+      "generated": [
+       {
+        "type": "inference_request",
+        "key_expr": "seq_id",
+        "store": "network"
+       }
+      ]
+     },
+     {
+      "file": "server.py",
+      "function": "Server.run_inference",
+      "name": "run_inference",
+      "used": [
+       {
+        "type": "inference_request",
+        "key_expr": "seq_id",
+        "store": "network"
+       }
+      ],
+      "generated": [
+       {
+        "type": "prediction",
+        "key_expr": "result"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "non_wrap": [
+     {
+      "activity": "submit_inference",
+      "file": "tasks.py",
+      "mode": "patch",
+      "target": "patch ServerTask.start"
+     }
+    ],
+    "counts": {
+     "types": 2,
+     "activities": 2,
+     "edges": 3,
+     "activity_modes": {
+      "patch": 1,
+      "wrap": 1
+     }
+    }
+   },
+   "contains": "patch ServerTask.start"
+  }
+ },
+ {
+  "tool": "annotate_diagram_preview",
+  "args": {
+   "spec": {
+    "scientific_artifacts": [],
+    "entity_types": [
+     {
+      "type": "prediction_model_1",
+      "role": "output",
+      "description": "the prediction of model 1",
+      "id_scheme": "seq_id"
+     },
+     {
+      "type": "prediction_model_2",
+      "role": "output",
+      "description": "the prediction of model 2",
+      "id_scheme": "seq_id"
+     },
+     {
+      "type": "prediction_model_3",
+      "role": "output",
+      "description": "the prediction of model 3",
+      "id_scheme": "seq_id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "predict",
+      "name": "predict",
+      "generated": [
+       {
+        "type": "prediction_model_1",
+        "key_expr": "s"
+       },
+       {
+        "type": "prediction_model_2",
+        "key_expr": "s"
+       },
+       {
+        "type": "prediction_model_3",
+        "key_expr": "s"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "counts": {
+     "types": 3,
+     "activities": 1,
+     "edges": 3,
+     "type_nodes_drawn": 1,
+     "edges_drawn": 1
+    },
+    "collapsed": [
+     {
+      "node": "prediction_model_*",
+      "group": "output",
+      "types": [
+       "prediction_model_1",
+       "prediction_model_2",
+       "prediction_model_3"
+      ]
+     }
+    ],
+    "labels_dropped": 0
+   },
+   "contains": "generated x3"
+  }
+ },
+ {
+  "tool": "annotate_diagram_preview",
+  "args": {
+   "budget": 0,
+   "spec": {
+    "scientific_artifacts": [],
+    "entity_types": [
+     {
+      "type": "prediction_model_1",
+      "role": "output",
+      "description": "the prediction of model 1",
+      "id_scheme": "seq_id"
+     },
+     {
+      "type": "prediction_model_2",
+      "role": "output",
+      "description": "the prediction of model 2",
+      "id_scheme": "seq_id"
+     },
+     {
+      "type": "seq",
+      "role": "input",
+      "description": "one query sequence of the run",
+      "id_scheme": "seq_id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "predict",
+      "name": "predict",
+      "used": [
+       {
+        "type": "seq",
+        "key_expr": "s"
+       }
+      ],
+      "generated": [
+       {
+        "type": "prediction_model_1",
+        "key_expr": "s"
+       },
+       {
+        "type": "prediction_model_2",
+        "key_expr": "s"
+       }
+      ],
+      "invalidated": [
+       {
+        "type": "seq",
+        "key_expr": "s",
+        "when": "s"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "counts": {
+     "types": 3,
+     "activities": 1,
+     "edges": 4,
+     "type_nodes_drawn": 2,
+     "edges_drawn": 3
+    },
+    "labels_dropped": 2
+   },
+   "contains": "over the budget of 0"
+  }
+ },
+ {
+  "tool": "annotate_validate_preview",
+  "args": {
+   "files": {
+    "app.py": "def prepare(path):\n    return path\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "raw"
+    ],
+    "entity_types": [
+     {
+      "type": "raw",
+      "role": "output",
+      "description": "the raw data the app prepares",
+      "id_scheme": "path"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "prepare",
+      "name": "prepare",
+      "generated": [
+       {
+        "type": "raw",
+        "key_expr": "path",
+        "store": "local_disk"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "pass",
+    "failed": [],
+    "unknown": []
+   },
+   "contains": "helper_on_pythonpath"
+  }
+ },
+ {
+  "tool": "annotate_validate_preview",
+  "args": {
+   "env_text": "export PATH=/usr/bin\n",
+   "files": {
+    "app.py": "def prepare(path):\n    return path\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "raw"
+    ],
+    "entity_types": [
+     {
+      "type": "raw",
+      "role": "output",
+      "description": "the raw data the app prepares",
+      "id_scheme": "path"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "prepare",
+      "name": "prepare",
+      "generated": [
+       {
+        "type": "raw",
+        "key_expr": "path",
+        "store": "local_disk"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "fail",
+    "deferred": []
+   },
+   "contains": "does not export PYTHONPATH"
+  }
+ },
+ {
+  "tool": "annotate_validate_preview",
+  "args": {
+   "env_text": "export PYTHONPATH={annotated}\n",
+   "files": {
+    "app.py": "def prepare(path):\n    return path\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "raw"
+    ],
+    "entity_types": [
+     {
+      "type": "raw",
+      "role": "output",
+      "description": "the raw data the app prepares",
+      "id_scheme": "path"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "prepare",
+      "name": "prepare",
+      "generated": [
+       {
+        "type": "raw",
+        "key_expr": "path",
+        "store": "local_disk"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "pass",
+    "deferred": []
+   }
+  }
+ }
+]

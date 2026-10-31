@@ -42,6 +42,12 @@ def register(mcp):
         return S.propose(name, tool_code, skill_md, a, c, description or (ex[2].get("description", "") if ex else ""), why, kind="update", pvc=pvc)
 
     @mcp.tool()
+    def capability_refine(id: str, note: str, skill_md: str = "", tool_code: str = "") -> dict:
+        """Refine a pending proposal as the user asked: it is validated again and replaces the old one, which stays pending if this one is refused. Nothing goes live.
+        note: what was wrong. skill_md, tool_code: the whole new text; leave out what stays. Returns {status, id} of the new proposal, or {status: error, problems}."""
+        return S.refine(id, skill_md, tool_code, note)
+
+    @mcp.tool()
     def capability_verify(name: str = "", id: str = "") -> dict:
         """Re-run every validator and the sandboxed checks on a capability (name) or a proposal (id). Use when one misbehaves.
         Returns {status, target, problems, warnings, checks}."""

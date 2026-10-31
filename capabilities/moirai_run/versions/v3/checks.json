@@ -1,0 +1,118 @@
+[
+ {
+  "tool": "moirai_validate",
+  "args": {
+   "pipeline": "nope-1",
+   "stage": "baseline"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "run_sh": "#!/bin/bash\n#flux: --nodes 2\n#flux: --exclusive\n#flux: --output /x/run.out\n\nexport A=1\ncrit_ranks=$(flux getattr broker.critical-ranks)\ncrit_nodes=$(flux hostlist --nth=\"${crit_ranks}\" local)\nnum_crit_nodes=$(flux hostlist --nth=\"${crit_ranks}\" -c local)\nnum_nodes=$(flux hostlist -c local)\nnum_nodes=$((num_nodes - num_crit_nodes))\nflux resource drain \"${crit_ranks}\"\nflux run --nodes \"$num_nodes\" --exclusive hostname\necho BODY\n",
+   "env": "/p/env/moirai_env.sh",
+   "traces": "/t/moirai_smoke/raw",
+   "queue": "pdebug",
+   "limit": 2400
+  },
+  "expect": {
+   "contains": "flux submit -N1 -n1 -c1 --requires=host:"
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "run_sh": "#!/bin/bash\n#flux: --nodes 2\n#flux: --exclusive\n\nexport A=1\ncrit_ranks=$(flux getattr broker.critical-ranks)\ncrit_nodes=$(flux hostlist --nth=\"${crit_ranks}\" local)\nnum_crit_nodes=$(flux hostlist --nth=\"${crit_ranks}\" -c local)\nnum_nodes=$(flux hostlist -c local)\nnum_nodes=$((num_nodes - num_crit_nodes))\nflux resource drain \"${crit_ranks}\"\necho BODY\n",
+   "env": "/p/env/moirai_env.sh",
+   "traces": "/t/moirai_smoke/raw",
+   "queue": "pdebug",
+   "limit": 2400
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "preamble_after_line": 3,
+    "services_after_original_line": 11,
+    "minutes": 40,
+    "submit_command": "flux batch -t 40 --queue pdebug /t/moirai_smoke/run-moirai.sh",
+    "warnings": [
+     "no service venv given: dftracer_service is looked up only relative to the moirai-service binary"
+    ]
+   }
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "run_sh": "#!/bin/bash\n#flux: --nodes 2\n\nexport A=1\necho no drain section here\n",
+   "env": "/p/env/moirai_env.sh",
+   "traces": "/t/moirai_smoke/raw"
+  },
+  "expect": {
+   "contains": "run.sh changed shape"
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "run_sh": "#!/bin/bash\nexport A=1\ncrit_ranks=1\n",
+   "env": "/e",
+   "traces": "/t/raw"
+  },
+  "expect": {
+   "contains": "no '#flux:' header lines"
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "run_sh": "#!/bin/bash\n#flux: --nodes 2\n\nexport A=1\ncrit_ranks=$(flux getattr broker.critical-ranks)\ncrit_nodes=$(flux hostlist --nth=\"${crit_ranks}\" local)\nnum_nodes=$((num_nodes - num_crit_nodes))\nflux resource drain \"${crit_ranks}\"\nflux resource drain 1\n",
+   "env": "/e",
+   "traces": "/t/raw"
+  },
+  "expect": {
+   "contains": "found 2"
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "run_sh": "#!/bin/bash\n#flux: --nodes 2\n\nexport A=1\ncrit_ranks=$(flux getattr broker.critical-ranks)\ncrit_nodes=$(flux hostlist --nth=\"${crit_ranks}\" local)\nnum_nodes=$((num_nodes - num_crit_nodes))\nflux resource drain \"${crit_ranks}\"\nflux run --exclusive hostname\n",
+   "env": "/e",
+   "traces": "/t/raw",
+   "limit": 90
+  },
+  "expect": {
+   "contains": "UNCONFIRMED, may hang"
+  }
+ },
+ {
+  "tool": "moirai_batch_render",
+  "args": {
+   "run_sh": "#!/bin/bash\n#flux: --nodes 2\n\nexport A=1\ncrit_ranks=$(flux getattr broker.critical-ranks)\ncrit_nodes=$(flux hostlist --nth=\"${crit_ranks}\" local)\nnum_nodes=$((num_nodes - num_crit_nodes))\nflux resource drain \"${crit_ranks}\"\n",
+   "env": "/e",
+   "traces": "/t/raw",
+   "limit": 90,
+   "queue": "pbatch"
+  },
+  "expect": {
+   "contains": "flux batch -t 2 --queue pbatch /t/run-moirai.sh"
+  }
+ },
+ {
+  "tool": "moirai_service_resolve",
+  "args": {
+   "binary": "/nonexistent/moirai-service",
+   "venv": "/nonexistent-venv"
+  },
+  "expect": {
+   "json": {
+    "exists": false,
+    "path": ""
+   }
+  }
+ }
+]

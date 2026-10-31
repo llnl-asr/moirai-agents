@@ -7,8 +7,8 @@ COMMON = (
     " Everything here is a capability: an MCP tool, a skill with rules, constraints, corner cases, self-heal and self-learn sections, and a background agent with a "
     "fixed scope. Look before acting: knowledge_search, then capability_list, and load the skill of what you are about to use, and read its LESSONS.md. Deterministic or repeated work is a "
     "capability, never ad-hoc shell; a failing tool is repaired with capability_update, never worked around. Questions and every stage gate go through the "
-    "mcp__moirai__ask_user tool: call it, then END YOUR TURN; the answer arrives as the next message. Messages prefixed '[Feedback while you were working]' are corrections: adjust "
-    "at once. Give every Bash call a specific description. Never invent results: every number comes from a tool. Solve problems you meet instead of listing them; ask the user only "
+    "mcp__moirai__ask_user tool: call it, then END YOUR TURN; the answer arrives as the next message, unless the result says answered by auto mode: then continue at once. Messages prefixed '[Feedback while you were working]' are corrections: adjust "
+    "at once. A person reads what you write: lead with the result, use short Markdown bullets, tables and headings, and put long detail in ask_user's details, never in one paragraph. Give every Bash call a specific description. Never invent results: every number comes from a tool. Solve problems you meet instead of listing them; ask the user only "
     "for a fact or a choice that is theirs. dftracer-agents' skills, agents and mcp__dftracer__* tools are available: reuse them, and keep all work in the session under workspaces/.")
 
 MODES = {

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from moirai_agents.core import knowledge as K
+from moirai_agents.core import learning as L
 
 needs_graphify = pytest.mark.skipif(not K._graphify(), reason="graphify is not installed")
 
@@ -100,3 +101,39 @@ def test_a_memory_must_be_well_formed(learnt):
 def test_read_stays_in_the_graph(learnt, tmp_path):
     (K._root() / "stage").mkdir(parents=True)
     assert K.read("../../../../etc/passwd")["status"] == "error"
+
+
+def lesson_on_demo(learnt, text):
+    (learnt / "LESSONS.md").write_text(f"# Lessons: system_demo\n\n- [L-1234abcd] {text}\n\n- [L-5678abcd] something unrelated about zebras\n")
+
+
+@needs_graphify
+def test_a_lesson_is_found_through_the_graph_and_read_alone(learnt):
+    lesson_on_demo(learnt, "uv venv fails on lustre from a compute node, build on the login node")
+    hit = next(r for r in K.lessons("uv venv fails with No such file on lustre")["results"] if "source" in r)
+    assert hit["source"] == "capabilities/system_demo/LESSONS.md" and "L-1234abcd" in hit["title"]
+    text = K.read(hit["source"], hit["line"])["text"]
+    assert "login node" in text and "zebras" not in text
+
+
+@needs_graphify
+def test_only_lesson_sections_of_a_skill_count(learnt):
+    (learnt / "SKILL.md").write_text("---\nname: system_demo\n---\n\n## Scheduler\n\n### flux queue basics\nx\n\n## Lessons\n\n### flux queue hangs on pall\ny\n")
+    titles = [r.get("title", "") for r in K.lessons("flux queue")["results"]]
+    assert any("pall" in t for t in titles) and not any("basics" in t for t in titles)
+
+
+def test_a_failure_carries_the_closest_lessons(learnt, monkeypatch):
+    monkeypatch.setattr(K, "_graphify", lambda: None)
+    L.add("lessons", "the moirai venv must never live on NFS", "user")
+    r = K.on_failure("moirai_env_check", {"status": "error", "error": "moirai venv missing on NFS"})
+    assert "NFS" in r["known_lessons"][0]["text"] and "before_exploring" in r
+    r = K.on_failure("job_status", {"status": "done", "rc": 2, "log_tail": "moirai venv on NFS failed"})
+    assert r["known_lessons"]
+
+
+def test_success_and_the_normal_flow_carry_nothing(learnt, monkeypatch):
+    monkeypatch.setattr(K, "_graphify", lambda: None)
+    L.add("lessons", "the moirai venv must never live on NFS", "user")
+    for tool, res in (("job_status", {"status": "done", "rc": 0}), ("explore_run", {"status": "ok"}), ("pipeline_advance", {"status": "error", "error": "moirai NFS"})):
+        assert K.on_failure(tool, res) == res

@@ -13,6 +13,7 @@ SKIP = {".git", "__pycache__", "build", ".venv", "venv"}
 RULE = "big builds go to compute nodes unless the user says so"
 RC_KEYS = ("rc", "returncode", "return_code", "exit_code", "exitcode", "exit_status")
 TAIL_KEYS = ("log_tail", "stderr", "stdout", "output", "error")
+MAX_PATHS = 200
 
 
 def _inventory(root):
@@ -27,6 +28,39 @@ def _inventory(root):
             except OSError:
                 continue
     return out
+
+
+def _data_inventory(data_dir):
+    """Pure-ish: everything under a user-named data directory. {status: ok, data_dir, files, bytes, by_suffix, paths} or {status: error, error}."""
+    d = (data_dir or "").strip()
+    if not d or not os.path.isdir(d):
+        return {"status": "error", "error": f"data_dir {d!r} does not exist or is not a directory: pass the directory the user named, quoting their answer"}
+    files, total, by, paths = 0, 0, {}, []
+    for dp, dn, fn in os.walk(d):
+        dn.sort()
+        for f in sorted(fn):
+            p = os.path.join(dp, f)
+            try:
+                size = os.stat(p).st_size
+            except OSError:
+                continue
+            files += 1
+            total += size
+            suf = Path(f).suffix.lower() or "(no suffix)"
+            by[suf] = by.get(suf, 0) + 1
+            if len(paths) < MAX_PATHS:
+                paths.append(p)
+    return {"status": "ok", "data_dir": d, "files": files, "bytes": total, "by_suffix": by, "paths": paths}
+
+
+def _suffix_text(by):
+    return ", ".join(f"{n} {s}" for s, n in sorted(by.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def _data_summary(inv):
+    if not inv.get("files"):
+        return "data_dir is empty"
+    return f"data_dir has {_suffix_text(inv.get('by_suffix') or {})} files, {inv['bytes']} bytes"
 
 
 def _rc_of(step):
@@ -122,6 +156,21 @@ def register(mcp):
                 "fix": "read the log tail, fix the build or command (never the source), re-run; a file-creation error under python3.N/site-packages on a compute node is the site rule in the skill"}
 
     @mcp.tool()
+    def smoke_data_inventory(data_dir: str) -> dict:
+        """List the data a smoke run wrote into a directory the user named (outside the session). Use when smoke_validate says 'ask the user where its data goes' and they
+        answered, or to look before passing data_dir. data_dir: absolute path of that directory. Returns {status: ok, data_dir, files, bytes, by_suffix: {suffix: count},
+        paths (first 200)} or {status: error, error} when the directory does not exist."""
+        return _data_inventory(data_dir)
+
+    @mcp.tool()
+    def smoke_data_verdict(inventory: dict) -> dict:
+        """Judge a data_dir inventory (the output of smoke_data_inventory) as the 'outputs' check: pass when it holds at least one file, inconclusive when it is empty or absent
+        (an empty data_dir is not proof the run wrote data). Returns {status: pass|inconclusive, summary, detail}."""
+        if not isinstance(inventory, dict) or inventory.get("status") == "error" or not inventory.get("files"):
+            return {"status": "inconclusive", "summary": "data_dir is empty", "detail": "the data_dir holds no file: ask the user where the run really wrote its data"}
+        return {"status": "pass", "summary": _data_summary(inventory), "detail": ""}
+
+    @mcp.tool()
     def smoke_build_plan(command: str, build_command: str = "", launcher: str = "", build_where: str = "compute", user_approved_login_build: str = "") -> dict:
         """Dry-run of smoke_run's placement rule: where the environment build runs and the job script it would write, without starting anything. Use to check an exception before
         asking. build_where: 'compute' (default; the build goes through launcher) or 'login' (ONLY with user_approved_login_build, the user's own words; rule: big builds go to
@@ -139,11 +188,12 @@ def register(mcp):
 
     @mcp.tool()
     def smoke_run(pipeline: str, build_command: str = "", command: str = "", cwd: str = "", launcher: str = "", wait: int = 600,
-                  build_where: str = "compute", user_approved_login_build: str = "") -> dict:
+                  build_where: str = "compute", user_approved_login_build: str = "", data_dir: str = "") -> dict:
         """Build and run the original app on the small test, in one background job (jobs.start). Use after explore. build_command: skip if none. command: override the
         pipeline's test command. cwd: where it runs (default the app). launcher: e.g. 'flux run -q pdebug' for a compute node; required for a build. build_where: 'compute'
         (default: the build goes through launcher) or 'login' (the build runs bare on the login node, the smoke run still goes through launcher); 'login' is accepted ONLY with
-        user_approved_login_build, the user's own words, because big builds go to compute nodes unless the user says so; both are written in the job log header. wait: seconds
+        user_approved_login_build, the user's own words, because big builds go to compute nodes unless the user says so; both are written in the job log header. data_dir: optional
+        absolute directory where the app writes its data when that is outside cwd (must exist); it is recorded in the stage outputs and smoke_validate reuses it. wait: seconds
         to wait (a longer run keeps going; check with job_status, then smoke_validate). Returns {job, status, rc, log_tail} or {status: error, error}."""
         c = P.load(pipeline)
         cmd = command or c["command"]
@@ -151,25 +201,48 @@ def register(mcp):
         plan = _plan(build_command, cmd, launcher, build_where, user_approved_login_build)
         if plan["status"] != "ok":
             return plan
+        if data_dir.strip() and not os.path.isdir(data_dir.strip()):
+            return _data_inventory(data_dir)
         before = _inventory(wd)
         j = J.start(pipeline, STAGE, "smoke", plan["script"], wd)
         P.record(pipeline, STAGE, status="running", outputs={"job": j["id"], "command": cmd, "build_command": build_command, "cwd": wd, "launcher": launcher, "build_where": build_where,
-                                                              "user_approved_login_build": user_approved_login_build.strip(),
+                                                              "user_approved_login_build": user_approved_login_build.strip(), "data_dir": data_dir.strip(),
                                                               "before": {k: v[0] for k, v in before.items()}, "started": time.time()}, note=f"running ({build_where} build): {cmd}")
         r = J.wait(pipeline, j["id"], wait)
         return {"job": j["id"], "status": r["status"], "rc": r["rc"], "elapsed": r["elapsed"], "log_tail": r.get("log_tail", "")[-3000:]}
 
     @mcp.tool()
-    def smoke_validate(pipeline: str) -> dict:
+    def smoke_validate(pipeline: str, data_dir: str = "") -> dict:
         """Validate the smoke stage: every step or the job finished with exit code 0 (a non-zero rc fails with the last 10 log lines), and list what it wrote (those files are the
-        candidate data for annotation). Use after smoke_run or smoke_session. Returns the verdict; the new files go to the stage outputs as 'outputs_created'."""
+        candidate data for annotation). For a job submitted by flux batch the job rc is the launcher script's rc (it exits non-zero when the batch job's return code is non-zero), so
+        rc 0 is trusted and non-zero fails. Use after smoke_run or smoke_session. data_dir: optional absolute directory the user named as where the data goes when the run wrote
+        outside its cwd/session (quote their answer); default the data_dir recorded by smoke_run. It must exist (else {status: error}); its files, bytes, count by suffix and first
+        200 paths go to outputs_created and the summary; non-empty passes the 'outputs' check, empty stays inconclusive. Returns the verdict, or {status: error, error}."""
         o = P.stage(P.load(pipeline), STAGE)["outputs"]
+        dd = (data_dir or o.get("data_dir") or "").strip()
         v = P.Verdict(STAGE)
+
+        def data_outputs(extra):
+            inv = _data_inventory(dd)
+            if inv["status"] != "ok":
+                return inv, False
+            summ = f"{extra}, {_data_summary(inv)}"
+            P.record(pipeline, STAGE, outputs={"data_dir": dd, "outputs_created": inv["paths"], "data_files": inv["files"], "data_bytes": inv["bytes"], "data_by_suffix": inv["by_suffix"], "summary": summ})
+            if inv["files"]:
+                return inv, True
+            v.inconclusive("outputs", f"data_dir {dd} is empty: ask the user where the run wrote its data")
+            return inv, True
+
         if o.get("session_steps"):
             f = _faults(o["session_steps"])
             v.check("session_steps", not f, _fault_detail(f), "fix the failed step (see its rc and log tail) and re-run smoke_session")
-            if not f and not o.get("outputs_created"):
-                v.inconclusive("outputs", "the run wrote no file in the session: ask the user where its data goes")
+            if not f:
+                if dd:
+                    inv, good = data_outputs("every step rc 0")
+                    if not good:
+                        return inv
+                elif not o.get("outputs_created"):
+                    v.inconclusive("outputs", "the run wrote no file in the session: ask the user where its data goes, then call smoke_validate with data_dir")
         elif v.check("ran", bool(o.get("job")), "smoke_run has not run", "run smoke_session or smoke_run"):
             j = J.get(pipeline, o["job"], 1500)
             if j["status"] == "running":
@@ -178,13 +251,20 @@ def register(mcp):
                 tail = "\n".join(j.get("log_tail", "").rstrip().splitlines()[-10:])
                 detail = f"rc={j['rc']}: {tail}"
                 ok = v.check("exit_0", j["rc"] == 0, detail if len(detail) <= 395 else "..." + detail[-392:],
-                             "fix the build or command; if the log says creating a file under python3.N/site-packages failed on a compute node, apply the site rule in the skill (build_where)")
+                             "fix the build or command; if the log says creating a file under python3.N/site-packages failed on a compute node, apply the site rule in the skill (build_where); "
+                             "for a flux batch job this rc is the launcher script's rc, so read the batch job's own output")
                 if not ok:
                     P.record(pipeline, STAGE, outputs={"summary": f"smoke FAILED rc={j['rc']}", "failure_log_tail": tail})
                 if ok:
-                    now = _inventory(o["cwd"])
-                    new = sorted(k for k, m in now.items() if m[1] >= o["started"] - 1)
-                    P.record(pipeline, STAGE, outputs={"outputs_created": new[:200], "seconds": j["elapsed"], "summary": f"exit 0 in {j['elapsed']}s, wrote {len(new)} file(s)"})
-                    if not new:
-                        v.inconclusive("outputs", "the run wrote no file in its directory: ask the user where its data goes")
+                    if dd:
+                        inv, good = data_outputs(f"exit 0 in {j['elapsed']}s")
+                        if not good:
+                            return inv
+                        P.record(pipeline, STAGE, outputs={"seconds": j["elapsed"]})
+                    else:
+                        now = _inventory(o["cwd"])
+                        new = sorted(k for k, m in now.items() if m[1] >= o["started"] - 1)
+                        P.record(pipeline, STAGE, outputs={"outputs_created": new[:200], "seconds": j["elapsed"], "summary": f"exit 0 in {j['elapsed']}s, wrote {len(new)} file(s)"})
+                        if not new:
+                            v.inconclusive("outputs", "the run wrote no file in its directory: ask the user where its data goes, then call smoke_validate with data_dir")
         return P.finish_validation(pipeline, v)

@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import prompts
 from . import runtime as R
-from ..core import capstore, jobs, learning, pipeline, provtrace
+from ..core import capstore, diagrams, jobs, learning, pipeline, provtrace
 from .accounts import LABEL, PROVIDERS, ModelConfig
 from .bridge import OPENAI_URL
 
@@ -33,14 +33,37 @@ def send_json(h, obj, code=200, cookie=None):
     h.wfile.write(b)
 
 
+VENDOR = {"cytoscape.min.js", "dagre.min.js", "cytoscape-dagre.js", "jspdf.umd.min.js", "svg2pdf.umd.min.js"}      # static/vendor, see THIRD_PARTY.md
+BOKEH_JS = {"bokeh.min.js", "bokeh-widgets.min.js", "bokeh-tables.min.js", "bokeh-api.min.js"}
+
+
+def send_bokeh(h, name):
+    """BokehJS from the installed bokeh package: the browser always gets the version that built the plot."""
+    try:
+        import bokeh
+        p = Path(bokeh.__file__).resolve().parent / "server" / "static" / "js" / name
+    except ImportError:
+        return send_json(h, {"error": "bokeh is not installed in the server's Python"}, 404)
+    if name not in BOKEH_JS or not p.is_file():
+        return send_json(h, {"error": "not found"}, 404)
+    b = p.read_bytes()
+    h.send_response(200)
+    h.send_header("Content-Type", STATIC_TYPES[".js"])
+    h.send_header("Cache-Control", "public, max-age=86400")
+    h.send_header("Content-Length", str(len(b)))
+    h.end_headers()
+    h.wfile.write(b)
+
+
 def send_static(h, name, cookie=None):
     p = R.STATIC / name
-    if not p.is_file() or p.parent != R.STATIC:
+    vendored = p.parent == R.STATIC / "vendor"       # third-party bundles (see static/vendor/THIRD_PARTY.md): pinned, so the browser may keep them
+    if not p.is_file() or p.parent != R.STATIC and not vendored:
         return send_json(h, {"error": "not found"}, 404)
     b = p.read_bytes()
     h.send_response(200)
     h.send_header("Content-Type", STATIC_TYPES.get(p.suffix, "application/octet-stream"))
-    h.send_header("Cache-Control", "no-cache")
+    h.send_header("Cache-Control", "public, max-age=86400" if vendored else "no-cache")
     if cookie:
         h.send_header("Set-Cookie", cookie)
     h.send_header("Content-Length", str(len(b)))
@@ -172,8 +195,13 @@ def proxy(h, app, user, path, method="GET", body=None):
 def get_route(h, app, life, u, q):
     if u.path in ("/", "/index.html"):
         return send_static(h, "index.html", set_cookie(app.token) if authorized(h, app, q) else None)
-    if u.path in ("/moirai.js", "/style.css"):
+    if u.path in ("/moirai.js", "/style.css", "/diagrams.js"):
         return send_static(h, u.path[1:])
+    if u.path.startswith("/vendor/"):
+        name = u.path[len("/vendor/"):]
+        if name.startswith("bokeh/"):
+            return send_bokeh(h, name[len("bokeh/"):])
+        return send_static(h, "vendor/" + name) if name in VENDOR else send_json(h, {"error": "not found"}, 404)
     if u.path == "/api/version":
         return send_json(h, life.snapshot())
     if not authorized(h, app, q):
@@ -209,6 +237,26 @@ def get_route(h, app, life, u, q):
     if u.path.startswith("/api/pipeline/"):
         pid, name = u.path.split("/")[3:5]
         return send_json(h, pipeline.stage_state(pipeline.load(pid, user["workspace"]), name))
+    if u.path.startswith("/api/diagram/"):
+        pid, name = u.path.split("/")[3:5]
+        try:
+            return send_json(h, diagrams.read(pipeline.load(pid, user["workspace"]), name))
+        except pipeline.PipelineError as e:
+            return send_json(h, {"error": str(e)}, 404)
+    if u.path == "/api/job/detail":
+        flux = q.get("flux", [""])[0]
+        if flux:
+            return send_json(h, jobs.flux_detail(flux))
+        try:
+            return send_json(h, jobs.detail(q.get("pipeline", [""])[0], q.get("job", [""])[0], user["workspace"]))
+        except (OSError, ValueError, pipeline.PipelineError) as e:
+            return send_json(h, {"error": str(e)}, 404)
+    if u.path == "/api/auto":
+        return send_json(h, {"on": pipeline.auto_mode(q.get("session", [""])[0], user["workspace"])})
+    if u.path == "/api/consolidation":
+        return send_json(h, getattr(app, "consolidation", None) or {"lessons": [], "capabilities": []})
+    if u.path == "/api/submitted":
+        return send_json(h, {"jobs": jobs.submitted(float(q.get("since", ["0"])[0] or 0))})
     if u.path == "/api/capabilities":
         return send_json(h, capstore.list_capabilities())
     if u.path.startswith("/api/capability/"):
@@ -315,6 +363,8 @@ def post_route(h, app, life, u, body):
         return send_json(h, r, 200 if r.get("ok") else 400)
     if u.path == "/api/chat":
         return chat(h, app, user, st, body)
+    if u.path == "/api/auto":
+        return send_json(h, {"on": pipeline.set_auto_mode(body.get("session", ""), bool(body.get("on")), user["workspace"])})
     if u.path == "/api/stop":
         t = app.turns.get(tkey(body.get("session") or ""))
         if t is None or t.done:
@@ -329,6 +379,12 @@ def post_route(h, app, life, u, body):
         if body.get("approve"):
             return send_json(h, capstore.apply(body.get("id", ""), True, user["name"]))
         return send_json(h, capstore.reject(body.get("id", ""), body.get("note", ""), user["name"]))
+    if u.path == "/api/lesson/revise":
+        return send_json(h, learning.revise(body.get("id", ""), body.get("text", ""), body.get("capability", ""), body.get("note", ""), bool(body.get("approve")), user["name"]))
+    if u.path == "/api/capability/refine":
+        edit = (body.get("skill", ""), body.get("code", ""), body.get("note", ""), user["name"])
+        r = capstore.refine(body["id"], *edit) if body.get("id") else capstore.revise(body.get("name", ""), *edit)
+        return send_json(h, capstore.apply(r["id"], True, user["name"]) if body.get("approve") and r["status"] == "ok" else r)
     if u.path == "/api/job/stop":
         return send_json(h, jobs.stop(body.get("pipeline", ""), body.get("job", "")))
     if u.path == "/api/delete":
@@ -351,6 +407,13 @@ def post_route(h, app, life, u, body):
         return send_json(h, {"ok": True, "changed": sum(st.archive(sid, on) for sid in ids)})
     if u.path == "/api/feedback":
         return send_json(h, {"ok": True})
+    if u.path in ("/api/diagram/save", "/api/diagram/reset"):
+        try:
+            if u.path.endswith("save"):
+                return send_json(h, diagrams.save_edit(body.get("pipeline", ""), body.get("name", ""), body.get("graph"), user["workspace"]))
+            return send_json(h, diagrams.reset_edit(body.get("pipeline", ""), body.get("name", ""), user["workspace"]))
+        except pipeline.PipelineError as e:
+            return send_json(h, {"error": str(e)}, 400)
     if u.path == "/api/dashboard/open":
         run = pipeline.open_traces(body.get("path") or "", user["workspace"])
         app.dash.wait_run(str(pipeline.dash_root(user["workspace"])), run)

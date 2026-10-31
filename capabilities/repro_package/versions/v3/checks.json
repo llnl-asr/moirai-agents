@@ -1,0 +1,45 @@
+[
+ {
+  "tool": "repro_validate",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "repro_batch_selftest",
+  "args": {},
+  "expect": {
+   "contains": "batch selftest ok"
+  }
+ },
+ {
+  "tool": "repro_batch_scan",
+  "args": {
+   "run_out": "flux-job: task(s) exited with exit code 2\n"
+  },
+  "expect": {
+   "contains": "FAILED"
+  }
+ },
+ {
+  "tool": "repro_batch_scan",
+  "args": {
+   "run_out": "Fri Oct 30 23:32:42 PDT 2026: f35QqToh9 failed\n"
+  },
+  "expect": {
+   "contains": "FAILED"
+  }
+ },
+ {
+  "tool": "repro_batch_scan",
+  "args": {
+   "run_out": "chunk done\n"
+  },
+  "expect": {
+   "contains": "CLEAN"
+  }
+ }
+]

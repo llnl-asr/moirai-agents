@@ -1,0 +1,18 @@
+[
+ {
+  "tool": "repro_validate",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "repro_batch_selftest",
+  "args": {},
+  "expect": {
+   "contains": "repro batch selftest PASS"
+  }
+ }
+]

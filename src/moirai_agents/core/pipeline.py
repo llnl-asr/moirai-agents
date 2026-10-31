@@ -36,7 +36,7 @@ OWNERS: Dict[str, str] = {"plan": "run_planner", "package": "repro_package", "ex
                           "ingest": "trace_ingest", "dashboard": "prov_dashboard", "query": "prov_query"}
 STATUSES = ("pending", "running", "needs_user", "failed", "passed", "skipped")
 FEEDBACK_KINDS = ("process", "remember")
-NO_REV = {"progress", "dashboard"}          # presentation only: does not invalidate a stage's verdict
+NO_REV = {"progress", "dashboard", "diagrams"}          # presentation only: does not invalidate a stage's verdict
 
 
 class PipelineError(ValueError):
@@ -339,6 +339,27 @@ def decide(pid: str, name: str, approved: bool, user_answer: str) -> Dict[str, A
     return update(pid, fn)
 
 
+def _auto_flag(session: str, workspace: Optional[str] = None) -> Path:
+    if not re.match(r"^[A-Za-z0-9_-]{1,80}$", session or ""):
+        raise PipelineError(f"bad chat id {session!r}")
+    return root(workspace) / "_auto" / session
+
+
+def auto_mode(session: str, workspace: Optional[str] = None) -> bool:
+    """Is this chat in auto mode: its questions take the recommended option. Read on every question, so a change applies at once."""
+    return bool(session) and _auto_flag(session, workspace).exists()
+
+
+def set_auto_mode(session: str, on: bool, workspace: Optional[str] = None) -> bool:
+    f = _auto_flag(session, workspace)
+    if on:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.touch()
+    else:
+        f.unlink(missing_ok=True)
+    return bool(on)
+
+
 def advance(pid: str, name: str) -> Dict[str, Any]:
     """Pass a stage: a passing verdict of the CURRENT outputs, an approving gate, all feedback resolved."""
     def fn(c):
@@ -480,18 +501,23 @@ def stage_state(c: Dict[str, Any], name: str) -> Dict[str, Any]:
     v = s.get("validation") or {}
     p = (c.get("plan") or {}).get("steps", {}).get(name) or {}
     o = s["outputs"]
+    from . import diagrams as D
     return {"pipeline": c["id"], "name": name, "status": s["status"], "owner": s["owner"], "started": s.get("started"), "summary": o.get("summary", ""),
             "command": o.get("command", ""), "plan": p.get("intent", ""), "plan_stale": bool(p.get("stale")), "gate": s.get("gate"), "history": s["history"],
-            "feedback": s["feedback"], "checks": {k: v.get(k) for k in ("status", "passed", "total", "failed", "unknown")}}
+            "feedback": s["feedback"], "checks": {k: v.get(k) for k in ("status", "passed", "total", "failed", "unknown")}, "diagrams": D.listing(c, name)}
 
 
 def summary(c: Dict[str, Any]) -> Dict[str, Any]:
     """The compact view the Steps panel and the agents read."""
     rows = []
+    from . import diagrams as D
+    shown = {}
+    for e in D.listing(c):
+        shown[e.get("stage")] = shown.get(e.get("stage"), 0) + 1
     for name in KINDS[c["kind"]]:
         s = c["stages"][name]
         v = s.get("validation") or {}
-        rows.append({"name": name, "status": s["status"], "owner": s["owner"], "verdict": v.get("status"),
+        rows.append({"name": name, "diagrams": shown.get(name, 0), "status": s["status"], "owner": s["owner"], "verdict": v.get("status"),
                      "failed": [f["name"] + ": " + f["detail"] for f in v.get("failed", [])][:6], "plan": ((c.get("plan") or {}).get("steps", {}).get(name) or {}).get("intent", ""),
                      "plan_stale": bool(((c.get("plan") or {}).get("steps", {}).get(name) or {}).get("stale")),
                      "summary": s["outputs"].get("summary", ""), "gate": s.get("gate"),

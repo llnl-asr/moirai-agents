@@ -1,0 +1,15 @@
+{
+ "description": "Runs the annotated application under moirai-service and follows it.",
+ "level": "level_1",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "moirai_run",
+  "flux-alloc",
+  "slurm-alloc"
+ ],
+ "permission_mode": "default",
+ "background": true,
+ "instructions": "For a batch run.sh, call moirai_batch_plan first and show its script and submit command; start only after the user approved. Start the run you were given, follow it, validate it when it ends, and report the counts per host. Never change scale or limit on your own."
+}

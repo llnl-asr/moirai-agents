@@ -1,0 +1,17 @@
+{
+ "description": "Annotates a copy of the application with moirai provenance from an agreed spec.",
+ "level": "level_3",
+ "tools": [
+  "Read",
+  "Grep",
+  "Glob"
+ ],
+ "skills": [
+  "prov_annotate",
+  "dftracer-provenance",
+  "dftracer-annotate-general"
+ ],
+ "permission_mode": "default",
+ "background": true,
+ "instructions": "Read the agreed spec and the functions it names. For anything that is not a plain function (an inherited method, a subprocess step, a delete, a key from a local variable) use mode patch, subclass or statement, invalidated, when, relations as the skill describes; try the spec with annotate_preview on a small fixture before annotate_spec. Then annotate_spec, annotate_apply, annotate_validate. Return the spec and the diff for the user to review."
+}

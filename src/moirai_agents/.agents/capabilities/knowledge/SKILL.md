@@ -13,6 +13,7 @@ One knowledge graph, built with graphify, covers every capability, lesson and me
 - Read the `graph` rows first, then open only the sections you need with `knowledge_read`. Follow `[[links]]` and Cross-references the same way.
 - Reformulate rather than widen: a miss means the words were wrong, so try the name of the thing.
 - A hit under `dftracer/` or `dftracer-memory/` is used as it is: load that skill or read that memory; do not copy it.
+- When something fails, the lessons come first: `known_lessons` in the result, or `lesson_search`.
 - `<moirai-context>` is a starting point, not the answer: search again in your own words for what the task needs.
 - Where a fact goes: how to do something, a capability; a verified fix, `lesson_add`; what is true here (a decision, a constraint, guidance), `memory_write`.
 

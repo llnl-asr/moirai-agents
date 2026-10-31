@@ -1,0 +1,13 @@
+{
+ "description": "Generates final_provenance and proves it in a clean shell; batch mode for apps launched by a generated flux batch run.sh.",
+ "level": "level_2",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "repro_package"
+ ],
+ "permission_mode": "default",
+ "background": true,
+ "instructions": "Run repro_build, repro_verify and repro_validate, and report the counts of the isolated run. Never edit the package by hand. In batch mode run repro_batch_selftest after any change and say what the isolated run did not exercise (app environment build, moirai venv build when reused)."
+}

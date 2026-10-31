@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import api, dfdash, prompts, runtime as R
-from ..core import capstore, jobs, learning, moirai_env, pipeline, provtrace, selfrefresh
+from ..core import capstore, consolidate, jobs, learning, moirai_env, pipeline, provtrace, selfrefresh
 from .. import workspace
 
 PKG = Path(__file__).resolve().parents[1]
@@ -37,6 +37,8 @@ WEB = Path(__file__).resolve().parent
 HOT = [moirai_env, pipeline, jobs, provtrace, capstore, learning, workspace, prompts, api]    # in dependency order
 COLD = [WEB / f for f in ("server.py", "runtime.py", "dfdash.py", "accounts.py", "bridge.py", "procs.py")] + [PKG / "env.py", PKG / "core" / "selfrefresh.py"]
 TICK = 2.0
+CONSOLIDATION_S = 300.0
+RESTARTED = "MOIRAI_AGENTS_WEBUI_RESTARTED"     # set across reexec(): the one start that keeps its instance id
 JOB_CHECK = 60.0
 WARN_S = 900
 
@@ -99,12 +101,23 @@ def reload_hot(changed: list, life: Life) -> None:
         print(traceback.format_exc(limit=3), flush=True)
 
 
+def watch_consolidation(app: "R.App") -> None:
+    """Look for lessons and capabilities to consolidate, on this node, in the background; the page shows what it finds."""
+    while True:
+        try:
+            app.consolidation = consolidate.report()
+        except Exception as e:      # a bad file must not end the watch, or the server
+            print(f"{time.strftime('%F %T')} consolidation check failed: {e}", flush=True)
+        time.sleep(CONSOLIDATION_S)
+
+
 def reexec(app: "R.App", life: Life, srv) -> None:
     """Replace this process's code, keeping the socket: the browser sees at most a brief pause."""
     print(f"{time.strftime('%F %T')} re-executing for the new code", flush=True)
     fd = srv.socket.fileno()
     os.set_inheritable(fd, True)
     os.environ.update(MOIRAI_AGENTS_WEBUI_FD=str(fd), MOIRAI_AGENTS_WEBUI_STARTED=str(life.started), MOIRAI_AGENTS_WEBUI_ACTIVE=str(life.active))
+    os.environ[RESTARTED] = "1"
     os.execv(sys.executable, [sys.executable, "-m", "moirai_agents.webui.server"] + sys.argv[1:])
 
 
@@ -220,7 +233,8 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     R.STATE.mkdir(parents=True, exist_ok=True)
     os.chmod(R.STATE, 0o700)
-    instance = os.environ.get(R.procs.TAG) or uuid.uuid4().hex[:16]
+    # Its own id unless this is its own restart: one inherited from a chat that started this server would make its shutdown sweep kill that chat.
+    instance = (os.environ.pop(RESTARTED, None) and os.environ.get(R.procs.TAG)) or uuid.uuid4().hex[:16]
     os.environ[R.procs.TAG] = instance             # inherited by every process this server starts
     token = os.environ.get("MOIRAI_AGENTS_WEBUI_TOKEN") or R.stable_token(R.STATE)
     app = R.App(token, R.STATE)
@@ -244,6 +258,7 @@ def main(argv=None) -> int:
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, on_signal)
     threading.Thread(target=lifecycle, args=(app, life, srv), daemon=True, name="lifecycle").start()
+    threading.Thread(target=watch_consolidation, args=(app,), daemon=True, name="consolidation").start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

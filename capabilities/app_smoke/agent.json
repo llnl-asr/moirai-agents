@@ -12,5 +12,5 @@
  ],
  "permission_mode": "default",
  "background": true,
- "instructions": "Run smoke_run (build_where compute unless the user gave the login exception in words), follow the job, run smoke_validate, and report the command, runtime, rc and files written. Never report a pass when any rc is non-zero."
+ "instructions": "Run smoke_run (build_where compute unless the user gave the login exception in words), follow the job, run smoke_validate, and report the command, runtime, rc and files written. When the data is written outside the session and the user names the directory, pass it as data_dir. Never report a pass when any rc is non-zero."
 }

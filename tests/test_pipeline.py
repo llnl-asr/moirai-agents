@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from moirai_agents.core import pipeline as P
@@ -73,6 +75,139 @@ def test_advance_repeats_the_standing_rule(call):
     P.record(pid, "plan", status="needs_user")
     call("pipeline_decide", pipeline=pid, stage="plan", approved=True, user_answer="yes")
     assert call("pipeline_advance", pipeline=pid, stage="plan")["standing"] == capstore.STANDING
+
+
+def test_a_wall_of_text_is_refused_before_it_reaches_the_user(call):
+    pid = call("pipeline_new", kind="analysis", name="t", traces="/t")["id"]
+    wall = "word " * 400
+    for args in ({"question": wall}, {"question": "ok?", "context": wall}, {"question": "ok?", "context": "x" * 300}):
+        r = call("ask_user", pipeline=pid, stage="plan", **args)
+        assert r["status"] == "error" and P.load(pid)["stages"]["plan"]["status"] != "needs_user"
+    r = call("ask_user", question="Approve annotate?", context="**Done**: 24 of 25 checks passed.\n- one inconclusive", details=wall, pipeline=pid, stage="plan")
+    assert r["details"] == wall and P.load(pid)["stages"]["plan"]["status"] == "needs_user"
+
+
+def test_scheduler_jobs_land_in_their_group():
+    from moirai_agents.core import jobs as J
+    row = lambda st, res="": J._flux_row(f"f1|{st}|{res}|run.sh|pdebug|2|1700000000.5|12.5|1700000010.0|1700000020.0")
+    assert [row(s)["group"] for s in ("DEPEND", "PRIORITY", "SCHED", "RUN", "CLEANUP")] == ["sched", "sched", "sched", "run", "run"]
+    assert row("INACTIVE", "COMPLETED")["group"] == "ok"
+    assert [row("INACTIVE", r)["group"] for r in ("FAILED", "CANCELED", "TIMEOUT")] == ["bad", "bad", "bad"]
+    assert row("RUN")["nodes"] == "2" and J._flux_row("not a job") is None
+
+
+def test_a_process_says_what_ran_and_what_it_wrote(call):
+    from moirai_agents.core import jobs as J
+    pid = call("pipeline_new", kind="analysis", name="t", traces="/t")["id"]
+    j = J.start(pid, "ingest", "demo", "echo hello from the job\nexit 3\n", "/tmp")
+    J.wait(pid, j["id"], 10)
+    d = J.detail(pid, j["id"])
+    assert "echo hello" in d["command"] and "hello from the job" in d["output"] and d["rc"] == 3 and not d["running"]
+
+
+def test_a_batch_job_shows_the_file_it_wrote_to(tmp_path):
+    from moirai_agents.core import jobs as J
+    f = tmp_path / "run.out"
+    f.write_text("predicted 2 structures\n")
+    out = J._redirected(f"[0]: stdout redirected to {f}\n[0]: stderr redirected to {f}\n[1]: stdout redirected to /nonexistent/x\n")
+    assert out.count("predicted 2 structures") == 1 and "/nonexistent/x: No such file" in out
+
+
+def test_a_scheduler_job_id_is_checked():
+    from moirai_agents.core import jobs as J
+    assert J.flux_detail("../etc; rm")["status"] == "error"
+
+
+def test_scheduler_jobs_come_latest_update_first(monkeypatch):
+    from moirai_agents.core import jobs as J
+    line = lambda jid, sub, run, end: J._flux_row(f"{jid}|INACTIVE|COMPLETED|x|q|1|{sub}|1|{run}|{end}")
+    monkeypatch.setitem(J._flux_cache, "at", time.time())
+    monkeypatch.setitem(J._flux_cache, "rows", [line("old", 10, 11, 12), line("late", 1, 2, 90), line("queued", 50, 0, 0)])
+    assert [j["id"] for j in J.submitted()] == ["late", "queued", "old"]
+    assert [j["id"] for j in J.submitted(since=5)] == ["queued", "old"]
+
+
+def test_no_scheduler_means_no_submitted_jobs(monkeypatch):
+    from moirai_agents.core import jobs as J
+    monkeypatch.setitem(J._flux_cache, "at", 0.0)
+    monkeypatch.setenv("PATH", "/nonexistent")
+    assert J.submitted() == []
+
+
+def at_gate(call, monkeypatch, on=True):
+    monkeypatch.setenv("MOIRAI_AGENTS_WEBUI_SESSION", "chat1")
+    pid = call("pipeline_new", kind="analysis", name="t", traces="/t")["id"]
+    P.set_auto_mode("chat1", on)
+    return pid
+
+
+def passed(pid, stage="plan"):
+    P.finish_validation(pid, P.Verdict(stage))
+
+
+def test_auto_mode_takes_the_recommended_option_at_a_gate(call, monkeypatch):
+    pid = at_gate(call, monkeypatch)
+    passed(pid)
+    r = call("ask_user", question="Go on?", pipeline=pid, stage="plan", options=[{"label": "Approve", "recommended": True}, {"label": "Redo"}])
+    assert r["status"] == "answered by auto mode" and r["answer"] == "Approve"
+    gate = P.stage(P.load(pid), "plan")["gate"]
+    assert gate["approved"] and gate["answer"].startswith("Auto mode")
+    assert call("pipeline_advance", pipeline=pid, stage="plan")["status"] == "ok"
+
+
+def test_auto_mode_approves_a_passing_gate_with_no_options(call, monkeypatch):
+    pid = at_gate(call, monkeypatch)
+    passed(pid)
+    assert call("ask_user", question="Go on?", pipeline=pid, stage="plan")["auto"]
+
+
+def test_auto_mode_answers_a_plain_question_without_a_gate(call, monkeypatch):
+    at_gate(call, monkeypatch)
+    r = call("ask_user", question="Which?", options=[{"label": "A"}, {"label": "B", "recommended": True}])
+    assert r["answer"] == "B"
+    assert call("ask_user", question="Sure?", kind="confirm")["answer"] == "Yes, go ahead"
+
+
+@pytest.mark.parametrize("args", [
+    {"question": "Which?", "options": [{"label": "A"}, {"label": "B"}]},
+    {"question": "What is the path?", "kind": "freeform"},
+    {"question": "Which?", "options": [{"label": "A", "recommended": True}, {"label": "B", "recommended": True}]},
+])
+def test_auto_mode_waits_when_it_has_no_single_recommendation(call, monkeypatch, args):
+    at_gate(call, monkeypatch)
+    assert call("ask_user", **args)["status"] == "question shown to the user"
+
+
+def test_auto_mode_stops_at_a_gate_that_did_not_pass(call, monkeypatch):
+    pid = at_gate(call, monkeypatch)
+    v = P.Verdict("plan")
+    v.check("thing", False, "broken", "fix it")
+    P.finish_validation(pid, v)
+    r = call("ask_user", question="Go on?", pipeline=pid, stage="plan", options=[{"label": "Approve", "recommended": True}])
+    assert r["status"] == "question shown to the user" and not (P.stage(P.load(pid), "plan").get("gate") or {}).get("approved")
+
+
+def test_auto_mode_stops_when_the_recommendation_is_to_stop(call, monkeypatch):
+    pid = at_gate(call, monkeypatch)
+    passed(pid)
+    r = call("ask_user", question="Go on?", pipeline=pid, stage="plan", options=[{"label": "Stop here", "recommended": True}, {"label": "Go on"}])
+    assert r["status"] == "question shown to the user"
+
+
+def test_without_auto_mode_every_question_waits(call, monkeypatch):
+    pid = at_gate(call, monkeypatch, on=False)
+    passed(pid)
+    r = call("ask_user", question="Go on?", pipeline=pid, stage="plan", options=[{"label": "Approve", "recommended": True}])
+    assert r["status"] == "question shown to the user"
+
+
+def test_auto_mode_is_per_chat_and_can_be_turned_off(call, monkeypatch):
+    at_gate(call, monkeypatch)
+    assert P.auto_mode("chat1") and not P.auto_mode("chat2")
+    P.set_auto_mode("chat1", False)
+    assert not P.auto_mode("chat1")
+    with pytest.raises(P.PipelineError):
+        P.set_auto_mode("../x", True)
 
 
 def test_stage_state_says_what_happened(call):

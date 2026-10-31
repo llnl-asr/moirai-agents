@@ -12,6 +12,9 @@ capability; read its skill before running it.
 - Plan first: the `plan` stage comes before anything else; load `run_planner`. When reality differs from the plan, `plan_update` at once: a stale step cannot pass.
 - Call `pipeline_status` first. Work only on the current stage.
 - Each stage: predictor, validator, then `ask_user` with `pipeline` and `stage` set, showing what was produced. Then end the turn.
+- A gate is read at a glance. `question` is the decision in one sentence. `context` is one line of the result, then bullets: what changed, what is wrong, what happens next. Everything else goes in `details` as Markdown sections, bullets and tables. Name each item once; never write a paragraph.
+- Mark what you advise with `recommended`, on one option. In auto mode `ask_user` takes it at once and records the gate as auto mode's answer: when the result says `answered by auto mode`, do not end your turn; `pipeline_advance` and go on. It still stops for you when nothing is recommended, when the stage's checks did not pass, or when the recommendation is to stop.
+- Scale is the user's: in auto mode, recommend only what is within what they already approved.
 - The gate's answer arrives as a message saying approved, process feedback or remember. Record it with `pipeline_decide` or `pipeline_feedback`.
 - Before each gate, capture what the stage explored: anything new becomes a capability (`capability_builder`, Rules), and the gate says which ones were proposed.
 - Advance only after the user approved. `pipeline_advance` refuses otherwise; do not look for a way around it.

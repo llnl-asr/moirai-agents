@@ -18,7 +18,8 @@ scope), `checks.json` (known input to expected output), `LESSONS.md`. Read LESSO
 - Docstrings are the only description an agent sees: what it does, when to use it, each argument, the return keys.
 
 ## Constraints
-- A person approves every proposal. Call `capability_apply` only after they said yes, with `confirmed=true`.
+- A person approves every proposal: they approve, reject or refine it in the Capabilities panel. Call `capability_apply` only after they said yes, with `confirmed=true`.
+- A refinement of a pending proposal goes through `capability_refine`, never a second `capability_new`.
 - Never edit capability files directly: edits skip validation and the human gate.
 - No `eval`, `exec`, `shell=True`, `os.system`. No machine-specific paths: take them as arguments.
 - `agent.json` declares `level_1|2|3`, never a model. Bash must be scoped, for example `Bash(git diff:*)`.
@@ -56,6 +57,7 @@ Predictor `capability_new`, `capability_update`, validator `capability_verify`. 
 `capability_verify` lists each problem. Bundle problems name the file to change; a failed check means the tool or the check is wrong: reproduce it, then decide which. Fix with `capability_update`, never by loosening the check to pass.
 
 ## Self-heal
+- First read `known_lessons` in the failed result, or call `lesson_search` with the error text: one may already be the fix.
 - Tool failed: `capability_get`, reproduce it with a new check, `capability_update`, ask the user, `capability_apply`, re-run the stage.
 - `load error` in `capability_list`: the last working tools still serve; fix the error the same way.
 - An update made it worse: `capability_rollback`. No quick fix: `capability_disable` and tell the user.

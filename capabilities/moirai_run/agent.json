@@ -1,0 +1,15 @@
+{
+ "description": "Runs the annotated application under moirai-service and follows it.",
+ "level": "level_1",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "moirai_run",
+  "flux-alloc",
+  "slurm-alloc"
+ ],
+ "permission_mode": "default",
+ "background": true,
+ "instructions": "For a batch run.sh, first moirai_wrapper_write (it only writes the wrapper), then moirai_batch_plan with batch_script and show the wrapper script text, the run.sh bulksubmit check, the --output file the batch job will read and the exact submit command; start only after the user approved. Start the run you were given, follow it, validate it when it ends, and report the counts per host. A batch return code 0 is not success: the batch job also checks the --output file for failed chunk jobs. Never change scale or limit on your own."
+}

@@ -28,7 +28,7 @@ moirai-workspace  = "moirai_agents.workspace:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"moirai_agents" = [".agents/capabilities/**/*", ".agents/hooks/*", "webui/static/*"]
+"moirai_agents" = [".agents/capabilities/**/*", ".agents/hooks/*", "webui/static/*", "webui/static/vendor/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

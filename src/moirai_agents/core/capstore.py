@@ -41,7 +41,8 @@ FORBIDDEN_IMPORTS = {"ctypes", "pty", "telnetlib", "ftplib", "paramiko"}
 REVIEW_IMPORTS = {"socket": "opens network connections", "requests": "makes HTTP requests", "urllib": "makes HTTP requests",
                   "http": "makes HTTP requests", "subprocess": "runs commands", "shutil": "copies/removes files"}
 ABS_PATH = re.compile(r"(?:/usr/WS\d|/usr/workspace|/g/g\d+|/home/[a-z]|/p/(?:lustre|vast|gpfs)\d?/[a-z]|/Users/)")
-STANDING = ("Standing rules. knowledge_search comes first: it is how to find a capability, a skill, a past fix or a fact, before acting on anything unfamiliar. Anything explored becomes a "
+STANDING = ("Standing rules. knowledge_search comes first: it is how to find a capability, a skill, a past fix or a fact, before acting on anything unfamiliar. When anything fails, read "
+            "known_lessons in the result, or call lesson_search with the error text, and try what they say before exploring on your own. Anything explored becomes a "
             "capability, constantly: a new workload, software, tool or system met in any stage is captured before moving on, while the evidence is at hand. Extend what exists, else capability_new "
             "named workload_<x>, software_<x>, tools_<x> or system_<x>, structured as capability_builder says. What is deterministic goes in its tool, what needs judgement in its skill, and a user "
             "approves it. dftracer-agents' skills are reused, not copied: only what is new here is captured. An agent without capability_new ends its report with 'Capability needed:' and what it "
@@ -50,7 +51,7 @@ FAMILIES = ("workload_", "software_", "tools_", "system_")     # what is learnt:
 SKILL_STANDING = "becomes a capability"       # what every skill's Self-learn section says
 SKILL_SECTIONS = ("Rules", "Constraints", "Corner cases", "Corrector", "Self-heal", "Self-learn")
 BUILTIN_AGENT_TOOLS = {"Read", "Grep", "Glob", "Bash", "Edit", "Write", "Task", "WebFetch", "WebSearch", "TodoWrite"}
-SHARED_AGENT_TOOLS = ["pipeline_status", "pipeline_feedback", "ask_user", "lesson_add", "knowledge_search", "knowledge_read"]
+SHARED_AGENT_TOOLS = ["pipeline_status", "pipeline_feedback", "ask_user", "lesson_add", "lesson_search", "knowledge_search", "knowledge_read"]
 LEVELS = ("level_1", "level_2", "level_3")
 
 
@@ -470,6 +471,32 @@ def reject(pid: str, note: str = "", by: str = "") -> dict:
     return {"status": "ok", "id": pid, "rejected": True}
 
 
+def refine(pid: str, skill_md: str = "", tool_code: str = "", note: str = "", by: str = "") -> dict:
+    """Replace a pending proposal with an edit of it, validated like any proposal. Refused: the old one stays pending. Returns the new proposal's id."""
+    p = _proposals().get(pid)
+    if not p:
+        return _err(f"unknown proposal {pid}")
+    if p["status"] != "pending":
+        return _err(f"proposal {pid} is already {p['status']}")
+    r = propose(p["name"], tool_code or p["code"], skill_md or p["skill"], p["agent"], p["checks"], p["description"], p["why"], p.get("stages"), p["layer"], p["kind"],
+                p.get("proposed_by", ""), p.get("pvc"))
+    if r["status"] == "ok":
+        _append({"id": pid, "status": "refined", "refined_into": r["id"], "ts": time.time()})
+        _append({"id": r["id"], "revisions": p.get("revisions", []) + [{"by": by or "agent", "note": note, "ts": time.time()}]})
+    return r
+
+
+def revise(name: str, skill_md: str = "", tool_code: str = "", note: str = "", by: str = "") -> dict:
+    """Propose an edit of a live capability; it changes only when approved."""
+    g = get(name)
+    if g["status"] != "ok":
+        return g
+    if not note.strip():
+        return _err("say what was wrong: the note is the proposal's why")
+    return propose(name, tool_code or g["code"], skill_md or g["skill"], g["agent"], g["checks"], g["meta"].get("description", ""), note,
+                   layer="project" if g["layer"] == "project" else "user", kind="update", user=by)
+
+
 def shadow(name: str) -> Path:
     """The capability's folder in a writable layer: the bundled store is never written; a user-layer copy shadows it."""
     layer, d, _ = all_caps()[name]
@@ -534,7 +561,7 @@ def list_capabilities() -> dict:
                        "stages": m.get("stages", []), "pvc": m.get("pvc"), "description": m.get("description", ""), "loaded": n in _State.loaded,
                        "error": (_State.loaded.get(n) or {}).get("error"),
                        "lessons": lessons.read_text().count("\n- ") if lessons.exists() else 0})
-    keys = ("id", "kind", "name", "layer", "description", "why", "tools", "review", "warnings", "proposed_by", "ts", "diff")
+    keys = ("id", "kind", "name", "layer", "description", "why", "tools", "review", "warnings", "proposed_by", "ts", "diff", "skill", "code", "revisions")
     pend = [{k: p.get(k) for k in keys} for p in _proposals().values() if p.get("status") == "pending"]
     return {"active": active, "pending": pend}
 

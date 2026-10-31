@@ -27,6 +27,7 @@
   <div class="composer">
     <div class="opts">
       <span class="seg" id="modeseg"><button data-m="ask" class="on" title="Questions">Ask</button><button data-m="run" title="Annotate, run and watch an application">Run</button><button data-m="analysis" title="Explore existing traces">Analysis</button></span>
+      <button class="btn auto" id="autobtn" title="Auto: take the recommended option at every question and gate, and move on. It still stops when nothing is recommended or a stage's checks did not pass" aria-pressed="false">Auto</button>
       <label>via <select id="prov" title="Switch between LivAI, Claude and OpenAI; one with no key asks for it"></select></label>
       <label>model <select id="model"></select></label><button class="btn" id="mset" title="Model settings: LivAI, Anthropic, OpenAI" style="padding:3px 8px">⚙</button>
     </div>
@@ -45,8 +46,8 @@
   <details class="sec" data-sec="steps" open><summary><h3>Steps <span class="cnt" id="scount"></span></h3></summary><div id="steps"><div class="lesson st">no pipeline in this chat</div></div></details>
   <details class="sec" data-sec="agents" open><summary><h3>Agents</h3></summary><div id="agents"><div class="agent"><div class="s">idle</div></div></div></details>
   <details class="sec" data-sec="jobs" open><summary><h3>Jobs <span class="cnt" id="jcount"></span></h3></summary><div id="jobs"><div class="job">none</div></div></details>
-  <details class="sec" data-sec="lessons"><summary><h3>Lessons <span class="cnt" id="lcount"></span></h3></summary><div id="lessons"><div class="lesson st">no lessons yet</div></div></details>
-  <details class="sec" data-sec="capabilities"><summary><h3>Capabilities <span class="cnt" id="ccount"></span></h3></summary><div id="capabilities"></div></details>
+  <details class="sec" data-sec="lessons"><summary><h3>Lessons <span class="cnt" id="lcount"></span> <button class="consol" id="lconsol" hidden></button></h3></summary><div id="lessons"><div class="lesson st">no lessons yet</div></div></details>
+  <details class="sec" data-sec="capabilities"><summary><h3>Capabilities <span class="cnt" id="ccount"></span> <button class="consol" id="cconsol" hidden></button></h3></summary><div id="capabilities"></div></details>
 </div></aside>
 </div>
 <div id="cdlg" class="dlg" hidden><div class="box">
@@ -76,7 +77,8 @@
  addEventListener('keydown',e=>{if(e.ctrlKey&&!e.altKey&&(e.key==='['||e.key===']')){e.preventDefault();t(e.key==='['?'l':'r')}});
  apply();})();
 const $=s=>document.querySelector(s);
-let cfg={},session=null,mode='ask',es=null,running=false;
+let cfg={},session=null,mode='ask',es=null,running=false,auto=false;
+function showAuto(on){auto=!!on;const b=$('#autobtn');b.classList.toggle('on',auto);b.setAttribute('aria-pressed',auto);b.textContent=auto?'Auto on':'Auto'}
 const STARTERS={ask:[
  ['What is moirai?','What does moirai record, and how do I add it to my application?'],
  ['What can you do?','List the capabilities you have and what each is for.']],
@@ -219,7 +221,9 @@ class Renderer{constructor(b,opts={}){this.b=b;this.cur=null;this.buf='';this.to
    const stick=lv.scrollHeight-lv.scrollTop-lv.clientHeight<30;lv.textContent=(lv.textContent+e.text).slice(-65536);if(stick)lv.scrollTop=lv.scrollHeight;
    const last=e.text.trim().split('\n').pop();if(last&&this.live){AG.main.last='⋯ '+last.slice(0,110);drawAgents()}
    if(this.live)scroll();return}
-  case 'tool_result':{if(this.lessons&&this.lessons[e.id]){const q=this.lessons[e.id],t=e.ts?hms(e.ts)+' · ':'';
+  case 'tool_result':{if(this.asks&&this.asks[e.id]&&/not shown to the user/.test(e.text||''))this.asks[e.id].remove();
+   if(this.asks&&this.asks[e.id]&&/answered by auto mode/.test(e.text||'')){const c=this.asks[e.id];let a='';try{a=JSON.parse(e.text).answer}catch(_){}c.classList.add('done');c.querySelectorAll('.acts,.gate,textarea').forEach(x=>x.remove());c.insertAdjacentHTML('beforeend',`<div class="autonote">Auto mode took: ${esc(a)}</div>`)}
+   if(this.lessons&&this.lessons[e.id]){const q=this.lessons[e.id],t=e.ts?hms(e.ts)+' · ':'';
     if(e.is_error)this.meta(`${t}⏸ lesson not accepted yet (${q.kind||'no kind'}): ${String(e.text||'').replace(/^ValueError:\s*/,'').split(/\.|\n/)[0].slice(0,140)}`);
     else{this.meta(`${t}💡 lesson proposed${q.kind?' ('+q.kind+')':''} → ${q.target||'?'}: ${(q.lesson||[q.symptom,q.fix].filter(Boolean).join(' → ')).slice(0,160)} (approve it in the Learning panel)`);setTimeout(pollLessons,1500)}}
    {const d0=this.tools[e.id];if(d0){d0.querySelectorAll(':scope > pre.live, :scope > .live-h').forEach(x=>x.remove());if(d0.dataset.autoOpened)d0.open=false}}if(this.plots&&this.plots[e.id]){try{const r=JSON.parse(e.text);if(r.plot_id){const h=document.createElement('div');this.b.appendChild(h);renderPlot(h,r.plot_id)}}catch(_){}}
@@ -242,7 +246,7 @@ class Renderer{constructor(b,opts={}){this.b=b;this.cur=null;this.buf='';this.to
   const kind=q.kind||'choose',multi=kind==='multi';let opts=q.options||[];
   if(!opts.length&&kind==='confirm')opts=[{label:'Yes, go ahead',recommended:true},{label:'No'}];
   const c=document.createElement('div');c.className='ask'+(this.answered?' done':'');
-  c.innerHTML=`<div class="q">❓ ${esc(q.question||'')}</div>${q.context?`<div class="ctx">${esc(q.context)}</div>`:''}
+  c.innerHTML=`<div class="q">❓ ${esc(q.question||'')}</div>${q.context?`<div class="ctx">${md(q.context)}</div>`:''}${q.details?`<details class="askd"><summary>Details</summary><div class="ctx">${md(q.details)}</div></details>`:''}
    ${opts.map((o,i)=>`<div class="opt" data-i="${i}"><input type="${multi?'checkbox':'radio'}" name="o${e.id}" tabindex="-1"><div><div>${esc(o.label)}${o.recommended?'<span class="rec">recommended</span>':''}</div>${o.description?`<div class="d">${esc(o.description)}</div>`:''}</div></div>`).join('')}
    <textarea placeholder="${opts.length?'Optional comment or other answer…':'Your answer…'}"></textarea>
    <div class="acts"><button class="btn primary">Send answer</button>${kind==='confirm'||opts.length?'<button class="btn danger">Reject / stop</button>':''}</div>`;
@@ -255,7 +259,7 @@ class Renderer{constructor(b,opts={}){this.b=b;this.cur=null;this.buf='';this.to
    const msg=`Answer to: ${q.question}\n`+(rej?'Decision: REJECTED - do not proceed with this.':`Choice: ${picked.join(', ')||'(none)'}`)+(com?`\nComment: ${com}`:'');
    c.classList.add('done');sendText(msg,running)};
   ok.onclick=()=>answer(false);no&&(no.onclick=()=>answer(true));
-  this.b.appendChild(c)}
+  (this.asks=this.asks||{})[e.id]=c;this.b.appendChild(c)}
  feedbackBar(){const f=document.createElement('div');f.className='fb';const turn=this.turn;
   f.innerHTML=`<span>Was this helpful?</span><button data-r="up">👍</button><button data-r="down">👎</button><input placeholder="Feedback for the moirai-agents team (optional)"><button data-r="send">Send</button><span class="ok"></span>`;
   let rating=null;const inp=f.querySelector('input'),okSpan=f.querySelector('.ok');
@@ -289,7 +293,7 @@ async function sendText(text,steer,files){if(!text&&!(files&&files.length))retur
  if(files&&files.length)body.files=await Promise.all(files.map(async f=>({name:f.name,data:await b64(f)})));
  const res=await api('api/chat',body);if(res.error){if(res.needs_model){openModel(null,res.error);return false}if(res.claude){showClaude(res.claude);return false}if(!res.silent)alert(res.error);return false}
  if(res.steered){toBottom();return true}   // shown in the running reply when the server relays it
- session=res.session;rememberChat();liveTurn(text,null,(files||[]).map(f=>({name:f.name,size:f.size})));return true}
+ const fresh=!session;session=res.session;if(fresh&&auto)api('api/auto',{session,on:true});rememberChat();liveTurn(text,null,(files||[]).map(f=>({name:f.name,size:f.size})));return true}
 // Messages re-sent after Stop carry a prefix for the agent; show the user's own words plus a tag.
 function userMsg(text,note,ts,files){const m=/^\[The user stopped the previous run(?: and asks:\] |\. Messages they sent meanwhile, in order:\]\n\n)/.exec(text||'');
  if(m){text=text.slice(m[0].length);note=note||'sent while the stopped run was working'}
@@ -360,7 +364,7 @@ async function loadSessions(){const ss=await api('api/sessions');if(!Array.isArr
   loadSessions()})}
 function rememberChat(){try{session?sessionStorage.setItem('moirai_chat',session):sessionStorage.removeItem('moirai_chat')}catch(_){}}
 async function openSession(id){const s=await api('api/session/'+id);if(s.error)return;
- if(es){es.close();es=null}setRunning(false);session=id;rememberChat();setMode(s.mode||'ask');
+ if(es){es.close();es=null}setRunning(false);session=id;rememberChat();setMode(s.mode||'ask');api('api/auto?session='+id).then(r=>showAuto(r&&r.on));
  if(s.model)$('#model').value=s.model;$('#log').innerHTML='';lastDay=null;
  const T=s.turns||[];nTurns=T.length;
  agentsReset();pollJobs();pollLessons();
@@ -463,8 +467,10 @@ $('#send').onclick=send;$('#stop').onclick=async()=>{const b=$('#stop');b.disabl
  if(r&&r.queued){if(es){es.close();es=null}setRunning(false);
   document.querySelectorAll('.steer-msg .st').forEach(x=>{if(!x.textContent.startsWith('✓'))x.textContent='↻ not seen before Stop — re-sent as the next run'});liveTurn(r.message,'sent while the stopped run was working — running now')}};
 $('#input').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();send()}};
-$('#newbtn').onclick=()=>{session=null;rememberChat();nTurns=0;agentsReset();pollJobs();pollLessons();if(es){es.close();es=null}setRunning(false);$('#log').innerHTML='';lastDay=null;renderEmpty();loadSessions()};
+$('#autobtn').onclick=async()=>{const on=!auto;if(session){const r=await api('api/auto',{session,on});if(r.error)return}showAuto(on)};
+$('#newbtn').onclick=()=>{session=null;showAuto(false);rememberChat();nTurns=0;agentsReset();pollJobs();pollLessons();if(es){es.close();es=null}setRunning(false);$('#log').innerHTML='';lastDay=null;renderEmpty();loadSessions()};
 </script>
+<script src="diagrams.js"></script>
 <script src="moirai.js"></script>
 </body>
 </html>

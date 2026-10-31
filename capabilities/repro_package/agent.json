@@ -1,0 +1,13 @@
+{
+ "description": "Generates final_provenance (generic or flux-batch mode) and proves it in a clean shell.",
+ "level": "level_2",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "repro_package"
+ ],
+ "permission_mode": "default",
+ "background": true,
+ "instructions": "Run repro_build, repro_verify and repro_validate, and report the counts of the isolated run and what was not exercised. Never edit the package by hand. Never start a service on the login node."
+}

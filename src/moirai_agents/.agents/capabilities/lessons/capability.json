@@ -8,7 +8,11 @@
   "lesson_add",
   "lesson_list",
   "lesson_search",
+  "lesson_revise",
   "lesson_validate",
+  "consolidation_report",
+  "lesson_merge",
+  "consolidation_keep",
   "lesson_decide"
  ],
  "review": [],

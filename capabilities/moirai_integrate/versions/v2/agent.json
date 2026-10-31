@@ -1,0 +1,18 @@
+{
+ "description": "Builds the annotated application against moirai.",
+ "level": "level_2",
+ "tools": [
+  "Read",
+  "Grep"
+ ],
+ "skills": [
+  "moirai_integrate",
+  "software-cmake",
+  "software-autotools",
+  "software-meson",
+  "software-pip"
+ ],
+ "permission_mode": "default",
+ "background": true,
+ "instructions": "Run integrate_apply and integrate_validate; fix build failures through their arguments; report the flags used and whether env_pythonpath and env_import passed (the annotate stage defers that rule to this one)."
+}

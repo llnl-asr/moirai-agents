@@ -8,7 +8,7 @@ A capability is one folder in `src/moirai_agents/.agents/capabilities/<name>/`. 
 
 The standing rule: anything explored becomes a capability, constantly. A new workload, software, tool or system met in any stage is captured as `workload_<x>`, `software_<x>`, `tools_<x>` or `system_<x>`, or extends one that exists. The rule is `capstore.STANDING`: every chat prompt, rendered agent and `CLAUDE.md` carries it, `pipeline_advance` repeats it after each stage, and a skill whose Self-learn section omits it is refused. These families and their skill shape match dftracer-agents; `capability_builder` has the template.
 
-`knowledge_search` is the first place to look. It walks one graphify graph over every capability, lesson and memory, and dftracer-agents' workload, software, system and tools skills and memories, then reads lessons and memory directly, because the graph matches headings and symbols rather than body text. The graph rebuilds itself when anything it covers changes. A `UserPromptSubmit` hook puts the best rows not yet shown in the session in front of each prompt. `memory_write` keeps what is true here, in `~/.moirai-agents/learning/memory/`.
+`knowledge_search` is the first place to look. It walks one graphify graph over every capability, lesson and memory, and dftracer-agents' workload, software, system and tools skills and memories, then reads lessons and memory directly, because the graph matches headings and symbols rather than body text. The graph rebuilds itself when anything it covers changes. When a tool fails, its result carries `known_lessons`, the closest lessons found through the graph, including the lesson sections of dftracer-agents' skills, so an agent reads what is known before exploring. A `UserPromptSubmit` hook puts the best rows not yet shown in the session in front of each prompt. `memory_write` keeps what is true here, in `~/.moirai-agents/learning/memory/`.
 
 | File | Holds |
 |---|---|
@@ -20,6 +20,10 @@ The standing rule: anything explored becomes a capability, constantly. A new wor
 | `LESSONS.md` | what use has taught it |
 
 Every capability is a **predictor, validator, corrector** loop. A tool predicts. A separate deterministic tool validates. On failure, the verdict sends the agent to the skill's Corrector section, which repairs the original tool or its input; then it predicts and validates again. Attempts follow measured progress: three to start, more while the failures change, and the same failure twice stops the loop for the user. A bundle that does not declare the loop is refused.
+
+Lessons and capabilities go through the same review, in their panels: accept, reject, or refine by editing them or asking the agent. A refused edit changes nothing, and a correction to an applied lesson or a live capability takes effect only once it is accepted.
+
+The web server looks for overlapping or conflicting lessons and capabilities in the background, and shows a **consolidate** marker next to the panel's title. Clicking it starts the work in its own chat on the server's node. Merges and changes are proposals, and contradictions go to the user.
 
 `capability_builder` is the capability that builds capabilities: `capability_new` and `capability_update` validate a proposal and run its checks in a sandbox, a person approves, and it goes live with no restart.
 
@@ -45,11 +49,12 @@ scripts/setup_env.sh          # .venv, with dftracer-agents editable
 $EDITOR .env                  # MOIRAI_AGENTS_MOIRAI_PYTHON, model access
 scripts/webui_start.sh        # prints your link and the tunnel command
 scripts/webui_stop.sh         # stops it and everything it started
+scripts/webui_kill.sh         # stops your servers on every login node; --list only shows them
 ```
 
 You run it yourself, as yourself: there are no accounts and no sign-in. Open the printed link; its private token only keeps other people on a shared login node out of an agent running as you.
 
-Chats on the left, Chat and Dashboard in the middle, and Steps, Agents, Jobs, Lessons and Capabilities on the right. Each step is one row: its name opens what happened in it, and a step with traces links to their timeline and provenance in the Dashboard. Models: Claude, OpenAI or LivAI, each verified before it is saved. Every chat runs Claude Code in your workspace.
+Chats on the left, Chat and Dashboard in the middle, and Steps, Agents, Jobs, Lessons and Capabilities on the right. Each step is one row: its name opens what happened in it, and a step with traces links to their behaviors, runtime, temporal graph and knowledge graph in the Dashboard. Models: Claude, OpenAI or LivAI, each verified before it is saved. Every chat runs Claude Code in your workspace.
 
 **The Dashboard is [dfdashboard](https://github.com/llnl-asr/dfdashboard).** The web UI starts it on first use, on a private port, and forwards `/dash/` to it, so there is one URL and one tunnel, and it stops with the server. Its Provenance view follows a run while `moirai-service` writes the trace: time runs top to bottom, a bar on the right describes what you select, and you can pick entities by type and show or hide activities, entity types and I/O. To look at any traces, paste a directory, a `.pfw.gz` file or a glob into the box at the top of the tab: they are linked, not copied, and a folder still being written stays live.
 
