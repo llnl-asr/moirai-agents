@@ -134,6 +134,7 @@ async function dgGraph(el,d){
  el.oninput=ev=>{if(ev.target.dataset.k!=='find')return;const q=ev.target.value.trim().toLowerCase();cy.nodes().removeClass('hit');if(!q)return;
   const m=cy.nodes().filter(n=>n.data('label').toLowerCase().includes(q));m.addClass('hit');if(m.length)cy.animate({fit:{eles:m,padding:80},duration:200})};
  el._onTheme=()=>cy.style(dgStyle());
+ el._snap=()=>cy.png({full:true,scale:2,bg:'#ffffff',output:'base64uri'});
  if(d.edited)say('Showing your saved version. "Back to published" returns to what the step produced.');
 }
 
@@ -143,6 +144,7 @@ async function dgBokeh(el,d){await dgLoad('vendor/bokeh/bokeh.min.js');
  el.innerHTML=`<div class="dgbar"><span class="sub">${dgEsc(d.kind)} chart · pan, wheel to zoom, hover for values, click a legend entry to hide it</span><span class="sp"></span><select data-k="dl" title="Download"><option value="">Download…</option><option value="svg">SVG (vector)</option><option value="pdf">PDF (vector)</option><option value="png">PNG</option></select><button class="btn" data-k="big" title="Larger (Esc closes)">⤢</button></div><div class="dgcv bk"></div><div class="dgmsg"></div>`;
  const box=el.querySelector('.dgcv'),msg=el.querySelector('.dgmsg');box.id='bk'+(++DG.seq);if(want&&have&&want!==have)msg.textContent=`This chart was made by bokeh ${d.item.version} and the page has ${Bokeh.version}; publish it again if it does not draw.`;
  const views=await Bokeh.embed.embed_item(d.item,box.id),v=views?[...views][0]:null;el._reflow=()=>{};      // embed_item returns a view manager: iterate it
+ el._snap=async()=>{if(!v)return null;const blob=await v.export('png').to_blob();return await new Promise((ok,no)=>{const r=new FileReader();r.onload=()=>ok(r.result);r.onerror=no;r.readAsDataURL(blob)})};
  el.onclick=ev=>{if(ev.target.closest('[data-k=big]'))el.classList.toggle('big')};
  el.onchange=async ev=>{const t=ev.target;if(t.dataset.k!=='dl')return;const f=t.value;t.value='';if(!f)return;
   try{if(!v)throw new Error('the chart is not ready');const blob=await v.export(f==='png'?'png':'svg').to_blob();if(f==='pdf')await dgPdfFromSvg(await blob.text(),d.name);else dgSaveFile(d.name+'.'+f,blob)}catch(e){msg.textContent='Download failed: '+(e.message||e)}}}

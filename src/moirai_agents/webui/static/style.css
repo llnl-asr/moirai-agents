@@ -107,7 +107,8 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0}
 .ask .opt:hover{border-color:var(--accent)}.ask .opt.sel{border-color:var(--accent);box-shadow:0 0 0 1px var(--accent) inset}
 .ask .opt .d{color:var(--muted);font-size:12.5px}.ask .rec{font-size:11px;color:var(--ok);margin-left:6px}
 .ask textarea{width:100%;min-height:44px;margin-top:6px;border:1px solid var(--line);border-radius:8px;padding:6px 8px;background:var(--bg)}
-.ask .acts{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}.ask.done{opacity:.65}.ask.done .opt,.ask.done button{pointer-events:none}
+.ask .acts{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}.ask.done .opt:not(.sel){opacity:.55}.ask.done .opt,.ask.done button{pointer-events:none}
+.ask.done textarea,.ask.done .acts{display:none}.ask .asked{margin-top:6px;font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere}
 .fb{display:flex;gap:6px;align-items:center;margin-top:8px;font-size:12px;color:var(--muted);flex-wrap:wrap}
 .fb button{border:1px solid var(--line);background:var(--panel);border-radius:6px;padding:1px 8px;cursor:pointer}
 .fb button.on{border-color:var(--accent);color:var(--accent)}.fb input{flex:1;min-width:160px;border:1px solid var(--line);border-radius:6px;padding:2px 6px;background:var(--bg)}
@@ -267,5 +268,6 @@ details.jg .cnt{color:var(--muted);font-weight:400}details.jg>details,details.jg
 .jd{padding:0 8px 7px 22px;font-size:11.5px}.jd:empty{display:none}.jd .jdh{color:var(--muted);margin-top:6px}.jd .jdv{overflow-wrap:anywhere;font-family:ui-monospace,Menlo,monospace;font-size:11px}
 .jd pre{margin:2px 0 0;max-height:260px;overflow:auto;background:var(--code);padding:6px;border-radius:6px;font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}
 .btn.auto{padding:3px 10px}.btn.auto.on{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}.ask .autonote{margin-top:6px;font-size:12.5px;color:var(--ok);font-weight:600}
+#pdfbtn{padding:3px 10px;margin-left:auto}.pfull{display:none}
 .dshow{flex:none;max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;font-weight:600}.dshow:empty{display:none}
 .consol{margin-left:6px;border:1px solid var(--warn);background:none;color:var(--warn);border-radius:9px;padding:0 7px;font:600 10.5px inherit;text-transform:none;letter-spacing:0;cursor:pointer}.consol.bad{border-color:var(--bad);color:var(--bad)}

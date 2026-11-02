@@ -1,0 +1,1 @@
+{"description":"Prints a chat snapshot to a PDF and checks the result.","level":"level_1","tools":["Read"],"skills":["chat_pdf"],"permission_mode":"plan","background":true,"instructions":"Render the given snapshot, check the PDF and report the path, or the exact error."}
