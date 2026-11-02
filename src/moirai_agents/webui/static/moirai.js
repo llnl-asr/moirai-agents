@@ -123,14 +123,14 @@ async function pollConsolidation(){if(!me)return;const d=await api('api/consolid
 const askCard0=Renderer.prototype.askCard;
 Renderer.prototype.askCard=function(e){askCard0.call(this,e);let q={};try{q=JSON.parse(e.input)}catch(_){}
  if(!q.pipeline||!q.stage||this.answered)return;
- const cards=this.b.querySelectorAll('.ask'),c=cards[cards.length-1];if(!c)return;
+ const cards=this.b.querySelectorAll('.ask'),c=cards[cards.length-1];if(!c||c.classList.contains('done'))return;
  const ta=c.querySelector('textarea');ta.placeholder='What should change, or what should be remembered?';
  const g=document.createElement('div');g.className='gate';
  g.innerHTML=`<button class="btn primary" data-k="approve">Approve ${esc(q.stage)}</button><button class="btn" data-k="process">Change the process</button><button class="btn" data-k="remember">Remember this</button><div class="hint">Change the process becomes a new or updated capability, which you approve. Remember this becomes a lesson.</div>`;
  c.appendChild(g);dgGate(c,q);const head=`[Gate: pipeline ${q.pipeline}, stage ${q.stage}]`;
  g.querySelectorAll('button').forEach(b=>b.onclick=()=>{const t=ta.value.trim(),k=b.dataset.k;if(k!=='approve'&&!t){ta.focus();return}
   const msg=k==='approve'?`${head} Approved.${t?' Comment: '+t:''} Record it with pipeline_decide, then pipeline_advance.`:k==='process'?`${head} Process feedback, pipeline_feedback kind=process: ${t}`:`${head} Remember, pipeline_feedback kind=remember: ${t}`;
-  c.classList.add('done');sendText(msg)})};
+  c.classList.add('done');sendText(msg).then(ok=>{if(ok)c._show([],t,{approve:'Approved',process:'Change the process',remember:'Remember this'}[k]);else c.classList.remove('done')})})};
 
 // ---- Dashboard: dfdashboard, behind this server's port. It opens a pipeline's run by itself, or any traces given by path.
 function dashOpen(p){dash.pid=p.id;dash.run=p.dash_run;dash.label='latest run of '+p.name;dashRender()}

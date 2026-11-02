@@ -1,0 +1,1 @@
+[{"tool":"chat_pdf_check","args":{"pdf":"no-such.pdf"},"expect":{"json":{"status":"error"}}},{"tool":"chat_pdf_render","args":{"snapshot":"no-such.html","out":"no-such.pdf"},"expect":{"json":{"status":"error"}}}]

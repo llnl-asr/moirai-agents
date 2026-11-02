@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 import secrets
+import tempfile
 import uuid
 from http import cookies
 from pathlib import Path
@@ -297,6 +298,25 @@ def model_post(h, app, user, path, body):
     return send_json(h, dict(ModelConfig.public(d), ok=True))
 
 
+def chat_pdf(h, body):
+    """Export PDF: the snapshot the page sent, through whichever version of the chat_pdf capability is active."""
+    if body.get("_too_big"):
+        return send_json(h, {"error": "this chat is too large to export"}, 413)
+    with tempfile.TemporaryDirectory(prefix="moirai-chat-pdf-") as d:
+        snap, pdf = Path(d) / "chat.html", str(Path(d) / "chat.pdf")
+        snap.write_text(body.get("html") or "")
+        r = capstore.call("chat_pdf", "chat_pdf_render", snapshot=str(snap), out=pdf, title=body.get("title") or "moirai-agents chat", css=str(R.STATIC / "style.css"), when=body.get("when") or "")
+        r = capstore.call("chat_pdf", "chat_pdf_check", pdf=pdf) if r["status"] == "ok" else r
+        if r["status"] != "ok":
+            return send_json(h, {"error": r["error"]}, 500)
+        b = Path(pdf).read_bytes()
+    h.send_response(200)
+    h.send_header("Content-Type", "application/pdf")
+    h.send_header("Content-Length", str(len(b)))
+    h.end_headers()
+    h.wfile.write(b)
+
+
 def chat(h, app, user, st, body):
     tkey = lambda sid: f"{user['uid']}/{sid}"   # noqa: E731
     if body.get("_too_big"):
@@ -385,6 +405,8 @@ def post_route(h, app, life, u, body):
         edit = (body.get("skill", ""), body.get("code", ""), body.get("note", ""), user["name"])
         r = capstore.refine(body["id"], *edit) if body.get("id") else capstore.revise(body.get("name", ""), *edit)
         return send_json(h, capstore.apply(r["id"], True, user["name"]) if body.get("approve") and r["status"] == "ok" else r)
+    if u.path == "/api/chat/pdf":
+        return chat_pdf(h, body)
     if u.path == "/api/job/stop":
         return send_json(h, jobs.stop(body.get("pipeline", ""), body.get("job", "")))
     if u.path == "/api/delete":

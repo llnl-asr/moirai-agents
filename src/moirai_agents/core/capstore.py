@@ -85,6 +85,19 @@ def all_caps() -> Dict[str, Tuple[str, Path, dict]]:
     return out
 
 
+def call(cap: str, tool: str, **args):
+    """Run a capability's tool from the web server, always the active version: what was refined and approved is what runs."""
+    if cap not in (caps := all_caps()):
+        return _err(f"no capability {cap}")
+    path = caps[cap][1] / "tool.py"
+    spec = importlib.util.spec_from_file_location(f"moirai_call_{cap}", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    shim = ToolShim(cap)
+    mod.register(shim)
+    return shim.tools[tool]["fn"](**args)
+
+
 def _err(msg: str, **extra) -> dict:
     return {"status": "error", "error": msg, **extra}
 
