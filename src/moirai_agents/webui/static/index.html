@@ -116,6 +116,15 @@ function showLogin(){running=false;$('#log').innerHTML='<div class="empty"><h2>T
 async function api(path,body,again){const r=await fetch(path,body?{method:'POST',headers:authH({'Content-Type':'application/json'}),body:JSON.stringify(body)}:{headers:authH()});
   if(r.status===401){showLogin();return {error:'unauthorized',silent:true}}
  return r.json()}
+let modePinned=false;   // set once the user clicks a mode themselves: auto-switching then stays out of their way
+document.querySelectorAll('#modeseg button').forEach(b=>b.onclick=()=>{modePinned=true;setMode(b.dataset.m)});
+// Pick the mode a prompt needs. Only ever leaves Ask (a question mode) for the mode that can do the work.
+function wantedMode(t){t=(t||'').toLowerCase();
+ if(/\b(traces?|\.pfw|dashboard|dfanalyzer|analy[sz]e (the )?(traces?|data))\b/.test(t)&&/\b(analy|explor|ingest|dashboard|look at|open)/.test(t))return 'analysis';
+ if(/\b(annotate|annotation|instrument|smoke|build|compile|install|run|launch|execute|baseline|integrate|pipeline|clone|rebuild|profile)\b/.test(t))return 'run';
+ return null}
+function autoMode(t){if(modePinned||mode!=='ask')return;const w=wantedMode(t);
+ if(w&&w!==mode){setMode(w);}}
 function setMode(m){mode=m;document.querySelectorAll('#modeseg button').forEach(b=>b.classList.toggle('on',b.dataset.m===m));if(!session)renderEmpty()}
 function renderEmpty(){lastDay=null;$('#pdfbtn').disabled=true;const H={ask:['Ask about provenance','Questions about moirai and your traces.'],run:['Run pipeline','Explore, smoke test, annotate, integrate with moirai, run, watch it live, query. You approve every step.'],analysis:['Analysis pipeline','Give it traces: explore them on the Dashboard and with queries.']}[mode];
  $('#log').innerHTML=`<div class="empty"><h2>${H[0]}</h2><div>${H[1]}</div>
@@ -239,9 +248,9 @@ class Renderer{constructor(b,opts={}){this.b=b;this.cur=null;this.buf='';this.to
     else{this.meta(`${t}💡 lesson proposed${q.kind?' ('+q.kind+')':''} → ${q.target||'?'}: ${(q.lesson||[q.symptom,q.fix].filter(Boolean).join(' → ')).slice(0,160)} (approve it in the Learning panel)`);setTimeout(pollLessons,1500)}}
    {const d0=this.tools[e.id];if(d0){d0.querySelectorAll(':scope > pre.live, :scope > .live-h').forEach(x=>x.remove());if(d0.dataset.autoOpened)d0.open=false}}if(this.plots&&this.plots[e.id]){try{const r=JSON.parse(e.text);if(r.plot_id){const h=document.createElement('div');this.b.appendChild(h);renderPlot(h,r.plot_id)}}catch(_){}}
    const d=this.tools[e.id];if(!d)break;d.querySelector('.dot').classList.add(e.is_error?'bad':'ok');
-   d.querySelector('summary .stt').textContent=e.is_error?'error':'done';toolDone(d,e);d.insertAdjacentHTML('beforeend',fmtResult(e.text,e.is_error));
+   d.querySelector('summary .stt').textContent=e.is_error?'error':'done';toolDone(d,e);d.insertAdjacentHTML('beforeend',fmtResult(e.text,e.is_error));d.querySelectorAll(':scope > .res pre').forEach(p=>p.scrollTop=p.scrollHeight);
    if(e.is_error&&/requested permissions|No such tool available|is disabled/i.test(e.text||'')&&!this.hinted){this.hinted=true;
-    this.meta(mode==='ask'?'This tool is blocked in Ask mode. To build or run, switch to Run.':'This tool is not allowed for agent sessions; ask moirai-agents for another way.')}break}
+    if(mode==='ask'){setMode('run');this.meta('That needs Run mode: switched to Run. Send your message again (or click Ask to go back).')}else this.meta('This tool is not allowed for agent sessions; ask moirai-agents for another way.')}break}
   case 'init':{const m=(e.mcp_servers||[]).map(s=>`${s.name}:${s.status}`).join(' ');this.meta(`session started · ${e.model||''} · ${e.tools} tools · ${m}`);break}
   case 'result':this.cur=null;if(e.is_error&&e.text){const x=document.createElement('div');x.className='err';x.textContent=e.text;this.b.appendChild(x)}
    this.meta(`${e.turns??'?'} turns · ${e.duration_ms?(e.duration_ms/1000).toFixed(1)+' s':''}${e.cost_usd?` · $${e.cost_usd.toFixed(3)}`:''}`);this.feedbackBar();break;
@@ -254,7 +263,7 @@ class Renderer{constructor(b,opts={}){this.b=b;this.cur=null;this.buf='';this.to
   scroll()}
  meta(t){const m=document.createElement('div');m.className='meta';m.textContent=t;this.b.appendChild(m)}
  askCard(e){let q={};try{q=JSON.parse(e.input)}catch(_){q={question:e.input}}
-  const kind=q.kind||'choose',multi=kind==='multi';let opts=q.options||[];
+  const kind=q.kind||'choose',multi=kind==='multi';let opts=(q.options||[]).map(o=>typeof o==='string'?{label:o}:Object.assign({},o,{label:o.label||o.text||o.title||o.name||o.value||o.option||'',description:o.description||o.desc||''})).filter(o=>o.label);
   if(!opts.length&&kind==='confirm')opts=[{label:'Yes, go ahead',recommended:true},{label:'No'}];
   const c=document.createElement('div');c.className='ask'+(this.answered?' done':'');
   c.innerHTML=`<div class="q">❓ ${esc(q.question||'')}</div>${q.context?`<div class="ctx">${md(q.context)}</div>`:''}${q.details?`<details class="askd"><summary>Details</summary><div class="ctx">${md(q.details)}</div></details>`:''}
@@ -340,6 +349,7 @@ $('#input').addEventListener('keydown',e=>{if(e.altKey||e.ctrlKey||e.metaKey||e.
  else if(e.key==='Escape'&&hPos!==null){histShow(null);e.preventDefault()}});
 $('#input').addEventListener('input',()=>{if(hPos!==null){hPos=null;$('#input').classList.remove('hist')}});   // edited: it is the draft now
 async function send(){const text=$('#input').value.trim(),files=PENDING.slice();if(!text&&!files.length)return;
+ autoMode(text);
  histPush(text);$('#input').value='';$('#input').classList.remove('hist');PENDING=[];renderChips();
  if(!await sendText(text,running,files)){$('#input').value=text;PENDING=files;renderChips()}}
 $('#attach').onclick=()=>$('#fileinp').click();

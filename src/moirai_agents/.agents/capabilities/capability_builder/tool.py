@@ -34,12 +34,19 @@ def register(mcp):
         return S.propose(name, tool_code, skill_md, a, c, description, why, stages, layer, "new", pvc=pvc)
 
     @mcp.tool()
-    def capability_update(name: str, tool_code: str, skill_md: str, agent: dict, checks: list, why: str, description: str = "", pvc: dict = None) -> dict:
+    def capability_update(name: str, why: str, tool_code: str = "", skill_md: str = "", agent: dict = None, checks: list = None,
+                          description: str = "", pvc: dict = None) -> dict:
         """Propose a new version of a capability, with a check that reproduces what was wrong. Use for process feedback and to
-        repair a failing tool. Same arguments as capability_new. Returns {status, id, diff, next} or {status: error, problems}."""
-        a, c = _pick(agent, checks)
+        repair a failing tool. Same arguments as capability_new, but tool_code, skill_md, agent and checks are optional: leave out what stays
+        and the current version's text is kept (a wording change in a skill needs only name, why and skill_md; pass the whole new text of what you do give).
+        Returns {status, id, diff, next} or {status: error, problems}."""
+        cur = S.get(name)
+        if cur.get("status") != "ok":
+            return cur
+        a, c = _pick(agent if agent else cur["agent"], checks if checks else cur["checks"])
         ex = S.all_caps().get(name)
-        return S.propose(name, tool_code, skill_md, a, c, description or (ex[2].get("description", "") if ex else ""), why, kind="update", pvc=pvc)
+        return S.propose(name, tool_code or cur["code"], skill_md or cur["skill"], a, c,
+                         description or (ex[2].get("description", "") if ex else ""), why, kind="update", pvc=pvc)
 
     @mcp.tool()
     def capability_refine(id: str, note: str, skill_md: str = "", tool_code: str = "") -> dict:

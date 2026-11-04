@@ -154,3 +154,9 @@ def report() -> Dict[str, Any]:
     kept = _kept()
     fresh = lambda groups: [g for g in groups if _key(g["ids"]) not in kept]  # noqa: E731
     return {"lessons": fresh(lessons()), "capabilities": fresh(capabilities()), "checked": round(time.time(), 1)}
+
+
+def unkept(rep: Dict[str, Any]) -> Dict[str, Any]:
+    """A report from a while ago without the groups someone has since kept, so the page does not show a decided group until the next check."""
+    kept = _kept()
+    return {**rep, **{k: [g for g in rep.get(k, []) if _key(g["ids"]) not in kept] for k in ("lessons", "capabilities")}}

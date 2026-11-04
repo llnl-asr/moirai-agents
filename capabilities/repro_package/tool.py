@@ -1409,21 +1409,21 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
         return {"status": "ok" if r["ok"] else "error", **r}
 
     @mcp.tool()
-    def repro_publish_traces(pipeline: str, publish_root: str, app: str, run_dir: str = "", timestamp: str = "", kind: str = "baseline", flux_job: str = "") -> dict:
+    def repro_publish_traces(pipeline: str, publish_root: str, app: str, run_dir: str = "", timestamp: str = "", kind: str = "baseline", flux_job: str = "", run_sh: str = "") -> dict:
         """Copy a run's raw traces (+ .dftindex) and write README.md, run.json, run.sh, graph_summary.json into <publish_root>/provenance-traces/<app>/<timestamp>/ (new dir only). Every
         count comes from the graph tools (moirai trace reader), never typed; a missing fact reads 'not recorded'. kind=baseline: the pipeline's baseline run (run_dir default: the folder
         holding the baseline stage's raw traces; run.sh: the baseline stage's run script; timestamp default: its flux job start, as repro_publish_plan). kind=verification: the in-place run of the
         published package (run_dir default: <OUTPUT_ROOT>/traces/<scale>; run.sh from <OUTPUT_ROOT>/work/<scale>; timestamp default: the job start in the verification record, which is written
-        first if the job has finished; verification.json is copied along). flux_job: the flux id of the run, for job id / runtime / start. Returns {status, target, files, trace_files, trace_bytes, counts}."""
+        first if the job has finished; verification.json is copied along). flux_job: the flux id of the run, for job id / runtime / start. run_sh: the exact launch script when the stage did not record one (BioTox: provenance/runs/baseline/launch.sh). Returns {status, target, files, trace_files, trace_bytes, counts}."""
         c = P.load(pipeline)
-        meta, run_sh, wrapper = {}, "", None
+        meta, wrapper = {}, None
         try:
             if kind == "baseline":
                 base = P.stage(c, "baseline")["outputs"]
                 rd = Path(run_dir) if run_dir else Path(base["traces"]).parent
                 fid = flux_job or (_find_flux_id(J.get(pipeline, base["job"], 40000).get("log_tail", "")) if base.get("job") else "")
                 meta.update(queue=base.get("queue"), scale="baseline")
-                run_sh = base.get("run_script") or base.get("batch_script") or ""
+                run_sh = run_sh or base.get("run_script") or base.get("batch_script") or ""
                 wrapper = base.get("wrapper")
             elif kind == "verification":
                 st = _verification_record(pipeline)

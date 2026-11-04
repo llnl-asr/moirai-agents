@@ -618,6 +618,14 @@ class _Done:      # stand-in for "no turn": counts as finished
     done = True
 
 
+LEARN_TOOLS = ("lesson_add", "lesson_revise", "capability_new", "capability_update", "capability_refine")
+REFLECT = ("[Turn check, automatic] This turn ended and no lesson or capability was recorded. Every turn must leave something behind. "
+           "Re-read what the user said and what you did and met: any correction, preference, answer, approval or rejection, and anything new or different "
+           "(workload, software, tool, system, way of doing it, a failure and its fix). knowledge_search for the capability it concerns, then call lesson_add "
+           "(or capability_update / capability_new when it is a procedure or a new subject) with the user's words as evidence. If truly nothing was learnt, "
+           "call lesson_add on capability_builder saying so in one line, with what the turn was about. Then stop; reply with one line.")
+
+
 class Turn:
     """One running `claude -p` process; events are fanned out to listeners."""
 
@@ -980,6 +988,7 @@ class Turn:
             del cmd[i:i + 2]
         self.sent = self.consumed = self.answered = 0
         overflow = False
+        learned = reflected = False
         self.proc = subprocess.Popen(cmd, cwd=self.cwd, env=self.env, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                      bufsize=1, start_new_session=True)
@@ -1002,16 +1011,31 @@ class Turn:
                                                            "text": line[:20000]})
                 continue
             msg = self._redact_msg(msg)       # uploaded content never reaches chats/provenance
+            if msg.get("type") == "assistant":
+                for blk in (msg.get("message") or {}).get("content") or []:
+                    if isinstance(blk, dict) and blk.get("type") == "tool_use" and str(blk.get("name", "")).endswith(LEARN_TOOLS):
+                        learned = True
             self._provenance_stream(msg)
             if (msg.get("type") == "user" and not msg.get("parent_tool_use_id")
                     and isinstance((msg.get("message") or {}).get("content"), str)):
                 self.consumed += 1                      # our own message, echoed: the agent has it
-                if self.consumed > 1:
+                if self.consumed > 1 and not (reflected and self.consumed == self.sent):
                     self.emit({"type": "steer_ack", "n": self.consumed - 1})
             if msg.get("type") == "result":
                 self.answered = self.consumed
                 with self.io_lock:                      # all input handled -> let claude exit
                     if self.consumed >= self.sent:
+                        if (not learned and not reflected and not msg.get("is_error") and not self.stopped_by_user
+                                and self.stdin_open and not os.environ.get("MOIRAI_AGENTS_NO_LEARN_CHECK")):
+                            # enforced learning: a turn that recorded nothing gets one more step, in the same context
+                            reflected = True
+                            self.emit({"type": "notice", "text": "Recording what this turn taught (lessons / capabilities)…"})
+                            wlog("learn-enforced", user=self.user["name"], chat=self.session["id"])
+                            if self._write_user(REFLECT):
+                                continue
+                        elif not learned and reflected:
+                            wlog("learn-missing", user=self.user["name"], chat=self.session["id"])
+                            self.emit({"type": "notice", "text": "No lesson was recorded for this turn."})
                         self._close_stdin()
             if msg.get("type") == "result" and msg.get("is_error") and _too_long(msg.get("result")):
                 overflow = True                         # handled by the caller (fresh session)

@@ -43,9 +43,13 @@ REVIEW_IMPORTS = {"socket": "opens network connections", "requests": "makes HTTP
 ABS_PATH = re.compile(r"(?:/usr/WS\d|/usr/workspace|/g/g\d+|/home/[a-z]|/p/(?:lustre|vast|gpfs)\d?/[a-z]|/Users/)")
 STANDING = ("Standing rules. knowledge_search comes first: it is how to find a capability, a skill, a past fix or a fact, before acting on anything unfamiliar. When anything fails, read "
             "known_lessons in the result, or call lesson_search with the error text, and try what they say before exploring on your own. Anything explored becomes a "
-            "capability, constantly: a new workload, software, tool or system met in any stage is captured before moving on, while the evidence is at hand. Extend what exists, else capability_new "
-            "named workload_<x>, software_<x>, tools_<x> or system_<x>, structured as capability_builder says. What is deterministic goes in its tool, what needs judgement in its skill, and a user "
-            "approves it. dftracer-agents' skills are reused, not copied: only what is new here is captured. An agent without capability_new ends its report with 'Capability needed:' and what it "
+            "capability, constantly, from every pipeline and process you run: a new workload, software, tool, system or way of doing something met in any stage is captured before moving on, while the "
+            "evidence is at hand, and so is anything that differs from what an existing capability says. Extend or update what exists (capability_update), else capability_new "
+            "named workload_<x>, software_<x>, tools_<x> or system_<x>, structured as capability_builder says. A complex procedure is split into steps, each step its own capability, "
+            "and a parent capability's skill names them in order (Cross-references), so larger procedures are learnt from small proven ones. What is deterministic goes in its tool, what needs judgement in its skill, and a user "
+            "approves it. Every interaction with the user is also a lesson, with no \"learn this\" needed: a correction, a preference, a rejected or refined proposal, an answer to ask_user, "
+            "an approval with a condition, a repeated request. Before ending each turn, lesson_add what it taught to the capability it concerns (capability_new if none does), with the user's words as evidence. "
+            "dftracer-agents' skills are reused, not copied: only what is new here is captured. An agent without capability_new ends its report with 'Capability needed:' and what it "
             "found, for the main thread to build.")
 FAMILIES = ("workload_", "software_", "tools_", "system_")     # what is learnt: capabilities of these need Cross-references, so the graph links them
 SKILL_STANDING = "becomes a capability"       # what every skill's Self-learn section says

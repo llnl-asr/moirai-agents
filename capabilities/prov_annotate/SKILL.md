@@ -1,8 +1,8 @@
 ---
 name: prov_annotate
-description: Add moirai provenance to an application - find data accesses, agree entity types and activities with the user, insert them into a copy (decorate a function, patch or subclass a method, annotate a statement, invalidate, conditional edges), validate, and show the user an entity-type relationship diagram of what was annotated at the gate. Load for the annotate stage, or when a spec needs an inherited method, an inline subprocess step, a delete, a key from a local variable or an optional input, or when the annotate verdict is inconclusive about PYTHONPATH or moirai_env.sh.
+description: Add moirai provenance to an application - find data accesses, agree entity types and activities with the user, insert them into a copy (decorate a function, patch or subclass a method, annotate a statement, record a shell step of a Maestro YAML, invalidate, conditional edges), validate, and show the user an entity-type relationship diagram of what was annotated at the gate. Load for the annotate stage, or when a spec needs an inherited method, an inline subprocess step, a delete, a key from a local variable or an optional input, when the work is a shell command in a Maestro YAML `cmd:` step (AlphaFold 3, Rosetta FlexPepDock, BioTox, yaml_step), or when the annotate verdict is inconclusive about PYTHONPATH, moirai_env.sh or maestro_dry.
 ---
-Cross-references: [[moirai_integrate]] [[workload_elmerfold]] [[dftracer-provenance]] [[dftracer-annotate-general]]
+Cross-references: [[moirai_integrate]] [[workload_elmerfold]] [[workload_biotox]] [[dftracer-provenance]] [[dftracer-annotate-general]]
 
 # Annotate
 
@@ -27,8 +27,20 @@ moirai itself has all of these (moirai/include/moirai/provenance.h): activity re
   - `patch`: a method that exists but you cannot or should not decorate in place, or one inherited (`ServerTask.start`): `target: "ServerTask.start"`. A line `ServerTask.start = _moirai_prov.activity(...)(ServerTask.start)` is placed before the `if __name__ == "__main__"` guard, or at the end. `params` is needed when the target is not defined in that file.
   - `subclass`: insert `class ProvX(Base)` whose method calls `super()`. Fields `base`, `method`, optional `class_name`, `rebind` (also `Base = ProvX` in that module), `params`. The driver->server hop of Elmerfold: `generated inference_request` in the driver's `ServerTask` subclass `start()`, `used` with the same key in the server's `run_inference`.
   - `statement`: a one-shot activity (no duration) placed before or after one statement: `anchor` (text found in a statement's own header or line), `at` (before|after, default after), `occurrence` (default 1), `in` (a function to search in). Its key expressions read the surrounding locals by closure. Use for an inline `SubprocessTask`/`subprocess.run` step, and for ids from `args.incsv`, `args.config_preset`, `seed`, `config`. If the activity must span a function, wrap the function with keys from its parameters, and add a statement activity for what is computed inside it.
+  - `yaml_step`: a shell step of a Maestro YAML (`cmd: |`), where the work is a command (AlphaFold 3 `run_alphafold.py`, Rosetta `FlexPepDocking`) and no Python or C function wraps it. Fields `file` (the YAML), `step`, `name`, `used`/`generated`, optional `params` (Maestro names a parameter generator makes and the YAML never writes), `shell_vars`, `record_on_failure`. See "Maestro shell steps".
 - Conditional edge: `when` on an entity (`"when": "os.path.exists(path)"`) or on a relation; the edge is recorded only if it is true. For `allow_failure` outputs (templatefeat, model_1_ptm).
 - Entity edge: `relations: [{"relation": "contains", "subject": {type, key_expr, store}, "object": {...}, "when": "..."}]`, recorded after the function returns (so `result` can be used).
+
+## Maestro shell steps
+- What is written: a block at the top of the step's `cmd` in the COPY of the YAML (marked `# >>> moirai-agents yaml_step <step>` ... `# <<<`). It installs an EXIT trap. When the step ends the trap calls `_moirai_prov.py yaml-step` as a script with the rows whose files exist, in a subshell with all output discarded. It never calls `exit`, so the step's exit status and its early `exit 0` / `exit 1` are unchanged, and it does nothing when moirai is down or not found.
+- Which Python: `$MOIRAI_PYTHON`, else `dirname($MOIRAI_SERVICE)/python`, else the `python` beside `moirai-service` on PATH, else the moirai Python this machine had when annotate ran. This is resolved BEFORE the step activates its own venv, so AF3's venv and biotox-env (python 3.12) do not matter: the helper runs under the moirai venv (3.13) with `PYTHONPATH`, `PYTHONHOME` and `LD_PRELOAD` unset. The helper is the single root `_moirai_prov.py`, found through `PYTHONPATH` (as integrate exports it) or `$(SPECROOT)/<path to the root>`.
+- Keys and uris are shell text written inside double quotes after Maestro has substituted its variables: `$(SEQ)`, `$(SEED)`, `$(SAMPLE)`, `$(PEP_ID)`, `$(TARGET)`, `$(<step>.workspace)`, and shell variables the cmd assigns (`${CIF_FILE}`). Give both sides of a hop the same type and key text, for BioTox the case id `$(TARGET)/$(PEP_ID)/seed-$(SEED)_sample-$(SAMPLE)`; only the `uri` (the file) differs per side.
+- Existence: an entity on `local_disk`, `parallel_fs` or `burst_buffer` is recorded only if its `uri` exists. To tie a record to what the step really did, use a shell variable the cmd sets (`"uri": "${PDB_FILE}"`): an early exit leaves it unset and nothing is recorded. `when` is the argument list of `[ ... ]` (`-f "$CIF_FILE"`) and replaces the default test; `exists: false` records always. A file store without uri, when or exists:false is refused.
+- A step that exits non-zero records nothing unless `record_on_failure: true`.
+- The activity is written when the step ends, so it has no duration; a step is one activity per Maestro instance.
+- Refused with a reason: a step with its own `trap ... EXIT`, one that uses `exec`, a `shell:` other than bash or sh, a `cmd` that is not a `|` block, an entity text with a double quote, backtick or `$(command)`, and `invalidated`, `updated`, `relations` (Python only).
+- A scientific artifact may be generated only by `yaml_step` activities; `annotate_spec` counts them.
+- Try it before annotate_spec: `annotate_preview` with the YAML as text and `run_steps` runs the wrapped steps with bash against a fake moirai (`variables` for the Maestro names, `step_env` to break moirai on purpose).
 
 ## Constraints
 - The application source is read-only; `annotate_apply` always works on the provenance copy, `<session>/provenance/source`.
@@ -64,6 +76,10 @@ After `annotate_apply` and a passing `annotate_validate`:
 - RPC edges without editing the framework: `subclass` or `patch` the task type to record the driver side, and record the server side in the handler, with the identical type and key.
 - Try a spec first with `annotate_preview` (files as text, `run` a script): it applies the spec in a temp dir and runs the script against a fake moirai that records activities, relations and links, without a pipeline. `annotate_validate_preview` gives the verdict the same way; `annotate_diagram_preview` draws a draft spec.
 - The `coverage` check stays inconclusive when the smoke stage listed no output files; that is an earlier stage and is fixed there.
+- yaml_step: Maestro parameter-generator names (SEQ, SEED, SAMPLE, PEP_ID, TARGET) are known only through their use in the YAML; one the YAML never writes goes under the activity's `params`. A `$(<step>.workspace)` is allowed only for an ancestor in `depends`.
+- yaml_step: `maestro_dry` needs the same arguments the user runs maestro with when the study needs a parameter generator (`maestro_args: "--pgen gen.py --pargs inputs:<path>"`). If maestro cannot dry-run the SOURCE either, the check is inconclusive and says so; it never blames the wrapper for a source that fails by itself.
+- yaml_step: the YAML is edited line by line, never re-dumped, so comments and layout are kept; `yaml_intact` proves the YAML minus the blocks is the source byte for byte.
+- yaml_step: MOIRAI_YAML_STEP_LOG, if set in the step's environment, receives the helper's stderr (otherwise /dev/null): the way to see why nothing was recorded.
 
 ## Corrector
 Predictor `discover_scan`, `annotate_spec`, `annotate_apply`, `annotate_preview`, `annotate_diagram`, validator `annotate_validate`. A failed verdict comes here: fix the original tool or its input, then predict and validate again. The same failure twice stops the loop: change approach, or ask.
@@ -72,13 +88,16 @@ The original tool is `annotate_apply`, driven by the spec: correct the spec, re-
 
 | Failed check | Correct |
 |---|---|
-| `functions_found` | `Class.method` in Python, plain name in C; for a missing anchor or a name that is not in the module, fix `anchor`/`in`/`target`/`params`; re-run `annotate_spec` |
+| `functions_found` | `Class.method` in Python, plain name in C; for a missing anchor or a name that is not in the module, fix `anchor`/`in`/`target`/`params`; for yaml_step fix `step` or the text the message names (quote, `exec`, own EXIT trap); re-run `annotate_spec` |
 | `parses`, `compiles` | fix the `key_expr` type or scope |
-| `names_resolve` | the expression uses a name not in scope there: use a parameter, `result`, a module name, or move the anchor |
+| `names_resolve` | the expression uses a name not in scope there: use a parameter, `result`, a module name, or move the anchor; for yaml_step use a Maestro variable the study defines or uses, an ancestor's `$(step.workspace)`, a shell variable the cmd assigns, or list it under `params` / `shell_vars` |
 | `helper_single` | exactly one `_moirai_prov.py` at the annotated root; re-run `annotate_apply` |
 | `helper_on_pythonpath` (only when `moirai_env.sh` exists) | `integrate_apply` must export `PYTHONPATH=<annotated root>`; re-run it. If it does not exist yet, this is not a failure: it is under `deferred` and `integrate_validate` enforces it |
 | `inserted` | re-run `annotate_apply` |
 | `types_used` | relate the type or drop it |
+| `yaml_intact` | the annotated YAML was edited or the source changed: re-run `annotate_apply` |
+| `bash_syntax` | a key, uri or when breaks the shell: change that text in the spec, re-run `annotate_apply` |
+| `maestro_dry` fails | the wrapper broke the YAML (it passes on the source): re-run `annotate_apply`; if it persists `capability_update` with a check. Inconclusive: pass `maestro=` and `maestro_args=` |
 | a code pattern generated wrongly | `capability_update` with a check of that pattern (use `annotate_preview`) |
 | the diagram is wrong or unreadable | it is drawn from the applied spec: fix the spec and re-apply; for a layout or size problem `capability_update` with a check using `annotate_diagram_preview` |
 
@@ -87,6 +106,7 @@ The original tool is `annotate_apply`, driven by the spec: correct the spec, re-
 - `compiles` failed on a moirai line: the `key_expr` has the wrong type or names a variable not yet declared.
 - Generated code wrong for a pattern: `capability_update` with an `annotate_preview` check for that pattern.
 - A verdict inconclusive for a check that a later stage owns: that is a tool-design fault, not something to wait out. Move the check to the later stage's validator and list it under `deferred` here (as `helper_on_pythonpath` was).
+- A yaml_step records nothing at run time: set `MOIRAI_YAML_STEP_LOG=<file>` for the step and read it; check `MOIRAI_PYTHON` / `MOIRAI_SERVICE` reach the step's environment (flux and maestro pass only what the launcher forwards).
 
 ## Self-learn
 - Anything new explored here (workload, software, tool, system) becomes a capability: `capability_builder`, Rules.

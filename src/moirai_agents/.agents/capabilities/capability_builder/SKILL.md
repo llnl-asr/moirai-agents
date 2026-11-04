@@ -46,6 +46,15 @@ The skill follows dftracer-agents' shape, so its headings are what `knowledge_se
 
 Corrections and one-off fixes found later go to its LESSONS.md, not the skill.
 
+## Composite capabilities
+A complex procedure is not one big capability. Split it into steps, each step its own capability with its own tool, checks and validator; the parent's skill lists the steps in order with `Cross-references: [[step_a]] [[step_b]]` and says what passes between them. Build and prove the small steps first, then the parent. A step that turns out useful elsewhere is reused, not copied.
+
+## Learn from every run
+At the end of every pipeline stage or process, before moving on, ask: did I meet a workload, software, tool, system or way of doing it that no capability covers, or one that differs from what a capability says? If so, `knowledge_search`, then `capability_update` the existing one or `capability_new` a new one. The user's approval gate still applies. Do not carry the finding forward only in the chat.
+
+## Learn from every interaction
+Nobody has to say "learn this". Each message from the user is read for what it teaches: a correction, a preference, a choice at a gate, a rejected or refined proposal, a condition on an approval, the same request made twice. Before the turn ends, `lesson_add` it to the capability it concerns, quoting the user's words as evidence; if no capability concerns it, `capability_new`. Skip pure chit-chat and facts that only matter to this chat. Lessons are proposals: the user still approves them.
+
 ## Corner cases
 - Tool names are global: a name another capability owns is refused.
 - Checks run with an empty HOME and no network assumptions: test logic on data the check creates, not on a site's files.
