@@ -13,6 +13,20 @@ AUTO_STOP = re.compile(r"\s*(no\b|reject|stop|cancel|abort|do not|don't)", re.I)
 QUESTION_CHARS, CONTEXT_CHARS, CONTEXT_LINE_CHARS = 200, 900, 220
 
 
+def _norm_options(options) -> list:
+    """Options as {label, description, recommended}. Plain strings and {text|title|name|value} dicts are accepted; ones without any text are dropped."""
+    out = []
+    for o in options or []:
+        if isinstance(o, str):
+            o = {"label": o}
+        if not isinstance(o, dict):
+            continue
+        label = next((str(o[k]).strip() for k in ("label", "text", "title", "name", "value", "option") if o.get(k)), "")
+        if label:
+            out.append({"label": label, "description": str(o.get("description") or o.get("desc") or ""), "recommended": bool(o.get("recommended"))})
+    return out
+
+
 def _ask_problem(question: str, context: str) -> str:
     """Why this is too much to read at a glance, or "" when it is fine."""
     if len(question) > QUESTION_CHARS:
@@ -152,7 +166,9 @@ def register(mcp):
         problem = _ask_problem(question, context)
         if problem:
             return {"status": "error", "error": f"not shown to the user: {problem}"}
-        opts = options or ([{"label": "Yes, go ahead", "recommended": True}, {"label": "No"}] if kind == "confirm" else [])
+        opts = _norm_options(options) or ([{"label": "Yes, go ahead", "recommended": True}, {"label": "No"}] if kind == "confirm" else [])
+        if options and not opts:
+            return {"status": "error", "error": "not shown to the user: every option needs a non-empty label, e.g. options=[{\"label\": \"...\", \"description\": \"...\"}]"}
         auto = _auto_answer(kind, opts, pipeline, stage)
         if auto:
             return auto

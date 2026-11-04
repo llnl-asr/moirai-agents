@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import prompts
 from . import runtime as R
-from ..core import capstore, diagrams, jobs, learning, pipeline, provtrace
+from ..core import capstore, consolidate, diagrams, jobs, learning, pipeline, provtrace
 from .accounts import LABEL, PROVIDERS, ModelConfig
 from .bridge import OPENAI_URL
 
@@ -255,7 +255,7 @@ def get_route(h, app, life, u, q):
     if u.path == "/api/auto":
         return send_json(h, {"on": pipeline.auto_mode(q.get("session", [""])[0], user["workspace"])})
     if u.path == "/api/consolidation":
-        return send_json(h, getattr(app, "consolidation", None) or {"lessons": [], "capabilities": []})
+        return send_json(h, consolidate.unkept(getattr(app, "consolidation", None) or {"lessons": [], "capabilities": []}))
     if u.path == "/api/submitted":
         return send_json(h, {"jobs": jobs.submitted(float(q.get("since", ["0"])[0] or 0))})
     if u.path == "/api/capabilities":

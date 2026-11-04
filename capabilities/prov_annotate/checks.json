@@ -1301,5 +1301,614 @@
     "deferred": []
    }
   }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run_steps": "af3_msa,peptide_prepack",
+   "variables": {
+    "SEQ": "t1",
+    "PEP_ID": "Z",
+    "SEED": "1",
+    "SAMPLE": "2",
+    "OUT": "outputs",
+    "af3_msa.workspace": "."
+   },
+   "files": {
+    "mini.yaml": "description:\n    name: mini\n    description: fake biotox-like study\n\nenv:\n    variables:\n        OUT: outputs\n\nstudy:\n    - name: af3_msa\n      description: msa step\n      run:\n          cmd: |\n            mkdir -p $(OUT)/$(SEQ)\n            echo msa > $(OUT)/$(SEQ)/$(SEQ)_data.json\n          depends: []\n          nodes: 1\n    - name: peptide_prepack\n      description: prepack step\n      run:\n          cmd: |\n            [ \"$(PEP_ID)\" = \"-\" ] && { echo skip; exit 0; }\n            CIF_FILE=$(af3_msa.workspace)/$(OUT)/$(SEQ)/$(SEQ)_data.json\n            if [ ! -f \"${CIF_FILE}\" ]; then\n                echo missing\n                exit 3\n            fi\n            PDB_FILE=model_$(SEED).pdb\n            echo pdb > ${PDB_FILE}\n          depends: [af3_msa]\n          nodes: 1\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "cut_complex"
+    ],
+    "entity_types": [
+     {
+      "type": "msa_input",
+      "role": "intermediate",
+      "description": "the data json with the MSAs AlphaFold 3 made for one target",
+      "id_scheme": "target sequence id"
+     },
+     {
+      "type": "cut_complex",
+      "role": "output",
+      "description": "the complex cut around the peptide, input of docking",
+      "id_scheme": "target/chain/seed-S_sample-K"
+     }
+    ],
+    "activities": [
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "af3_msa",
+      "name": "af3_msa",
+      "generated": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "$(OUT)/$(SEQ)/$(SEQ)_data.json",
+        "store": "parallel_fs"
+       }
+      ]
+     },
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "peptide_prepack",
+      "name": "peptide_prepack",
+      "params": [
+       "SAMPLE"
+      ],
+      "used": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "${CIF_FILE}",
+        "store": "parallel_fs"
+       }
+      ],
+      "generated": [
+       {
+        "type": "cut_complex",
+        "key": "$(SEQ)/$(PEP_ID)/seed-$(SEED)_sample-$(SAMPLE)",
+        "uri": "${PDB_FILE}",
+        "store": "parallel_fs"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "missing": [],
+    "unresolved": [],
+    "step_rcs": [
+     0,
+     0
+    ],
+    "events": [
+     {
+      "activity": "af3_msa",
+      "relations": [
+       [
+        "GENERATED",
+        "msa_input",
+        "t1"
+       ]
+      ]
+     },
+     {
+      "activity": "peptide_prepack",
+      "relations": [
+       [
+        "USED",
+        "msa_input",
+        "t1"
+       ],
+       [
+        "GENERATED",
+        "cut_complex",
+        "t1/Z/seed-1_sample-2"
+       ]
+      ]
+     }
+    ]
+   },
+   "contains": "yaml_step peptide_prepack"
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run_steps": "af3_msa,peptide_prepack",
+   "variables": {
+    "SEQ": "t1",
+    "PEP_ID": "-",
+    "SEED": "1",
+    "SAMPLE": "2",
+    "OUT": "outputs",
+    "af3_msa.workspace": "."
+   },
+   "files": {
+    "mini.yaml": "description:\n    name: mini\n    description: fake biotox-like study\n\nenv:\n    variables:\n        OUT: outputs\n\nstudy:\n    - name: af3_msa\n      description: msa step\n      run:\n          cmd: |\n            mkdir -p $(OUT)/$(SEQ)\n            echo msa > $(OUT)/$(SEQ)/$(SEQ)_data.json\n          depends: []\n          nodes: 1\n    - name: peptide_prepack\n      description: prepack step\n      run:\n          cmd: |\n            [ \"$(PEP_ID)\" = \"-\" ] && { echo skip; exit 0; }\n            CIF_FILE=$(af3_msa.workspace)/$(OUT)/$(SEQ)/$(SEQ)_data.json\n            if [ ! -f \"${CIF_FILE}\" ]; then\n                echo missing\n                exit 3\n            fi\n            PDB_FILE=model_$(SEED).pdb\n            echo pdb > ${PDB_FILE}\n          depends: [af3_msa]\n          nodes: 1\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "cut_complex"
+    ],
+    "entity_types": [
+     {
+      "type": "msa_input",
+      "role": "intermediate",
+      "description": "the data json with the MSAs AlphaFold 3 made for one target",
+      "id_scheme": "target sequence id"
+     },
+     {
+      "type": "cut_complex",
+      "role": "output",
+      "description": "the complex cut around the peptide, input of docking",
+      "id_scheme": "target/chain/seed-S_sample-K"
+     }
+    ],
+    "activities": [
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "af3_msa",
+      "name": "af3_msa",
+      "generated": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "$(OUT)/$(SEQ)/$(SEQ)_data.json",
+        "store": "parallel_fs"
+       }
+      ]
+     },
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "peptide_prepack",
+      "name": "peptide_prepack",
+      "params": [
+       "SAMPLE"
+      ],
+      "used": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "${CIF_FILE}",
+        "store": "parallel_fs"
+       }
+      ],
+      "generated": [
+       {
+        "type": "cut_complex",
+        "key": "$(SEQ)/$(PEP_ID)/seed-$(SEED)_sample-$(SAMPLE)",
+        "uri": "${PDB_FILE}",
+        "store": "parallel_fs"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "step_rcs": [
+     0,
+     0
+    ],
+    "events": [
+     {
+      "activity": "af3_msa",
+      "relations": [
+       [
+        "GENERATED",
+        "msa_input",
+        "t1"
+       ]
+      ]
+     }
+    ]
+   }
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run_steps": "peptide_prepack",
+   "variables": {
+    "SEQ": "t2",
+    "PEP_ID": "Z",
+    "SEED": "1",
+    "SAMPLE": "2",
+    "OUT": "outputs",
+    "af3_msa.workspace": "nowhere"
+   },
+   "files": {
+    "mini.yaml": "description:\n    name: mini\n    description: fake biotox-like study\n\nenv:\n    variables:\n        OUT: outputs\n\nstudy:\n    - name: af3_msa\n      description: msa step\n      run:\n          cmd: |\n            mkdir -p $(OUT)/$(SEQ)\n            echo msa > $(OUT)/$(SEQ)/$(SEQ)_data.json\n          depends: []\n          nodes: 1\n    - name: peptide_prepack\n      description: prepack step\n      run:\n          cmd: |\n            [ \"$(PEP_ID)\" = \"-\" ] && { echo skip; exit 0; }\n            CIF_FILE=$(af3_msa.workspace)/$(OUT)/$(SEQ)/$(SEQ)_data.json\n            if [ ! -f \"${CIF_FILE}\" ]; then\n                echo missing\n                exit 3\n            fi\n            PDB_FILE=model_$(SEED).pdb\n            echo pdb > ${PDB_FILE}\n          depends: [af3_msa]\n          nodes: 1\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "cut_complex"
+    ],
+    "entity_types": [
+     {
+      "type": "msa_input",
+      "role": "intermediate",
+      "description": "the data json with the MSAs AlphaFold 3 made for one target",
+      "id_scheme": "target sequence id"
+     },
+     {
+      "type": "cut_complex",
+      "role": "output",
+      "description": "the complex cut around the peptide, input of docking",
+      "id_scheme": "target/chain/seed-S_sample-K"
+     }
+    ],
+    "activities": [
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "af3_msa",
+      "name": "af3_msa",
+      "generated": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "$(OUT)/$(SEQ)/$(SEQ)_data.json",
+        "store": "parallel_fs"
+       }
+      ]
+     },
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "peptide_prepack",
+      "name": "peptide_prepack",
+      "params": [
+       "SAMPLE"
+      ],
+      "used": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "${CIF_FILE}",
+        "store": "parallel_fs"
+       }
+      ],
+      "generated": [
+       {
+        "type": "cut_complex",
+        "key": "$(SEQ)/$(PEP_ID)/seed-$(SEED)_sample-$(SAMPLE)",
+        "uri": "${PDB_FILE}",
+        "store": "parallel_fs"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "step_rcs": [
+     3
+    ],
+    "events": []
+   }
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run_steps": "af3_msa,peptide_prepack",
+   "variables": {
+    "SEQ": "t1",
+    "PEP_ID": "Z",
+    "SEED": "1",
+    "SAMPLE": "2",
+    "OUT": "outputs",
+    "af3_msa.workspace": "."
+   },
+   "step_env": {
+    "MOIRAI_PYTHON": "/bin/false"
+   },
+   "files": {
+    "mini.yaml": "description:\n    name: mini\n    description: fake biotox-like study\n\nenv:\n    variables:\n        OUT: outputs\n\nstudy:\n    - name: af3_msa\n      description: msa step\n      run:\n          cmd: |\n            mkdir -p $(OUT)/$(SEQ)\n            echo msa > $(OUT)/$(SEQ)/$(SEQ)_data.json\n          depends: []\n          nodes: 1\n    - name: peptide_prepack\n      description: prepack step\n      run:\n          cmd: |\n            [ \"$(PEP_ID)\" = \"-\" ] && { echo skip; exit 0; }\n            CIF_FILE=$(af3_msa.workspace)/$(OUT)/$(SEQ)/$(SEQ)_data.json\n            if [ ! -f \"${CIF_FILE}\" ]; then\n                echo missing\n                exit 3\n            fi\n            PDB_FILE=model_$(SEED).pdb\n            echo pdb > ${PDB_FILE}\n          depends: [af3_msa]\n          nodes: 1\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "cut_complex"
+    ],
+    "entity_types": [
+     {
+      "type": "msa_input",
+      "role": "intermediate",
+      "description": "the data json with the MSAs AlphaFold 3 made for one target",
+      "id_scheme": "target sequence id"
+     },
+     {
+      "type": "cut_complex",
+      "role": "output",
+      "description": "the complex cut around the peptide, input of docking",
+      "id_scheme": "target/chain/seed-S_sample-K"
+     }
+    ],
+    "activities": [
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "af3_msa",
+      "name": "af3_msa",
+      "generated": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "$(OUT)/$(SEQ)/$(SEQ)_data.json",
+        "store": "parallel_fs"
+       }
+      ]
+     },
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "peptide_prepack",
+      "name": "peptide_prepack",
+      "params": [
+       "SAMPLE"
+      ],
+      "used": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "${CIF_FILE}",
+        "store": "parallel_fs"
+       }
+      ],
+      "generated": [
+       {
+        "type": "cut_complex",
+        "key": "$(SEQ)/$(PEP_ID)/seed-$(SEED)_sample-$(SAMPLE)",
+        "uri": "${PDB_FILE}",
+        "store": "parallel_fs"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "step_rcs": [
+     0,
+     0
+    ],
+    "events": []
+   }
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "files": {
+    "mini.yaml": "env:\n    variables:\n        OUT: outputs\n\nstudy:\n    - name: af3_msa\n      description: msa step\n      run:\n          cmd: |\n            echo msa > $(OUT)/$(SEQ)_data.json\n          depends: []\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "msa_input"
+    ],
+    "entity_types": [
+     {
+      "type": "msa_input",
+      "role": "output",
+      "description": "the data json with the MSAs AlphaFold 3 made for one target",
+      "id_scheme": "target sequence id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "af3_msa",
+      "name": "af3_msa",
+      "generated": [
+       {
+        "type": "msa_input",
+        "key": "$(NOPE)/${GHOST}",
+        "uri": "$(OUT)/$(SEQ)_data.json",
+        "store": "parallel_fs"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok"
+   },
+   "contains": "GHOST"
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "files": {
+    "mini.yaml": "study:\n    - name: af3_msa\n      description: msa step\n      run:\n          cmd: |\n            echo msa > $(SEQ)_data.json\n          depends: []\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "msa_input"
+    ],
+    "entity_types": [
+     {
+      "type": "msa_input",
+      "role": "output",
+      "description": "the data json with the MSAs AlphaFold 3 made for one target",
+      "id_scheme": "target sequence id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "af3_msa",
+      "name": "af3_msa",
+      "generated": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "store": "parallel_fs"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "error"
+   },
+   "contains": "say which file must exist"
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "files": {
+    "mini.yaml": "study:\n    - name: af3_msa\n      description: msa step\n      run:\n          cmd: |\n            trap 'echo bye' EXIT\n            echo msa > $(SEQ)_data.json\n          depends: []\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "msa_input"
+    ],
+    "entity_types": [
+     {
+      "type": "msa_input",
+      "role": "output",
+      "description": "the data json with the MSAs AlphaFold 3 made for one target",
+      "id_scheme": "target sequence id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "af3_msa",
+      "name": "af3_msa",
+      "generated": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "$(SEQ)_data.json",
+        "store": "parallel_fs"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "error"
+   },
+   "contains": "EXIT trap"
+  }
+ },
+ {
+  "tool": "annotate_validate_preview",
+  "args": {
+   "env_text": "export PYTHONPATH={annotated}\n",
+   "files": {
+    "mini.yaml": "env:\n    variables:\n        OUT: outputs\n\nstudy:\n    - name: af3_msa\n      description: msa step\n      run:\n          cmd: |\n            mkdir -p $(OUT)/$(SEQ)\n            echo msa > $(OUT)/$(SEQ)/$(SEQ)_data.json\n          depends: []\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "msa_input"
+    ],
+    "entity_types": [
+     {
+      "type": "msa_input",
+      "role": "output",
+      "description": "the data json with the MSAs AlphaFold 3 made for one target",
+      "id_scheme": "target sequence id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "af3_msa",
+      "name": "af3_msa",
+      "generated": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "$(OUT)/$(SEQ)/$(SEQ)_data.json",
+        "store": "parallel_fs"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "failed": [],
+    "deferred": []
+   }
+  }
+ },
+ {
+  "tool": "annotate_diagram_preview",
+  "args": {
+   "spec": {
+    "scientific_artifacts": [
+     "predicted_complex"
+    ],
+    "entity_types": [
+     {
+      "type": "predicted_complex",
+      "role": "output",
+      "description": "the complex AlphaFold 3 predicts for one target",
+      "id_scheme": "target/chain/seed-S_sample-K"
+     }
+    ],
+    "activities": [
+     {
+      "file": "biotox.yaml",
+      "mode": "yaml_step",
+      "step": "af3_infer",
+      "name": "af3_infer",
+      "generated": [
+       {
+        "type": "predicted_complex",
+        "key": "$(SEQ)",
+        "uri": "${CIF}"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "non_wrap": [
+     {
+      "activity": "af3_infer",
+      "file": "biotox.yaml",
+      "mode": "yaml_step",
+      "target": "step af3_infer"
+     }
+    ]
+   },
+   "contains": "yaml_step: step af3_infer"
+  }
  }
 ]
