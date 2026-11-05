@@ -844,14 +844,65 @@ def _maestro_bin(hint, work):
     return ""
 
 
-def _maestro_dry(binp, tree, rel, args):
-    """`maestro run --dry` on a copy of the tree: {rc, tail, scripts: [(name, text)] of generated files that hold the wrapper}."""
+IMP_MASK = "No module named 'imp'"
+ERR_LINE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception)\b.*$", re.M)
+
+
+def _dry_pythonpath(env_file, swap, t):
+    """The PYTHONPATH of a dry run: what moirai_env.sh exports (`export PYTHONPATH=...`), with the annotated root `swap` replaced by the temp tree copy `t` and the
+    trailing ${PYTHONPATH...} expansion dropped, so the dry run sees the same shim and tree as the real run. No env_file, or no PYTHONPATH line in it: only `t`."""
+    base = str(t)
+    try:
+        text = Path(env_file).read_text() if env_file else ""
+    except OSError:
+        text = ""
+    val = None
+    for ln in text.splitlines():
+        m = re.match(r"\s*export\s+PYTHONPATH=(.*)$", ln)
+        if m:
+            val = m.group(1)
+    if val is None:
+        return base
+    try:
+        val = " ".join(shlex.split(val))
+    except ValueError:
+        val = val.strip().strip("\"'")
+    cuts = [i for i in (val.find("${PYTHONPATH"), val.find("$PYTHONPATH")) if i >= 0]
+    if cuts:
+        val = val[:min(cuts)]
+    root = str(swap or "").rstrip("/")
+    out = []
+    for e in (x for x in val.split(":") if x):
+        if root and (e == root or e.startswith(root + "/")):
+            e = base + e[len(root):]
+        out.append(e)
+    return ":".join(out) if out else base
+
+
+def _masked_cause(out):
+    """When the last 300 characters of a failed Maestro run say `No module named 'imp'` (maestrowf/maestro.py falls back to Python 2 code after ANY ImportError, so
+    this hides the real one), the first earlier exception line of the output, else ''."""
+    if IMP_MASK not in out[-300:]:
+        return ""
+    for m in ERR_LINE.finditer(out):
+        if IMP_MASK not in m.group(0):
+            return m.group(0).strip()[:300]
+    return ""
+
+
+def _maestro_dry(binp, tree, rel, args, env_file="", swap=""):
+    """`maestro run --dry` on a copy of the tree: {rc, tail, scripts: [(name, text)] of generated files that hold the wrapper}. Maestro loads a parameter generator
+    by file path and does not add the tree to sys.path, and the generated helper does `import moirai`, which only the moirai shim provides. So the run gets the
+    PYTHONPATH that moirai_env.sh exports (env_file), the annotated root `swap` replaced by the temp copy; without that file, only the copy. It is put before any
+    PYTHONPATH already set. A failure that ends in `No module named 'imp'` reports the first earlier exception (`first error: ...`) as the tail. The real tree is not touched."""
     with tempfile.TemporaryDirectory() as d:
         t, out = Path(d) / "tree", Path(d) / "out"
         shutil.copytree(tree, t, ignore=SKIP, symlinks=True)
+        old_path = os.environ.get("PYTHONPATH")
+        env = {**os.environ, "HOME": d, "PYTHONPATH": os.pathsep.join([_dry_pythonpath(env_file, swap, t)] + ([old_path] if old_path else []))}
         try:
             r = subprocess.run([binp, "run", "--dry", "-y", "-o", str(out), *shlex.split(args or ""), str(t / rel)], cwd=str(t), capture_output=True, text=True,
-                               timeout=300, env={**os.environ, "HOME": d})
+                               timeout=300, env=env)
         except (OSError, subprocess.TimeoutExpired) as e:
             return {"rc": None, "tail": str(e), "scripts": []}
         scripts = []
@@ -861,7 +912,12 @@ def _maestro_dry(binp, tree, rel, args):
                     s = p.read_text(errors="replace")
                     if MARK_OPEN in s:
                         scripts.append((p.name, s))
-        return {"rc": r.returncode, "tail": ((r.stderr or "") + (r.stdout or ""))[-300:], "scripts": scripts}
+        text = (r.stderr or "") + (r.stdout or "")
+        tail = text[-300:]
+        cause = _masked_cause(text) if r.returncode else ""
+        if cause:
+            tail = f"first error: {cause} (the last line, {IMP_MASK}, only masks it: maestrowf/maestro.py runs Python 2 code after any ImportError); end of output: {text[-120:]}"
+        return {"rc": r.returncode, "tail": tail, "scripts": scripts}
 
 
 def _yaml_checks(v, rel, f, orig, dst, work, maestro, maestro_args):
@@ -891,7 +947,9 @@ def _yaml_checks(v, rel, f, orig, dst, work, maestro, maestro_args):
     if not binp:
         v.inconclusive(f"maestro_dry:{rel}", "maestro not found: pass maestro=<path to maestro> (the biotox-env of the session has one), or set MOIRAI_AGENTS_MAESTRO")
         return
-    new = _maestro_dry(binp, dst, rel, maestro_args)
+    envf = Path(work) / "moirai_env.sh"
+    envf = str(envf) if envf.is_file() else ""
+    new = _maestro_dry(binp, dst, rel, maestro_args, envf, str(dst))
     if new["rc"] == 0:
         # rc 0 proves the annotated YAML still parses and expands under maestro; a Maestro whose --dry writes no .sh scripts leaves the wrapper text to bash_syntax
         errs = [f"{n}: {e}" for n, s in new["scripts"] for e in [_bash_n(s)] if e and e != "no bash"]
@@ -900,7 +958,7 @@ def _yaml_checks(v, rel, f, orig, dst, work, maestro, maestro_args):
     if orig is None:
         v.inconclusive(f"maestro_dry:{rel}", f"maestro run --dry failed (rc {new['rc']}): {new['tail']}; the source cannot be compared here")
         return
-    old = _maestro_dry(binp, orig.parent if False else orig.parents[len(Path(rel).parts) - 1], rel, maestro_args)
+    old = _maestro_dry(binp, orig.parent if False else orig.parents[len(Path(rel).parts) - 1], rel, maestro_args, envf, str(dst))
     if old["rc"] == 0:
         v.check(f"maestro_dry:{rel}", False, f"maestro run --dry passes on the source and fails on the annotated YAML: {new['tail']}", "the wrapper broke the YAML: re-run annotate_apply; if it persists, capability_update with a check")
     else:
@@ -1485,7 +1543,9 @@ def register(mcp):
         check is inconclusive and says to pass maestro_args), and names_resolve covers the Maestro and shell variables the spec uses. Use after annotate_apply. A check owned by a later stage is not run
         here and does not make the verdict inconclusive: the PYTHONPATH check (moirai_env.sh is written by integrate) is listed under `deferred` until it exists, then it is checked.
         maestro: path to the maestro executable (default: MOIRAI_AGENTS_MAESTRO, PATH, then <session>/tmp/*/bin/maestro). maestro_args: extra arguments for the dry run, for example
-        "--pgen gen.py --pargs inputs:/abs/path".
+        "--pgen gen.py --pargs inputs:/abs/path". The dry run uses the PYTHONPATH that <pipeline work>/moirai_env.sh exports (the moirai shim, then the annotated root) with the annotated root replaced by a
+        temp copy, so a parameter generator that imports _moirai_prov, which imports moirai, resolves both; before integrate has written that file it uses the temp copy alone (and `import moirai` may fail
+        then: the check is inconclusive when the source fails too). When the dry run dies with `No module named 'imp'` (a mask), the detail shows the first earlier exception instead.
         Returns the verdict {status, failed, unknown, passed, total, deferred: [{name, owner_stage, enforced_by, detail}]}."""
         c = P.load(pipeline)
         o = P.stage(c, STAGE)["outputs"]
@@ -1504,7 +1564,8 @@ def register(mcp):
     def annotate_validate_preview(spec: dict, files: dict, env_text: str = "", maestro: str = "", maestro_args: str = "") -> dict:
         """Run the annotate validator's checks on a spec and files in a temporary directory, with no pipeline. Use to see what annotate_validate would say, and to reproduce a verdict.
         spec, files: as annotate_preview. env_text: the text of a moirai_env.sh to put beside the tree, with {annotated} replaced by the annotated root; empty: integrate has not run
-        yet. maestro, maestro_args: as annotate_validate (the maestro_dry check is inconclusive when no maestro is found). Returns the verdict {status, failed, unknown, passed, total, deferred}
+        yet. The maestro_dry check reads its `export PYTHONPATH=` line (a path under {annotated} is mapped to the temp copy). maestro, maestro_args: as annotate_validate (the maestro_dry check is
+        inconclusive when no maestro is found). Returns the verdict {status, failed, unknown, passed, total, deferred}
         or {status: error, problems}. Writes nothing outside the temp directory."""
         spec = json.loads(spec) if isinstance(spec, str) else spec
         files = json.loads(files) if isinstance(files, str) else files

@@ -1,7 +1,7 @@
 {
  "name": "prov_annotate",
  "description": "Add moirai provenance to an application - find data accesses, agree entity types and activities with the user, insert them into a copy (decorate a function, patch or subclass a method, annotate a statement, record a shell step of a Maestro YAML, invalidate, conditional edges), validate. Load for the annotate stage.",
- "version": 4,
+ "version": 6,
  "enabled": true,
  "stages": [
   "annotate"
@@ -31,20 +31,20 @@
  "review": [
   "imports shutil: copies/removes files",
   "imports subprocess: runs commands",
-  "line 1012: writes or deletes files (write_text)",
-  "line 1361: writes or deletes files (write_text)",
-  "line 1375: writes or deletes files (rmtree)",
-  "line 1379: writes or deletes files (write_text)",
-  "line 1404: writes or deletes files (write_text)",
-  "line 1415: writes or deletes files (write_text)",
-  "line 1444: writes or deletes files (write_text)",
+  "line 1050: writes or deletes files (write_text)",
+  "line 1093: writes or deletes files (write_text)",
+  "line 1442: writes or deletes files (write_text)",
+  "line 1456: writes or deletes files (rmtree)",
+  "line 1460: writes or deletes files (write_text)",
+  "line 1485: writes or deletes files (write_text)",
   "line 1496: writes or deletes files (write_text)",
-  "line 1503: writes or deletes files (write_text)",
+  "line 1525: writes or deletes files (write_text)",
+  "line 1580: writes or deletes files (write_text)",
+  "line 1587: writes or deletes files (write_text)",
   "line 502: writes or deletes files (write_text)",
-  "line 779: writes or deletes files (write_text)",
-  "line 897: writes or deletes files (write_text)",
-  "line 906: writes or deletes files (write_text)",
-  "line 969: writes or deletes files (write_text)"
+  "line 801: writes or deletes files (write_text)",
+  "line 978: writes or deletes files (write_text)",
+  "line 987: writes or deletes files (write_text)"
  ],
  "history": [
   {
@@ -71,6 +71,20 @@
    "by": "haridev",
    "proposal": "f303b01cc95e",
    "why": "BioTox annotate (pipeline biotox-prov-20261030-134517): AlphaFold 3 and Rosetta run as shell commands inside Maestro YAML `cmd: |` steps, which annotate_apply could not hook (Python functions/statements and C/C++ functions only). af3_msa, af3_infer, peptide_prepack and peptide_docking had no provenance, predicted_complex and docking_scores were downgraded from scientific artifacts to intermediates (annotate_spec rejects an artifact no activity generates), msa_input and prediction_ranking were dropped, and joins broke at cut_complex and docking_scores. Adds mode yaml_step: a text-level wrapper inserted at the top of a step's cmd block (comments and layout of the YAML are untouched) that installs an EXIT trap; when the step ends it calls the single root _moirai_prov.py as a script (python found from MOIRAI_PYTHON, MOIRAI_SERVICE or moirai-service on PATH, resolved before the step activates its own venv, run with PYTHONPATH/PYTHONHOME/LD_PRELOAD unset) with used/generated rows whose files exist. It runs in a subshell with its output discarded, never calls exit, so the step's exit status and early `exit 0`/`exit 1` flow are unchanged, and a missing or broken moirai is skipped. Keys are Maestro-substituted text, so both sides of a hop get the same type and key. annotate_spec accepts artifacts generated only by yaml_step activities. annotate_validate adds yaml_intact (stripping the wrapper gives back the source byte for byte), bash_syntax, maestro_dry (maestro run --dry on source and on copy; inconclusive when the source cannot be dry-run either) and names_resolve for $(VAR), $(step.workspace) and shell variables. annotate_preview can run the wrapped steps against a fake moirai. Existing specs generate byte-identical code."
+  },
+  {
+   "version": 5,
+   "ts": 1793831559.6747944,
+   "by": "haridev",
+   "proposal": "da3027e8176b",
+   "why": "Defect (annotate_validate 19/20 twice in pipeline biotox-prov-big-20261104-124916): _maestro_dry ran `maestro run --dry` on a temp copy of the annotated tree without the tree on PYTHONPATH. The annotated BioTox gen.py starts with `import _moirai_prov` (helper at the tree root); Maestro loads the parameter generator by file path, so the import raised ImportError, Maestro fell back to `import imp` and died with ModuleNotFoundError on Python 3.12, and maestro_dry:biotox.yaml wrongly failed ('the wrapper broke the YAML'). Fix: the dry-run env now has PYTHONPATH = <temp copy of the tree> + os.pathsep + existing PYTHONPATH (HOME stays the temp dir); the real tree is untouched; the source-tree dry run gets the same harmless prepend. New check reproduces it with /bin/sh as a fake maestro that runs a file `run` from the tree (cwd) and fails with ModuleNotFoundError: No module named 'imp' when _moirai_prov.py is in the cwd but PYTHONPATH lacks the tree; before the fix the verdict is fail, after it pass. Built on active version 4."
+  },
+  {
+   "version": 6,
+   "ts": 1793832086.6249669,
+   "by": "haridev",
+   "proposal": "15beaba525ef",
+   "why": "Built on ACTIVE v5. Measured diagnosis (session biotox/20261104_204918, scratch /tmp/haridev/dry2): maestro run --dry of the annotated BioTox YAML fails with PYTHONPATH none (ModuleNotFoundError _moirai_prov, masked by No module named 'imp' from maestrowf/maestro.py:351) and with the tree only (what v5 sets; _moirai_prov.py:8 import moirai -> No module named 'moirai', moirai is not in biotox-env), and passes (rc 0, 10 combinations) with exactly what moirai_env.sh exports: <provenance>/moirai_shim:<tree copy>. Change: (1) _maestro_dry takes env_file and swap; its PYTHONPATH is the export PYTHONPATH value of work/moirai_env.sh with the annotated root replaced by the temp tree copy and the trailing ${PYTHONPATH...} expansion dropped, prepended to os.environ PYTHONPATH; no file or no PYTHONPATH line: only the tree copy. (2) when the tail has No module named 'imp', the first earlier exception of the output is reported (first error: ...). (3) checks: v5 check kept, new check with a fake maestro that needs a shim dir holding a moirai entry AND the tree on PYTHONPATH (fails with old code), new check for the masked-cause report."
   }
  ]
 }

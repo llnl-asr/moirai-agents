@@ -1910,5 +1910,141 @@
    },
    "contains": "yaml_step: step af3_infer"
   }
+ },
+ {
+  "tool": "annotate_validate_preview",
+  "args": {
+   "maestro": "/bin/sh",
+   "files": {
+    "mini.yaml": "env:\n    variables:\n        OUT: outputs\n\nstudy:\n    - name: af3_msa\n      description: msa step\n      run:\n          cmd: |\n            mkdir -p $(OUT)/$(SEQ)\n            echo msa > $(OUT)/$(SEQ)/$(SEQ)_data.json\n          depends: []\n",
+    "run": "if [ -f _moirai_prov.py ]; then case \":$PYTHONPATH:\" in *\"/tree:\"*) ;; *) echo \"ModuleNotFoundError: No module named 'imp'\" >&2; exit 1;; esac; fi\nexit 0\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "msa_input"
+    ],
+    "entity_types": [
+     {
+      "type": "msa_input",
+      "role": "output",
+      "description": "the data json with the MSAs AlphaFold 3 made for one target",
+      "id_scheme": "target sequence id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "af3_msa",
+      "name": "af3_msa",
+      "generated": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "$(OUT)/$(SEQ)/$(SEQ)_data.json",
+        "store": "parallel_fs"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "pass",
+    "failed": [],
+    "unknown": []
+   }
+  }
+ },
+ {
+  "tool": "annotate_validate_preview",
+  "args": {
+   "maestro": "/bin/sh",
+   "env_text": "export PYTHONPATH={annotated}/moirai_shim:{annotated}\"${PYTHONPATH:+:$PYTHONPATH}\"\n",
+   "files": {
+    "mini.yaml": "env:\n    variables:\n        OUT: outputs\n\nstudy:\n    - name: af3_msa\n      description: msa step\n      run:\n          cmd: |\n            mkdir -p $(OUT)/$(SEQ)\n            echo msa > $(OUT)/$(SEQ)/$(SEQ)_data.json\n          depends: []\n",
+    "moirai_shim/moirai": "",
+    "run": "if [ -f _moirai_prov.py ]; then\n  shim=0; tree=0; IFS=:\n  for p in $PYTHONPATH; do\n    [ -e \"$p/moirai\" ] && shim=1\n    [ -f \"$p/_moirai_prov.py\" ] && tree=1\n  done\n  if [ $shim = 0 ] || [ $tree = 0 ]; then\n    echo \"ModuleNotFoundError: No module named 'moirai'\" >&2\n    echo \"ModuleNotFoundError: No module named 'imp'\" >&2\n    exit 1\n  fi\nfi\nexit 0\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "msa_input"
+    ],
+    "entity_types": [
+     {
+      "type": "msa_input",
+      "role": "output",
+      "description": "the data json with the MSAs AlphaFold 3 made for one target",
+      "id_scheme": "target sequence id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "af3_msa",
+      "name": "af3_msa",
+      "generated": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "$(OUT)/$(SEQ)/$(SEQ)_data.json",
+        "store": "parallel_fs"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "pass",
+    "failed": [],
+    "unknown": []
+   }
+  }
+ },
+ {
+  "tool": "annotate_validate_preview",
+  "args": {
+   "maestro": "/bin/sh",
+   "files": {
+    "mini.yaml": "env:\n    variables:\n        OUT: outputs\n\nstudy:\n    - name: af3_msa\n      description: msa step\n      run:\n          cmd: |\n            mkdir -p $(OUT)/$(SEQ)\n            echo msa > $(OUT)/$(SEQ)/$(SEQ)_data.json\n          depends: []\n",
+    "run": "echo \"ModuleNotFoundError: No module named 'moirai'\" >&2\ni=0\nwhile [ $i -lt 20 ]; do echo \"  File \\\"/x/maestrowf/y.py\\\", line $i, in z\" >&2; i=$((i+1)); done\necho \"ModuleNotFoundError: No module named 'imp'\" >&2\nexit 1\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "msa_input"
+    ],
+    "entity_types": [
+     {
+      "type": "msa_input",
+      "role": "output",
+      "description": "the data json with the MSAs AlphaFold 3 made for one target",
+      "id_scheme": "target sequence id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "af3_msa",
+      "name": "af3_msa",
+      "generated": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "$(OUT)/$(SEQ)/$(SEQ)_data.json",
+        "store": "parallel_fs"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "contains": "first error: ModuleNotFoundError: No module named 'moirai'"
+  }
  }
 ]

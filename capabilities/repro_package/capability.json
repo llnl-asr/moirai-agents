@@ -1,7 +1,7 @@
 {
  "name": "repro_package",
  "description": "Generate final_provenance/, the folder that reproduces a run for someone else, and prove it in a clean shell. Load for the package stage.",
- "version": 6,
+ "version": 7,
  "enabled": true,
  "stages": [
   "package"
@@ -113,6 +113,13 @@
    "by": "haridev",
    "proposal": "3aedcc8d2f8f",
    "why": "Publishing for the package stage, rebased on live v4 (check_batch.py, submit_moirai.sh.tmpl, parse_gen/_batch_cfg, moirai_venv in repro_verify, no_login_service). Adds repro_publish_plan (dry run), repro_publish_package, repro_publish_traces, repro_publish_permissions, repro_publish_validate, repro_publish_selftest and repro_verify(in_place=...) so the package runs as it is from the published folder in a clean login shell and leaves a verification record; repro_validate checks the published tree when one was recorded. All v4 tools are kept (repro_build, repro_verify, repro_validate, repro_batch_selftest)."
+  },
+  {
+   "version": 7,
+   "ts": 1793895649.111447,
+   "by": "haridev",
+   "proposal": "befffdac03c4",
+   "why": "Consolidation: repro_package is the home of the generic package and publish procedure. It gains the two generic items workload_biotox_repro held alone (polling a long repro_verify, the job-id lint word), and says the copy-mode check is optional (skipped for BioTox). workload_biotox_repro now points here instead of repeating the config.ini, no-overwrite, OUTPUT_ROOT and .chgperm_logs rules."
   }
  ]
 }

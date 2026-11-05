@@ -102,7 +102,7 @@ class Store:
                 s = json.loads(p.read_text())
             except ValueError:
                 continue
-            row = {k: s.get(k) for k in ("id", "title", "mode", "app_dir", "model", "created", "updated", "archived")}
+            row = {k: s.get(k) for k in ("id", "title", "mode", "app_dir", "model", "created", "updated", "archived", "pinned", "folder")}
             out.append(row)
         return out
 
@@ -116,6 +116,40 @@ class Store:
             else:
                 s.pop("archived", None)
                 s["updated"] = _now()          # restored: the active-chat clock starts again
+            tmp = self.path(sid).with_suffix(".tmp")
+            tmp.write_text(json.dumps(s))
+            os.replace(tmp, self.path(sid))
+        return True
+
+    def rename(self, sid: str, title: str) -> bool:
+        """Give a chat a new name (what the left bar shows). Does not touch its updated time."""
+        title = " ".join((title or "").split())[:120]
+        if not title:
+            return False
+        with self.lock:
+            s = self.get(sid)
+            if s is None:
+                return False
+            s["title"] = title
+            tmp = self.path(sid).with_suffix(".tmp")
+            tmp.write_text(json.dumps(s))
+            os.replace(tmp, self.path(sid))
+        return True
+
+    def set_fields(self, sid: str, **kv) -> bool:
+        """Organise a chat: pinned (a time, or None to unpin) and folder (one level: a name, or None for no folder).
+        Never touches the updated time, so organising is not activity."""
+        with self.lock:
+            s = self.get(sid)
+            if s is None:
+                return False
+            for k, v in kv.items():
+                if k not in ("pinned", "folder"):
+                    continue
+                if v in (None, "", False):
+                    s.pop(k, None)
+                else:
+                    s[k] = v
             tmp = self.path(sid).with_suffix(".tmp")
             tmp.write_text(json.dumps(s))
             os.replace(tmp, self.path(sid))

@@ -364,7 +364,28 @@ setInterval(()=>{if(me&&document.visibilityState==='visible')loadSessions()},400
 // "Seen" = the chat's last `updated` stamp when you last had it open (kept per browser).
 let SEEN={};try{SEEN=JSON.parse(localStorage.getItem('moirai_seen')||'{}')}catch(_){}
 function saveSeen(){try{localStorage.setItem('moirai_seen',JSON.stringify(SEEN))}catch(_){}}
-async function loadSessions(){const ss=await api('api/sessions');if(!Array.isArray(ss))return;
+// Folders are one level deep: a chat is in no folder or in one named folder. A folder exists while it has chats.
+let FOLDERS=[];
+function folderMenu(btn,id){document.querySelectorAll('.fmenu').forEach(m=>m.remove());EDITING=true;
+ const m=document.createElement('div');m.className='fmenu';
+ m.innerHTML=`<div class="fh">Move to folder</div>`+FOLDERS.map(f=>`<button data-f="${esc(f)}">📁 ${esc(f)}</button>`).join('')+`<button data-new="1">＋ New folder…</button><button data-f="">✕ No folder</button>`;
+ document.body.appendChild(m);const r=btn.getBoundingClientRect();m.style.top=Math.min(r.bottom+2,innerHeight-m.offsetHeight-8)+'px';m.style.left=Math.max(8,Math.min(r.left,innerWidth-m.offsetWidth-8))+'px';
+ const close=()=>{m.remove();EDITING=false;document.removeEventListener('mousedown',away,true);loadSessions()};
+ const away=e=>{if(!m.contains(e.target))close()};setTimeout(()=>document.addEventListener('mousedown',away,true),0);
+ m.onclick=async e=>{const b=e.target.closest('button');if(!b)return;e.stopPropagation();let f=b.dataset.f;
+  if(b.dataset.new){f=(prompt('New folder name')||'').trim();if(!f)return}
+  await api('api/folder',{session:id,folder:f});close()}}
+// Rename a chat in place: Enter or leaving the box saves, Esc cancels. An empty name keeps the old one.
+function renameChat(row){if(!row||EDITING)return;const id=row.dataset.id,t=row.querySelector('.t'),old=t.textContent==='(untitled)'?'':t.textContent;
+ EDITING=true;const inp=document.createElement('input');inp.className='ren';inp.value=old;inp.maxLength=120;t.replaceWith(inp);inp.focus();inp.select();
+ let done=false;const fin=async save=>{if(done)return;done=true;const v=inp.value.trim();
+  if(save&&v&&v!==old){const r=await api('api/rename',{session:id,title:v});if(r&&r.error)alert(r.error)}
+  EDITING=false;loadSessions()};
+ inp.onclick=e=>e.stopPropagation();inp.ondblclick=e=>e.stopPropagation();
+ inp.onkeydown=e=>{e.stopPropagation();if(e.key==='Enter'){e.preventDefault();fin(true)}else if(e.key==='Escape'){e.preventDefault();fin(false)}};
+ inp.onblur=()=>fin(true)}
+let EDITING=false;   // a chat name is being typed: do not redraw the list under it
+async function loadSessions(){const ss=await api('api/sessions');if(!Array.isArray(ss)||EDITING)return;
  for(const s of ss){if(s.id===session||SEEN[s.id]===undefined)SEEN[s.id]=s.updated||0}saveSeen();
  const st=s=>s.running?['run','running']:(s.updated||0)>(SEEN[s.id]||0)?['new','new result — not seen yet']:['','idle'];
  {const t=$('#togl'),others=ss.filter(s=>s.id!==session);t.dataset.n=ss.length;   // shown when the sidebar is hidden
@@ -376,16 +397,30 @@ async function loadSessions(){const ss=await api('api/sessions');if(!Array.isArr
   const exp=arch&&left!==null?`<span class="exp" title="archived chats are deleted ${cfg.chat_archive_days} days after archiving">${left}d</span>`
    :(!arch&&left!==null&&left<=7?`<span class="exp" title="inactive chats are deleted after ${cfg.chat_active_days} days">expires ${left}d</span>`:'');
   return `<div class="sess ${s.id===session?'active':''} ${arch?'arch':''}" data-id="${s.id}" title="${esc(s.title||'')}"><span class="sdot ${c}" title="${tt}"></span><span class="t">${esc(s.title||'(untitled)')}</span>${exp}<span class="tag">${s.mode==='integrate'?'app':'ask'}</span>
-   <span class="acts">${arch?`<button data-act="restore" title="Restore to active chats">↺</button>`:`<button data-act="archive" title="Archive (deleted ${cfg.chat_archive_days} days later)">⤓</button>`}<button class="del" data-act="delete" title="Delete now (click twice)">🗑</button></span></div>`};
+   <span class="acts"><button data-act="pin" title="${s.pinned?'Unpin':'Pin to the top'}">${s.pinned?'📌':'📍'}</button><button data-act="folder" title="Move to a folder">📁</button><button data-act="rename" title="Rename this chat (or double-click its name)">✎</button>${arch?`<button data-act="restore" title="Restore to active chats">↺</button>`:`<button data-act="archive" title="Archive (deleted ${cfg.chat_archive_days} days later)">⤓</button>`}<button class="del" data-act="delete" title="Delete now (click twice)">🗑</button></span></div>`};
  const act=ss.filter(s=>!s.archived),arc=ss.filter(s=>s.archived);let open=false;try{open=localStorage.getItem('moirai_arch_open')==='1'}catch(_){}
- $('#sessions').innerHTML=(act.length?`<div class="shead">Chats<a data-bulk="archive" title="Archive every chat that is not running">archive all</a></div>`+act.map(row).join(''):'<div class="sess" style="color:var(--muted)">no chats yet</div>')
+ const pins=act.filter(s=>s.pinned).sort((a,b)=>b.pinned-a.pinned),rest=act.filter(s=>!s.pinned),
+  fol={};rest.forEach(s=>{if(s.folder)(fol[s.folder]=fol[s.folder]||[]).push(s)});const loose=rest.filter(s=>!s.folder);
+ FOLDERS=[...new Set(act.map(s=>s.folder).filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+ const fopen=f=>{try{return JSON.parse(localStorage.getItem('moirai_folders')||'{}')[f]!==false}catch(_){return true}};
+ const folderHtml=Object.keys(fol).sort((a,b)=>a.localeCompare(b)).map(f=>`<div class="shead fold"><span class="cv" data-fold="${esc(f)}">${fopen(f)?'▾':'▸'} 📁 ${esc(f)} (${fol[f].length})</span><a data-frename="${esc(f)}" title="Rename this folder">rename</a></div>`+(fopen(f)?`<div class="infold">${fol[f].map(row).join('')}</div>`:'')).join('');
+ $('#sessions').innerHTML=(act.length?(pins.length?`<div class="shead">📌 Pinned</div>`+pins.map(row).join(''):'')+folderHtml
+  +`<div class="shead">Chats<a data-bulk="archive" title="Archive every chat that is not running">archive all</a></div>`+loose.map(row).join(''):'<div class="sess" style="color:var(--muted)">no chats yet</div>')
   +(arc.length?`<div class="shead"><span class="cv" data-bulk="toggle">${open?'▾':'▸'} Archived (${arc.length})</span><a class="danger" data-bulk="delete" title="Delete all archived chats now (click twice)">delete all</a></div>`+(open?arc.map(row).join(''):''):'');
  document.querySelectorAll('.sess[data-id]').forEach(e=>e.onclick=()=>openSession(e.dataset.id));
+ document.querySelectorAll('.sess[data-id] .t').forEach(t=>t.ondblclick=ev=>{ev.stopPropagation();renameChat(t.closest('.sess'))});
  document.querySelectorAll('#sessions [data-act]').forEach(b=>b.onclick=async ev=>{ev.stopPropagation();const id=b.closest('.sess').dataset.id,a=b.dataset.act;
+  if(a==='rename')return renameChat(b.closest('.sess'));
+  if(a==='pin'){const r=b.closest('.sess');await api('api/pin',{session:id,on:b.textContent!=='📌'});return loadSessions()}
+  if(a==='folder')return folderMenu(b,id);
   if(a==='delete'&&!b.classList.contains('armed')){b.classList.add('armed');b.title='Click again to delete permanently';setTimeout(()=>{b.classList.remove('armed')},3000);return}
   if(a==='delete'){await api('api/delete',{session:id});if(id===session)$('#newbtn').click()}
   else await api('api/archive',{session:id,archived:a==='archive'});
   loadSessions()});
+ document.querySelectorAll('#sessions [data-fold]').forEach(c=>c.onclick=()=>{let m={};try{m=JSON.parse(localStorage.getItem('moirai_folders')||'{}')}catch(_){}
+  m[c.dataset.fold]=m[c.dataset.fold]===false;try{localStorage.setItem('moirai_folders',JSON.stringify(m))}catch(_){}loadSessions()});
+ document.querySelectorAll('#sessions [data-frename]').forEach(a=>a.onclick=async()=>{const f=a.dataset.frename,n=(prompt('Rename folder',f)||'').trim();
+  if(n&&n!==f){const r=await api('api/folder/rename',{from:f,to:n});if(r&&r.error)alert(r.error);loadSessions()}});
  document.querySelectorAll('#sessions [data-bulk]').forEach(b=>b.onclick=async()=>{const a=b.dataset.bulk;
   if(a==='toggle'){try{localStorage.setItem('moirai_arch_open',open?'0':'1')}catch(_){}return loadSessions()}
   if(!b.classList.contains('armed')){b.classList.add('armed');const t=b.textContent;b.textContent=a==='delete'?`delete ${arc.length} permanently?`:`archive ${act.length} chats?`;

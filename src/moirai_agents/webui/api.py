@@ -421,6 +421,41 @@ def post_route(h, app, life, u, body):
                     t.cond.wait_for(lambda: t.done, timeout=30)
             st.delete(sid)
         return send_json(h, {"ok": True, "deleted": len(ids)})
+    if u.path == "/api/rename":
+        sid = body.get("session", "")
+        if not st.rename(sid, body.get("title", "")):
+            return send_json(h, {"error": "could not rename: the chat is gone or the name is empty"}, 400)
+        t = app.turns.get(tkey(sid))
+        if t is not None and not t.done:
+            t.session["title"] = " ".join(body["title"].split())[:120]    # the running turn saves its own copy when it ends
+        return send_json(h, {"ok": True})
+    if u.path in ("/api/pin", "/api/folder", "/api/folder/rename"):
+        def live(sid, **kv):        # a running turn saves its own copy of the chat when it ends
+            t = app.turns.get(tkey(sid))
+            if t is not None and not t.done:
+                for k, v in kv.items():
+                    t.session.pop(k, None) if v in (None, "", False) else t.session.__setitem__(k, v)
+        def fname(x):
+            return " ".join(str(x or "").replace("/", " ").split())[:40]      # one level only: no path separators
+        if u.path == "/api/pin":
+            ids = body.get("sessions") or [body.get("session", "")]
+            v = R._now() if body.get("on", True) is not False else None
+            for sid in ids:
+                live(sid, pinned=v)
+            return send_json(h, {"ok": True, "changed": sum(st.set_fields(sid, pinned=v) for sid in ids)})
+        if u.path == "/api/folder":
+            ids = body.get("sessions") or [body.get("session", "")]
+            f = fname(body.get("folder"))
+            for sid in ids:
+                live(sid, folder=f or None)
+            return send_json(h, {"ok": True, "changed": sum(st.set_fields(sid, folder=f or None) for sid in ids)})
+        a, b = fname(body.get("from")), fname(body.get("to"))
+        if not a or not b:
+            return send_json(h, {"error": "a folder needs a name"}, 400)
+        ids = [x["id"] for x in st.list() if x.get("folder") == a]
+        for sid in ids:
+            live(sid, folder=b)
+        return send_json(h, {"ok": True, "changed": sum(st.set_fields(sid, folder=b) for sid in ids)})
     if u.path == "/api/archive":
         on = body.get("archived", True) is not False
         ids = body.get("sessions") or [body.get("session", "")]
