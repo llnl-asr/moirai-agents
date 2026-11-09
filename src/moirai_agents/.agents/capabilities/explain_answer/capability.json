@@ -1,0 +1,27 @@
+{
+ "name": "explain_answer",
+ "description": "Explain the answer of a computed answer - the write-up led by its first sentence, its check, the gaps - as a plain summary and folded details. Used by query_explain for the Query view.",
+ "version": 1,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "explain_answer",
+  "explain_answer_check"
+ ],
+ "pvc": {
+  "predictor": [
+   "explain_answer"
+  ],
+  "validator": [
+   "explain_answer_check"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1794241935.4,
+   "why": "Query view: the answer part told high level first, details folded and formatted"
+  }
+ ]
+}

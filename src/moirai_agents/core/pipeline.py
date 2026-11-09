@@ -82,9 +82,14 @@ def load(pid: str, workspace: Optional[str] = None) -> Dict[str, Any]:
 
 
 def _migrate(c: Dict[str, Any]) -> Dict[str, Any]:
-    """A pipeline saved before a stage existed gets that stage, pending, so old pipelines keep loading."""
-    for name in KINDS.get(c.get("kind"), []):
+    """A pipeline saved before a stage existed gets that stage, pending, so old pipelines keep loading. A stage the kind no longer has
+    (a run's query stage, now the Query view) is retired: skipped, so a status it was left in (running) no longer counts."""
+    kind = KINDS.get(c.get("kind"), [])
+    for name in kind:
         c["stages"].setdefault(name, _blank(name))
+    for name, s in c["stages"].items():
+        if kind and name not in kind and isinstance(s, dict) and s.get("status") not in ("passed", "skipped"):
+            s["status"], s["retired"] = "skipped", True
     return c
 
 

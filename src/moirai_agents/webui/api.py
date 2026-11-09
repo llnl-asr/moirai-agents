@@ -359,6 +359,12 @@ def get_route(h, app, life, u, q):
                 return send_json(h, W.aggregate(user["workspace"], pid))
             if u.path == "/api/workbench/graph":
                 return send_json(h, W.graph(user["workspace"], pid, q.get("since", [""])[0]))
+            if u.path == "/api/workbench/explain":        # an answer in four parts, by the query_explain capability (no model)
+                from ..core import capstore as CS
+                try:
+                    return send_json(h, CS.call("query_explain", "query_explain", pipeline=pid, answer_id=q.get("id", [""])[0]))
+                except Exception as e:
+                    return send_json(h, {"error": f"{type(e).__name__}: {e}"})
             if u.path == "/api/workbench/answers":
                 from ..core import answers
                 return send_json(h, {"answers": answers.listing(pid, user["workspace"]), "pins": answers.pins(pid, user["workspace"])})

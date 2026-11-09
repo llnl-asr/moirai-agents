@@ -1,0 +1,27 @@
+{
+ "name": "explain_result",
+ "description": "Explain the result of a computed answer - how much was found and what differs between runs - as a plain summary and the result as a formatted table (values as chips, numbers and times formatted). Used by query_explain for the Query view.",
+ "version": 1,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "explain_result",
+  "explain_result_check"
+ ],
+ "pvc": {
+  "predictor": [
+   "explain_result"
+  ],
+  "validator": [
+   "explain_result_check"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1794241935.4,
+   "why": "Query view: the result part told high level first, details folded and formatted"
+  }
+ ]
+}

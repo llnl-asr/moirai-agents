@@ -400,3 +400,39 @@ def test_running_a_stage_again_resets_the_stages_built_on_it(tmp_path):
     assert [c["stages"][s]["status"] for s in ("moirai_smoke", "baseline", "graph", "package")] == ["passed", "running", "pending", "pending"]
     assert c["stages"]["graph"]["validation"] is None and c["stages"]["package"]["gate"] is None
     assert "baseline is running again" in c["stages"]["graph"]["history"][-1]["note"]
+
+
+def test_an_explanation_reads_tables_with_several_values_and_keeps_values_exact():
+    from moirai_agents.core import explain as X
+    t = X.md_table("| name | value(s) | runs |\n|---|---|---|\n| --qid | 0.0 \\| 0.5 \\| 1.0 | 3 |\n| --maxseq | 1000000 | 3 |")
+    assert t["columns"] == ["name", "value(s)", "runs"] and all(len(r) == 3 for r in t["rows"])
+    assert X.split_values(t["rows"][0][1]) == ["0.0", "0.5", "1.0"] and t["rows"][1][1] == "1000000"   # parameters as passed
+    assert X.fmt_value("1794203908.2100208").endswith("UTC") and 2 in t["numeric"]
+    old = X.md_table("| name | value(s) | runs |\n|---|---|---|\n| -i | /a | /b | 10 |")       # unescaped pipes (older answers)
+    assert old["rows"][0] == ["-i", "/a | /b", "10"]
+
+
+def test_query_explain_gives_four_parts_summary_first_and_passes_its_checks():
+    from moirai_agents.core import capstore as S
+    fix = json.loads((Path(S.__file__).parent.parent / ".agents/capabilities/query_explain/checks.json").read_text())[0]["args"]["answer"]
+    r = S.call("query_explain", "query_explain", answer=fix)
+    assert [p["part"] for p in r["parts"]] == ["plan", "result", "answer", "evidence"] and not r["problems"]
+    assert all(p["summary"] and len(p["summary"]) <= 320 for p in r["parts"])
+    res = r["parts"][1]
+    assert "differ between runs" in res["summary"] and any(b["type"] == "table" for d in res["details"] for b in d["blocks"])
+    assert S.call("query_explain", "query_explain_validate", answer=fix)["status"] == "pass"
+
+
+def test_a_stage_the_kind_no_longer_has_is_retired_not_left_running(tmp_path):
+    run = P.new("run", "old", source=str(tmp_path), command="python app.py")
+    P.update(run["id"], lambda c: c["stages"].update(query={"name": "query", "status": "running"}) or {"kind": "test"})
+    s = P.load(run["id"])["stages"]["query"]
+    assert s["status"] == "skipped" and s["retired"]
+
+
+def test_an_answer_without_a_lineage_step_carries_the_subgraph_it_used():
+    from moirai_agents.core import evidence as EV
+    ctx = {"acts": {"1:10": {"id": "1:10", "name": "f", "used": ["e1", "p1"], "generated": ["e2"]}}}
+    o = EV._touched([{"kind": "inputs", "runs": [{"activity": "1:10"}], "ids": []}], ctx)
+    assert o["activities"] == ["1:10"] and set(o["entities"]) == {"e1", "p1", "e2"}
+    assert EV._touched([{"kind": "group", "counts": {}}], {}) is None

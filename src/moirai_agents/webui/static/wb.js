@@ -333,7 +333,7 @@ async function liveInst(first){if(!WB.sel)return;const pid=WB.sel.id,g=await api
 
 // ---- Query view: the query chat on the left; here the graph and the evidence of the selected query. Select a query to see
 // the part of the graph it used; select one piece of its plan or evidence to see just that. Instances or aggregated.
-const Q={sel:null,pick:null,sig:'',g:null,cy:null,adj:null,drawn:0,seen:null,part:false,gmode:'inst',want:null};
+const Q={sel:null,pick:null,sig:'',g:null,cy:null,adj:null,drawn:0,seen:null,part:false,gmode:'inst',want:null,reach:false};
 const PLAN_K=[['intent','Intent'],['targets','Targets'],['entities','Entities'],['edges','Edges'],['time','Time / version'],['filters','Filters'],['output_schema','Output schema']];
 const EV_I={event:'◷',artifact:'▣',source:'⛁',query:'⌕'};
 const WQ_ASK={live:['What has the run produced in the last hour?','Where did the newest artifact come from? Show its lineage.','Which inputs fed the most artifacts?','What is downstream of the input data: what would a bad input affect?','What is sensitive for publishing? Mark everything derived from sensitive inputs.'],
@@ -348,11 +348,11 @@ async function wbQuery(quiet){if(!WB.sel||!WB.sel.item)return;const it=WB.sel.it
     <span class="sub" id="wqstat"></span><span class="wb-acts"><a href="#" id="wbreport">report of pinned answers</a></span></div>
    <div class="wq-strip" id="wqstrip"></div>
    <div class="wq-grid2"><div class="wq-viz"><div class="wq-tools"><span class="wq-leg" id="wqleg"></span>
-      <span class="wq-btns"><button id="wqfit" title="zoom to the selected part">fit selection</button><button id="wqall" title="show the whole graph">whole graph</button></span></div>
+      <span class="wq-btns"><button id="wqreach" title="also draw everything upstream (lineage) and downstream (impact) of the answer's data">${Q.reach?'answer only':'+ upstream & downstream'}</button><button id="wqfit" title="zoom to the selected part">fit selection</button><button id="wqall" title="show the whole graph">whole graph</button></span></div>
      <div id="wqgraph" class="wq-graph"><div class="sub" style="padding:16px">reading the graph…</div></div><div id="wqinfo" class="wq-info" hidden></div></div>
     <div class="wq-panel" id="wqpanel"></div></div>`;
   $('#wbreport').onclick=e=>{e.preventDefault();wbReport()};
-  $('#wqfit').onclick=()=>wqHighlight(true);$('#wqall').onclick=()=>{const c=Q.gmode==='agg'?AGG.q&&AGG.q.cy:Q.cy;c&&c.animate({fit:{padding:20}},{duration:250})};
+  $('#wqfit').onclick=()=>wqHighlight(true);$('#wqreach').onclick=e=>{Q.reach=!Q.reach;e.target.textContent=Q.reach?'answer only':'+ upstream & downstream';Q.cy=null;AGG.q=null;wqDraw()};$('#wqall').onclick=()=>{const c=Q.gmode==='agg'?AGG.q&&AGG.q.cy:Q.cy;c&&c.animate({fit:{padding:20}},{duration:250})};
   v.querySelectorAll('#wqseg button').forEach(b=>b.onclick=()=>{Q.gmode=b.dataset.g;v.querySelectorAll('#wqseg button').forEach(x=>x.classList.toggle('on',x===b));Q.cy=null;AGG.q=null;wqDraw()});
   if(it.kind==='analysis'&&!WB.card)api('api/workbench/card?pipeline='+encodeURIComponent(pid)).then(c=>{if(c&&!c.error){WB.card=c;if(!Q.sel)wbQPanel()}})}
  const [d,gr]=await Promise.all([api('api/workbench/answers?pipeline='+encodeURIComponent(pid)),api(`api/workbench/graph?pipeline=${encodeURIComponent(pid)}&since=${encodeURIComponent(Q.sig)}`)]);
@@ -427,9 +427,24 @@ async function drawInst(box,nodes,edges,onTap){try{await dgNeedGraph()}catch(e){
 function wqStarts(a){const g=Q.g,ns=(g&&g.nodes)||[],ids=new Set(ns.map(n=>n.id)),out=new Set;
  const ln=(a.lineage&&a.lineage.nodes)||[];
  (a.targets||[]).forEach(t=>{if(ids.has(t))out.add(t);else ns.filter(n=>n.kind==='entity'&&((n.uri||'').includes(t)||n.type===t)).slice(0,40).forEach(n=>out.add(n.id))});
+ if(!out.size)(a.steps||[]).forEach(s=>(s.cites||[]).forEach(c=>{const i=recId(c);if(ids.has(i))out.add(i)}));   // targets that are captured values (parameters): what they describe
  if(!out.size)ln.filter(n=>n.start).forEach(n=>ids.has(n.id)&&out.add(n.id));
  if(!out.size)ln.filter(n=>n.kind==='entity').forEach(n=>ids.has(n.id)&&out.add(n.id));
  return out}
+// the subgraph that answers the query: its targets, its lineage and every record it cites, with what each of them directly used and generated
+function wqAnswer(a){const g=Q.g;if(!g||g.truncated||!g.nodes)return null;const ids=new Set(g.nodes.map(n=>n.id)),core=new Set(wqStarts(a));
+ ((a.lineage||{}).nodes||[]).forEach(n=>ids.has(n.id)&&core.add(n.id));(a.steps||[]).forEach(s=>(s.cites||[]).forEach(c=>{const i=recId(c);if(ids.has(i))core.add(i)}));
+ if(!core.size)return null;const out=new Set(core);g.edges.forEach(e=>{if(e.relation)return;if(core.has(e.source))out.add(e.target);if(core.has(e.target))out.add(e.source)});return out}
+function wqPart(a){return Q.reach?wqScope(a):(wqAnswer(a)||wqScope(a))}
+// lay a graph out to fill its box: each connected piece by dagre in the direction that fits the box best, the pieces packed in rows
+function packLayout(cy,box){const W=box.clientWidth||800,H=box.clientHeight||600,gap=30,comps=cy.elements().components();if(!comps.length)return;
+ const run=(c,dir)=>{c.layout({name:'dagre',rankDir:dir,nodeSep:10,rankSep:40,animate:false,fit:false}).run();return c.boundingBox({includeLabels:true})};
+ const parts=comps.map(c=>{const t=run(c,'TB'),zt=Math.min(W/Math.max(t.w,1),H/Math.max(t.h,1));let bb=run(c,'LR');
+  if(zt>Math.min(W/Math.max(bb.w,1),H/Math.max(bb.h,1)))bb=run(c,'TB');return {c,bb}});
+ if(parts.length>1){const area=parts.reduce((s,p)=>s+(p.bb.w+gap)*(p.bb.h+gap),0),rowW=Math.max(Math.max(...parts.map(p=>p.bb.w)),Math.sqrt(area*W/H));
+  parts.sort((x,y)=>y.bb.h-x.bb.h);let x=0,y=0,rh=0;
+  cy.batch(()=>parts.forEach(p=>{if(x>0&&x+p.bb.w>rowW){x=0;y+=rh+gap;rh=0}const dx=x-p.bb.x1,dy=y-p.bb.y1;
+   p.c.nodes().positions(n=>({x:n.position('x')+dx,y:n.position('y')+dy}));x+=p.bb.w+gap;rh=Math.max(rh,p.bb.h)}))}}
 // the selected query's data: from its start entities, everything upstream (lineage) and downstream (impact) through used/generated edges
 function wqScope(a){const g=Q.g;if(!g||g.truncated||!g.nodes)return null;const start=wqStarts(a);if(!start.size)return null;
  const fwd={},back={};g.edges.forEach(e=>{if(e.relation)return;(fwd[e.source]=fwd[e.source]||[]).push(e.target);(back[e.target]=back[e.target]||[]).push(e.source)});
@@ -440,20 +455,22 @@ async function wqDraw(){const box=$('#wqgraph');if(!box||!WB.sel)return;Q.drawn=
   let d=await api('api/workbench/aggregate?pipeline='+encodeURIComponent(WB.sel.id));if(!$('#wqgraph'))return;
   if(d&&d.mode==='diff'){d.nodes.forEach(n=>{if(n.status==='matched')n.status=''});d.edges.forEach(e=>{if(e.status==='matched')e.status=''})}
   const a=WB.answers.find(x=>x.id===Q.sel);
-  if(a&&d&&d.nodes){const sc=wqScope(a),hl=wqAggHl(a),types=new Set(hl.types),acts=new Set(hl.acts);   // only the types and activities of the query's data
+  if(a&&d&&d.nodes){const sc=wqPart(a),hl=wqAggHl(a),types=new Set(hl.types),acts=new Set(hl.acts);   // only the types and activities of the query's data
    if(sc)(Q.g.nodes||[]).forEach(n=>{if(sc.has(n.id))(n.kind==='entity'?types:acts).add(n.kind==='entity'?n.type:n.label)});
    const keep=new Set(d.nodes.filter(n=>(n.kind==='type'?types:acts).has(n.label)).map(n=>n.id));
    if(keep.size){d={...d,nodes:d.nodes.filter(n=>keep.has(n.id)),edges:d.edges.filter(e=>keep.has(e.source)&&keep.has(e.target))}}}
   Q.filtered=!!a;AGG.q=null;await drawAgg('q','wqgraph',d,null,x=>aggInfo('wqinfo',x));wqHighlight(true);return}
- if(leg)leg.innerHTML=Q.sel?'<i class="e"></i>entity <i class="a"></i>activity <i class="f"></i>the answer’s lineage <i class="p"></i>selected step · only this query’s data: upstream and downstream of it':'<i class="e"></i>entity <i class="a"></i>activity · the whole graph: select a query to draw only its data';
+ if(leg)leg.innerHTML=Q.sel?'<i class="e"></i>entity <i class="a"></i>activity <i class="f"></i>the answer’s records <i class="p"></i>selected step · '+(Q.reach?'the answer’s data with everything upstream and downstream of it':'only the records the answer used, with their direct inputs and outputs'):'<i class="e"></i>entity <i class="a"></i>activity · the whole graph: select a query to draw only its data';
  const g=Q.g,a=WB.answers.find(x=>x.id===Q.sel),whole=g&&!g.truncated&&g.nodes;let nodes,edges;Q.part=!whole;Q.filtered=false;
- const sc=a&&whole?wqScope(a):null;
+ const sc=a&&whole?wqPart(a):null;
  if(sc){nodes=g.nodes.filter(n=>sc.has(n.id));edges=g.edges.filter(e=>sc.has(e.source)&&sc.has(e.target));Q.filtered=true}   // the query's data only, laid out afresh
+ else if(a&&a.lineage&&a.lineage.nodes.length){nodes=a.lineage.nodes;edges=a.lineage.edges;Q.filtered=true}   // its records are not in this graph (other traces): its own subgraph
  else if(whole){nodes=g.nodes;edges=g.edges}
- else if(a&&a.lineage&&a.lineage.nodes.length){nodes=a.lineage.nodes;edges=a.lineage.edges}
  else{Q.cy=null;box.innerHTML=`<div class="sub" style="padding:16px">${g?`The graph has ${g.counts.entities+g.counts.activities} nodes, too many to draw one by one: select a query to draw its part, or switch to Aggregated.`:'No provenance yet.'}</div>`;return}
  const adj={};edges.forEach(e=>{if(e.relation)return;if(e.kind==='used')(adj[e.target]=adj[e.target]||{gen:[],used:[]}).used.push(e.source);else(adj[e.source]=adj[e.source]||{gen:[],used:[]}).gen.push(e.target)});Q.adj=adj;
- Q.cy=await drawInst(box,nodes,edges,x=>wqInfoAt('wqinfo',x));wqHighlight(true)}
+ Q.cy=await drawInst(box,nodes,edges,x=>wqInfoAt('wqinfo',x));if(Q.cy)packLayout(Q.cy,box);
+ if(a&&!Q.filtered&&leg)leg.insertAdjacentHTML('beforeend',`<div class="xp-note warn">⚠ This answer's records are not in this graph: it was computed on other traces (${esc([...new Set((a.reads||[]).map(r=>r.file))].join(', '))}). Ask it again here to compute it on these traces and draw its part.</div>`);
+ wqHighlight(true)}
 
 function wqResolve(ref){if(!Q.cy||!ref)return[];ref=String(ref);const n=Q.cy.getElementById(ref);if(n&&n.length)return[ref];
  return Q.cy.nodes('[kind="entity"]').filter(x=>(x.data('uri')||'').includes(ref)||x.data('type')===ref||x.data('label')===ref).map(x=>x.id()).slice(0,80)}
@@ -495,7 +512,7 @@ function wqHighlight(fit){const a=WB.answers.find(x=>x.id===Q.sel);
   else if(Q.pick==='s')pk=(a.sensitive&&a.sensitive.lineage)||[];
   else if(Q.pick&&Q.pick[0]==='e'){const e=(a.evidence||[])[+Q.pick.slice(1)]||{};if(e.entity)pk.push(...wqResolve(e.entity));if(e.activity)pk.push(...wqActs(e.activity,E))}
   const ps=new Set(pk);cy.nodes().filter(n=>ps.has(n.id())).removeClass('dim').addClass('pick')});
- if(!fit)return;const sel=cy.$('.pick').length?cy.$('.pick'):cy.$('.focus');
+ if(!fit)return;const sel=cy.$('.pick').length?cy.$('.pick'):Q.filtered&&!Q.reach?cy.elements():cy.$('.focus');
  cy.stop();cy.fit(sel.length?sel:cy.elements(),sel.length&&sel.length<4?60:24);if(cy.zoom()>1.3){cy.zoom({level:1.3,renderedPosition:{x:cy.width()/2,y:cy.height()/2}});cy.center(sel.length?sel:undefined)}}
 function wqInfoAt(boxId,d){const b=$('#'+boxId);if(!b)return;const ref=d.uri||d.label;b.hidden=false;
  b.innerHTML=`<b>${esc(d.kind)}</b> ${esc(String(d.label).split('\n')[0])}${d.type?` <span class="sub">(${esc(d.type)})</span>`:''}${d.uri?`<div class="sub" title="${esc(d.uri)}">${esc(d.uri)}</div>`:''}${propList(d)}${d.kind==='activity'&&d.dur!=null?`<div class="sub">pid ${esc(d.pid)} · ${dur((d.dur||0)/1e6)}</div>`:''}
@@ -555,6 +572,29 @@ function stepArgs(s){const a=s.args||{},r=s.resolved||{},bits=[];
  const tm=r.time||r.produced;if(tm)bits.push(`time ${tm[0]} → ${tm[1]}${a.since||a.until||a.produced_since||a.produced_until?` (from “${[a.since||a.produced_since,a.until||a.produced_until].filter(Boolean).join(' / ')}”)`:''}`);
  return bits.join(' · ')}
 function synthHtml(t){return md(t||'').replace(/\[S(\d+)\]/g,(m,n)=>`<a href="#" class="scite" data-pk="s${n}">S${n}</a>`)}
+// ---- an answer explained in four parts (the query_explain capability): summary first, details folded, one look per kind of block
+const XP={},XPOPEN={};
+function xpVal(v){if(Array.isArray(v))return `<span class="xp-chips">${v.map(x=>`<span class="xp-chip${x==='…'?' more':''}">${esc(x)}</span>`).join('')}</span>`;
+ const t=String(v??'');if(!t)return '<span class="sub">–</span>';
+ const shown=/^\/|^[a-z]+:\/\//.test(t)?`<code>${esc(t)}</code>`:esc(t);
+ return t.length>90?`<span class="xp-cell" title="click to show all">${shown}</span>`:shown}
+function xpBlock(b){const T=b.type;
+ if(T==='text')return `<div class="xp-text">${synthHtml(b.text)}</div>`;
+ if(T==='kv')return `<dl class="xp-kv">${(b.rows||[]).map(([k,v])=>`<dt>${esc(k)}</dt><dd>${xpVal(v)}</dd>`).join('')}</dl>`;
+ if(T==='table'){const num=new Set(b.numeric||[]);
+  return `<div class="xp-tw"><table class="xp-t"><thead><tr>${b.columns.map((c,i)=>`<th class="${num.has(i)?'n':''}">${esc(c)}</th>`).join('')}</tr></thead><tbody>${(b.rows||[]).map(r=>`<tr>${r.map((c,i)=>`<td class="${num.has(i)?'n':''}">${xpVal(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>${b.total>(b.rows||[]).length?`<div class="sub">showing ${b.rows.length} of ${b.total}</div>`:''}`}
+ if(T==='query')return `<div class="xp-q"><div class="xp-qh"><b>${esc(b.label||'')}</b> <span>${esc(b.why||'')}</span><span class="xp-meta">${esc(b.meta||'')}</span></div><pre><code>${esc(b.code||'')}</code></pre></div>`;
+ if(T==='stats')return `<div class="xp-facts">${(b.items||[]).map(x=>`<span><b>${esc(x.value)}</b> ${esc(x.label)}</span>`).join('')}</div>`;
+ if(T==='list')return `<ul class="xp-list">${(b.items||[]).map(x=>`<li>${synthHtml(x)}</li>`).join('')}</ul>`;
+ if(T==='note')return `<div class="xp-note ${b.tone==='ok'?'ok':'warn'}">${b.tone==='ok'?'✓':'⚠'} ${esc(b.text||'')}</div>`;
+ return `<pre>${esc(JSON.stringify(b))}</pre>`}
+const fmtFact=v=>typeof v==='number'?v.toLocaleString():esc(String(v));
+function xpPart(x,n,a){const groups=(x.details||[]).filter(g=>!(x.part==='answer'&&g.title==='Gaps'&&(a.gaps||[]).length)),k=x.part,open=XPOPEN[k];
+ const steps=k==='plan'?`<div class="xp-steps">${(a.steps||[]).map(s=>`<a href="#" class="xp-step${Q.pick==='s'+s.step?' on':''}" data-pk="s${s.step}" title="show S${s.step}'s records on the graph">S${s.step} ${esc(OPWORD[s.op]||s.op)}</a>`).join('')}</div>`:'';
+ const head=k==='result'?`<h4 class="wq-pk${Q.pick?'':' on'}" data-pk="">`:'<h4>';
+ return `<section class="wq-sec xp" data-part="${k}">${head}<span class="n">${n}</span>${esc(x.title||k)}</h4>
+  <p class="xp-sum">${synthHtml(x.summary||'')}</p>${(x.facts||[]).length?`<div class="xp-facts">${x.facts.map(f=>`<span><b>${fmtFact(f.value)}</b> ${esc(f.label)}</span>`).join('')}</div>`:''}${steps}
+  ${groups.length?`<details class="xp-more" data-xp="${k}" ${open?'open':''}><summary>details</summary>${groups.map(g=>`<div class="xp-g${g.pick&&Q.pick===g.pick?' on':''}"><div class="xp-gt${g.pick?' wq-pk':''}"${g.pick?` data-pk="${esc(g.pick)}" title="show these records on the graph"`:''}>${esc(g.title||'')}</div>${(g.blocks||[]).map(xpBlock).join('')}</div>`).join('')}</details>`:''}</section>`}
 function wbQPanelTV(p,a){const on=k=>Q.pick===k?' on':'',st=a.stats||{},sc=a.synthesis_check||{},pinned=WB.pins.includes(a.id),steps=a.steps||[],fixable=WB.sel.item.kind!=='analysis';
  const plan=steps.map(s=>`<li class="wq-pk${on('s'+s.step)}" data-pk="s${s.step}"><b>S${s.step}</b> ${esc(OPWORD[s.op]||s.op)} <span class="sub">${esc(stepArgs(s))}</span><div class="tv-hl">${esc(s.headline)}</div>
    <div class="sub">${s.queries?`TraceViewer ${s.queries.map(n=>'Q'+n).join(', ')}`:`computed from [S${(s.computed_from??0)+1}]`} · ${s.cited} record${s.cited===1?'':'s'} cited</div></li>`).join('');
@@ -564,9 +604,15 @@ function wbQPanelTV(p,a){const on=k=>Q.pick===k?' on':'',st=a.stats||{},sc=a.syn
  const reads=(a.reads||[]).map(r=>`<tr><td>${esc(r.file)}</td><td>${fmtBytes(r.bytes)}</td><td><code>${esc(r.sha256_ends)}</code></td><td>${new Date(r.mtime*1000).toLocaleString()}</td></tr>`).join('');
  const qs=(a.queries||[]).map(q=>`<div class="tv-q"><b>Q${q.n}</b> <span class="sub">${esc(q.why)} · ${q.rows} row${q.rows===1?'':'s'} · ${q.secs}s</span><pre>${esc(q.query)}</pre></div>`).join('');
  const cites=steps.map(s=>`<details><summary>S${s.step}: ${s.cited} record${s.cited===1?'':'s'}</summary><table class="tv-t"><tr><th>record</th><th>file</th><th>pid</th><th>time</th><th>id</th></tr>${(s.cites||[]).slice(0,pro()?300:40).map(c=>`<tr><td>${esc(c.rec)}</td><td>${esc(c.file)}</td><td>${esc(c.pid)}</td><td>${c.ts?esc(isoUs(c.ts)):'-'}</td><td><code>${esc(c.id||'')}</code></td></tr>`).join('')}</table></details>`).join('');
- p.innerHTML=`<div class="wq-q"><span class="ac-badge ok" title="Every step is a TraceViewer query on the traces; the result is computed from the records">✓ computed from the traces</span><b>${esc(a.question||'')}</b>
-   <span class="sub">${a.ts?new Date(a.ts*1000).toLocaleString():''} · plan chosen by ${a.plan&&a.plan.chosen_by==='you'?'you':'the agent'} · ${esc((a.engine_info||{}).name||'TraceViewer')} ${esc((a.engine_info||{}).version||'')} · ${a.secs}s</span></div>
-  <section class="wq-sec"><h4><span class="n">1</span>Plan <span class="sub">select a step to see its records on the graph</span></h4><ol class="tv-plan">${plan}</ol></section>
+ const key=a.id+':'+(a.result_hash||''),xp=XP[key];
+ if(!xp){XP[key]={loading:true};api('api/workbench/explain?pipeline='+encodeURIComponent(WB.sel.id)+'&id='+encodeURIComponent(a.id)).then(r=>{XP[key]=r&&!r.error&&r.parts?r:{error:(r&&r.error)||'failed'};if(Q.sel===a.id)wbQPanel()})}
+ const gapsHtml=`${(a.gaps||[]).length?`<section class="wq-sec tv-gaps"><h4><span class="n">!</span>Gaps <span class="sub">what the provenance could not show</span></h4>
+   <ul>${a.gaps.map(g=>`<li><b>${esc(GAP_L[g.kind]||g.kind)}</b> <code>${esc(g.subject)}</code> <a href="#" class="scite" data-pk="s${g.step}">S${g.step}</a><div class="sub">${esc(g.detail)}</div>
+    ${fixable?`<button class="btn" data-gap="${esc(g.id)}" title="Open the app's Annotate chat: explore the code for this gap, fix the annotation, learn it in the capabilities">Improve coverage</button>`:''}</li>`).join('')}</ul>
+   ${fixable&&a.gaps.length>1?`<button class="btn primary" data-gap="*">Improve coverage of all ${a.gaps.length} gaps</button>`:''}
+   ${fixable?'':'<div class="sub">A dataset has no annotation here: improve it on the app that produced it.</div>'}</section>`:''}
+`;
+ const secs=xp&&xp.parts?xp.parts.map((x,i)=>xpPart(x,i+1,a)+(x.part==='answer'?gapsHtml:'')).join(''):`  <section class="wq-sec"><h4><span class="n">1</span>Plan <span class="sub">select a step to see its records on the graph</span></h4><ol class="tv-plan">${plan}</ol></section>
   <section class="wq-sec"><h4 class="wq-pk${Q.pick?'':' on'}" data-pk=""><span class="n">2</span>Result <span class="sub">computed, its whole part</span></h4><div class="tv-hl big">${esc(res.headline||'')}</div>${res.table?`<div class="ap-ans">${md(res.table)}</div>`:''}</section>
   <section class="wq-sec"><h4><span class="n">3</span>Answer <span class="sub">${a.synthesis?'written by the agent from the result; [S] cites a step':''}</span></h4>${syn}</section>
   ${(a.gaps||[]).length?`<section class="wq-sec tv-gaps"><h4><span class="n">!</span>Gaps <span class="sub">what the provenance could not show</span></h4>
@@ -579,8 +625,14 @@ function wbQPanelTV(p,a){const on=k=>Q.pick===k?' on':'',st=a.stats||{},sc=a.syn
    <details ${pro()?'open':''}><summary>Files read (${(a.reads||[]).length})</summary><table class="tv-t"><tr><th>file</th><th>size</th><th>sha256 of its ends</th><th>modified</th></tr>${reads}</table></details>
    <details><summary>Queries (${(a.queries||[]).length})</summary>${qs}</details>
    <details><summary>Cited records</summary>${cites}</details></section>
+`;
+ p.innerHTML=`<div class="wq-q"><span class="ac-badge ok" title="Every step is a TraceViewer query on the traces; the result is computed from the records">✓ computed from the traces</span><b>${esc(a.question||'')}</b>
+   <span class="sub">${a.ts?new Date(a.ts*1000).toLocaleString():''} · plan chosen by ${a.plan&&a.plan.chosen_by==='you'?'you':'the agent'} · ${esc((a.engine_info||{}).name||'TraceViewer')} ${esc((a.engine_info||{}).version||'')} · ${a.secs}s</span></div>
+  ${secs}
   <div class="ac-del"><button id="wqrerun" title="Run the same plan on the traces as they are now and compare">↻ re-run</button><button id="wqpin" class="${pinned?'on':''}">${pinned?'📌 pinned':'📌 pin to report'}</button><button id="wqcite">⧉ copy citations</button><button id="wqwrong" class="warn">this looks wrong</button></div><div id="wqrr" class="sub"></div>`;
- p.querySelectorAll('[data-pk]').forEach(x=>x.onclick=e=>{e.preventDefault();Q.pick=x.dataset.pk||null;wbQPanel();wqHighlight(true)});
+ p.querySelectorAll('[data-pk]').forEach(x=>x.onclick=e=>{e.preventDefault();e.stopPropagation();Q.pick=Q.pick===(x.dataset.pk||null)&&x.dataset.pk?null:(x.dataset.pk||null);wbQPanel();wqHighlight(true)});
+ p.querySelectorAll('details[data-xp]').forEach(d=>d.ontoggle=()=>{XPOPEN[d.dataset.xp]=d.open});
+ p.querySelectorAll('.xp-cell').forEach(c=>c.onclick=e=>{e.stopPropagation();c.classList.toggle('open')});
  p.querySelectorAll('[data-gap]').forEach(b=>b.onclick=()=>improveGaps(a,b.dataset.gap==='*'?a.gaps.map(g=>g.id):[b.dataset.gap],b));
  $('#wqrerun').onclick=async()=>{const b=$('#wqrerun'),m=$('#wqrr');b.disabled=true;m.textContent='running the plan again…';
   const r=await api('api/workbench/rerun',{pipeline:WB.sel.id,id:a.id});b.disabled=false;

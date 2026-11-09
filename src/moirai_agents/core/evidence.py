@@ -578,13 +578,35 @@ def run(traces: str, steps: List[Dict[str, Any]], index_dir: str) -> Dict[str, A
         res.append({"step": k + 1, "op": s["op"], "args": {a: x for a, x in s.items() if a != "op"}, "resolved": o.get("resolved"),
                     "queries": [q["n"] for q in v.queries[before:]] or None, "computed_from": None if v.queries[before:] else s.get("from"),
                     "headline": headline(o, cat, ctx), "table": table(o, cat, ctx), "cites": o["cites"], "cited": len(o["cites"])})
-    lin = next((o for o in reversed(outs) if o["kind"] == "lineage"), None)
+    lin = next((o for o in reversed(outs) if o["kind"] == "lineage"), None) or _touched(outs, ctx)
     return {"gaps": detect_gaps(steps, outs, cat, ctx), "steps": res, "queries": v.queries, "reads": v.reads(), "outs": outs, "result_hash": _hash(outs), "secs": round(time.time() - t0, 3),
             "engine": {"name": "dftracer-utils TraceViewer", "version": getattr(v.U, "__version__", "?")},
             "computed": "\n".join(r["headline"] + "\n" + r["table"] for r in res),
             "graph": _graph(lin, cat, ctx) if lin else None, "types": cat["types"],
             "stats": {"sources": len(v.files), "queries": len(v.queries), "rows_read": sum(q["rows"] for q in v.queries),
                       "entities_declared": len(cat["entities"]), "cited": sum(len(o["cites"]) for o in outs)}}
+
+
+def _touched(outs, ctx) -> Optional[Dict[str, Any]]:
+    """Without a lineage step, the answer's own records as one: the activities its steps found (with what each used and generated) and the
+    entities they found, so every answer carries the subgraph it was computed from."""
+    acts = ctx.get("acts", {})
+    aids, ents, start = [], set(), set()
+    for o in outs:
+        if o["kind"] == "activities":
+            aids += [i for i in o["ids"] if i in acts]
+        elif o["kind"] in ("input", "output", "inputs", "outputs") or o.get("runs") and o["kind"] != "attribute":
+            aids += [r["activity"] for r in o.get("runs") or [] if r.get("activity") in acts]
+        elif o["kind"] == "entities":
+            start.update(o["ids"])
+    aids = list(dict.fromkeys(aids))
+    for a in aids:
+        ents.update(acts[a].get("used") or [])
+        ents.update(acts[a].get("generated") or [])
+    ents |= start
+    if not aids and not ents:
+        return None
+    return {"kind": "lineage", "direction": "answer", "start": sorted(start), "entities": sorted(ents), "activities": aids, "ends": []}
 
 
 def _graph(o, cat, ctx, cap: int = 150) -> Dict[str, Any]:
