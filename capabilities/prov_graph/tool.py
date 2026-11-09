@@ -189,10 +189,21 @@ def compare_tree(a, b, rels, patterns=None):
     return out
 
 
+def default_files(plain, limit=2000):
+    """Pure: files worth comparing under a plain study dir: AlphaFold outputs-af3 trees and *_cut50.pdb. Rosetta outputs are unseeded, so never defaulted."""
+    root = Path(plain)
+    if not root.is_dir():
+        return []
+    rels = [p.relative_to(root).as_posix() for p in sorted(root.rglob("*")) if p.is_file() and ("outputs-af3" in p.parts or p.name.endswith("_cut50.pdb"))]
+    return rels[:limit]
+
+
 def science_status(o):
     """Pure: map recorded compare outputs to (state, message). state in pass|fail|inconclusive."""
     if "compare" not in o:
         return "inconclusive", "graph_compare has not run"
+    if not o.get("compare_files"):
+        return "inconclusive", "graph_compare compared no file (empty or missing list): pass is vacuous, give plain_dir, traced_dir and files"
     if o.get("compare_differs"):
         return "fail", f"outputs differ in content from the plain run: {o['compare_differs'][:5]}"
     if o.get("compare_timestamp_only"):
@@ -243,13 +254,19 @@ def register(mcp):
         """Check the run did not change the science: compare the files the plain run wrote with the same files from the traced run, by sha256 of content.
         Tar archives are opened and compared member by member; .zst members are decompressed (zstandard module, else the zstd CLI, else compared as bytes).
         A member whose only differing lines match volatile_patterns (default: Date/Command header lines, timestamps, /mnt/nnf/<uuid> paths; at most 8 lines) is timestamp_only, not different.
-        Use after graph_check. plain_dir: default where smoke ran. traced_dir: default the annotated tree. volatile_patterns: optional list of regexes replacing the default.
+        Use after graph_check. plain_dir: default runs/baseline_plain/study when it and runs/baseline/study exist (files default to the AlphaFold outputs-af3 tree and *_cut50.pdb), else where smoke ran. traced_dir: default runs/baseline/study, else the annotated tree. Comparing zero files makes science_unchanged inconclusive, never a pass. volatile_patterns: optional list of regexes replacing the default.
         Returns {identical, timestamp_only: [{file, member, lines}], different, missing, compared_members}; timestamp_only is for the user to judge."""
         c = P.load(pipeline)
         smoke = P.stage(c, "smoke")["outputs"]
+        runs = P.work(c) / "runs"
+        if not plain_dir and (runs / "baseline_plain" / "study").is_dir() and (runs / "baseline" / "study").is_dir():
+            plain_dir, traced_dir = str(runs / "baseline_plain" / "study"), traced_dir or str(runs / "baseline" / "study")
         a, b = Path(plain_dir or smoke.get("cwd") or P.source_of(c)), Path(traced_dir or P.stage(c, "integrate")["outputs"].get("annotated", ""))
-        out = compare_tree(a, b, smoke.get("outputs_created", []), volatile_patterns)
-        P.record(pipeline, STAGE, outputs={"compare": {k: (len(v) if isinstance(v, list) else v) for k, v in out.items()}, "compare_differs": out["different"][:20],
+        rels = default_files(a) if a.name == "study" else []
+        rels = rels or smoke.get("outputs_created", [])
+        out = compare_tree(a, b, rels, volatile_patterns)
+        nfiles = len(out["identical"]) + len(out["timestamp_only"]) + len(out["different"])
+        P.record(pipeline, STAGE, outputs={"compare_files": nfiles, "compare": {k: (len(v) if isinstance(v, list) else v) for k, v in out.items()}, "compare_differs": out["different"][:20],
                                            "compare_timestamp_only": out["timestamp_only"][:20]}, note="outputs compared")
         return out
 
@@ -266,16 +283,17 @@ def register(mcp):
         Returns the comparison plus science_state for each case."""
         r = _selftest()
         r["states"] = {
-            "identical": science_status({"compare": {}})[0],
-            "timestamp_only": science_status({"compare": {}, "compare_timestamp_only": r["timestamp_only"]})[0],
-            "different": science_status({"compare": {}, "compare_differs": r["different"]})[0],
+            "identical": science_status({"compare": {}, "compare_files": 1})[0],
+            "timestamp_only": science_status({"compare": {}, "compare_files": 1, "compare_timestamp_only": r["timestamp_only"]})[0],
+            "different": science_status({"compare": {}, "compare_files": 1, "compare_differs": r["different"]})[0],
+            "nothing_compared": science_status({"compare": {}})[0],
         }
         return r
 
     @mcp.tool()
     def graph_validate(pipeline: str) -> dict:
         """The health gate: provenance was recorded, no dangling id, every artifact type present with a producer, every root a real input, every type described. Use before the gate.
-        science_unchanged: pass when outputs are identical, inconclusive when only timestamp differences exist (named), fail on real content differences. Returns the verdict {status, failed, unknown, passed, total}."""
+        science_unchanged: pass when outputs are identical, inconclusive when only timestamp differences exist (named) or nothing was compared, fail on real content differences. Returns the verdict {status, failed, unknown, passed, total}."""
         o = P.stage(P.load(pipeline), STAGE)["outputs"]
         v = P.Verdict(STAGE)
         h = o.get("health")

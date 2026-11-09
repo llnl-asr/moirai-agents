@@ -8,6 +8,7 @@ import json
 import os
 import secrets
 import tempfile
+import time
 import uuid
 from http import cookies
 from pathlib import Path
@@ -22,6 +23,29 @@ from .bridge import OPENAI_URL
 STATIC_TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
 COOKIE = "moirai_token"
 
+
+
+# Modules the routes import lazily are not in the server's hot list: reload them here when their file is newer than what is
+# loaded (the process start, or the last reload), dependencies first, so an edit never leaves a new api.py calling an old one.
+_PROC_START = os.stat("/proc/self").st_ctime if os.path.exists("/proc/self") else time.time()
+_LOADED: dict = {}
+
+
+def _fresh_wb():
+    import importlib
+    from ..core import aggregate, answers, evidence, liveinputs
+    from . import workbench
+    for m in (aggregate, answers, evidence, liveinputs, workbench):
+        f = getattr(m, "__file__", "") or ""
+        try:
+            mt = os.path.getmtime(f)
+        except OSError:
+            continue
+        if mt > _LOADED.get(f, _PROC_START):
+            if f in _LOADED or mt > _PROC_START:
+                importlib.reload(m)
+            _LOADED[f] = mt
+    return workbench
 
 def send_json(h, obj, code=200, cookie=None):
     b = json.dumps(obj, default=str).encode()
@@ -158,6 +182,47 @@ def sse_open(h):
     h.wfile.flush()
 
 
+def ws_tunnel(h, app, user, path):
+    """A websocket to the dfdashboard child (its Panel plots keep a live session): forward the upgrade request, then copy
+    bytes both ways until either side closes."""
+    import socket
+    import threading
+    port = app.dash.ensure(str(pipeline.dash_root(user["workspace"])))
+    if port is None:
+        return send_json(h, {"error": app.dash.error}, 503)
+    try:
+        up = socket.create_connection(("127.0.0.1", port), timeout=10)
+    except OSError as e:
+        return send_json(h, {"error": f"dashboard not reachable: {e}"}, 502)
+    up.settimeout(None)
+    lines = [f"GET {path} HTTP/1.1", f"Host: 127.0.0.1:{port}"]
+    lines += [f"{k}: {v}" for k, v in h.headers.items() if k.lower() not in ("host", "cookie", "x-moirai-token")]
+    up.sendall(("\r\n".join(lines) + "\r\n\r\n").encode())
+    down = h.connection
+    h.close_connection = True
+
+    def pump(src, dst):
+        try:
+            while True:
+                b = src.recv(65536)
+                if not b:
+                    break
+                dst.sendall(b)
+        except OSError:
+            pass
+        finally:
+            for x in (src, dst):
+                try:
+                    x.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+    t = threading.Thread(target=pump, args=(up, down), daemon=True)
+    t.start()
+    pump(down, up)
+    t.join(timeout=5)
+    up.close()
+
+
 def proxy(h, app, user, path, method="GET", body=None):
     """Forward to the dfdashboard child. It streams, so bytes go through as they come; a page learns its API base from the injected config."""
     port = app.dash.ensure(str(pipeline.dash_root(user["workspace"])))
@@ -196,7 +261,7 @@ def proxy(h, app, user, path, method="GET", body=None):
 def get_route(h, app, life, u, q):
     if u.path in ("/", "/index.html"):
         return send_static(h, "index.html", set_cookie(app.token) if authorized(h, app, q) else None)
-    if u.path in ("/moirai.js", "/style.css", "/diagrams.js"):
+    if u.path in ("/moirai.js", "/style.css", "/diagrams.js", "/views.js", "/wb.js"):
         return send_static(h, u.path[1:])
     if u.path.startswith("/vendor/"):
         name = u.path[len("/vendor/"):]
@@ -254,6 +319,51 @@ def get_route(h, app, life, u, q):
             return send_json(h, {"error": str(e)}, 404)
     if u.path == "/api/auto":
         return send_json(h, {"on": pipeline.auto_mode(q.get("session", [""])[0], user["workspace"])})
+    if u.path == "/api/background":
+        return send_json(h, {"agents": app.background.agents() if getattr(app, "background", None) else []})
+    if u.path.startswith("/api/background/run/"):
+        return send_json(h, app.background.run(u.path.rsplit("/", 1)[1]))
+    if u.path == "/api/history":
+        sid = q.get("session", [""])[0]
+        t = app.turns.get(f"{user['uid']}/{sid}")
+        s = t.snapshot() if t is not None and not t.done else st.get(sid)
+        if not s:
+            return send_json(h, {"error": "no such chat"}, 404)
+        from . import history
+        return send_json(h, history.read(user, s, q.get("call", [None])[0]))
+    if u.path == "/api/mcp":
+        from . import mcp
+        return send_json(h, mcp.state(user["workspace"], sum(1 for t in list(app.turns.values()) if not t.done)))
+    if u.path.startswith("/api/workbench"):
+        W = _fresh_wb()
+        pid = q.get("pipeline", [""])[0]
+        try:
+            if u.path == "/api/workbench":
+                busy = {t.session.get("id") for t in list(app.turns.values()) if not t.done}     # chats whose agent is working now
+                return send_json(h, W.items(user["workspace"], busy))
+            if u.path == "/api/workbench/card":
+                return send_json(h, W.card(user["workspace"], pid))
+            if u.path == "/api/workbench/live":
+                return send_json(h, W.live(user["workspace"], pid))
+            if u.path == "/api/workbench/render":
+                from ..core import liveinputs as LI
+                spec = pipeline.load(pid, user["workspace"]).get("live_inputs")
+                if not spec:
+                    return send_json(h, {"status": "error", "problems": ["no live-run inputs"]})
+                try:
+                    vals = json.loads(q.get("values", ["{}"])[0] or "{}")
+                except ValueError:
+                    vals = {}
+                return send_json(h, LI.render(spec, vals if isinstance(vals, dict) else {}))
+            if u.path == "/api/workbench/aggregate":
+                return send_json(h, W.aggregate(user["workspace"], pid))
+            if u.path == "/api/workbench/graph":
+                return send_json(h, W.graph(user["workspace"], pid, q.get("since", [""])[0]))
+            if u.path == "/api/workbench/answers":
+                from ..core import answers
+                return send_json(h, {"answers": answers.listing(pid, user["workspace"]), "pins": answers.pins(pid, user["workspace"])})
+        except pipeline.PipelineError as e:
+            return send_json(h, {"error": str(e)}, 400)
     if u.path == "/api/consolidation":
         return send_json(h, consolidate.unkept(getattr(app, "consolidation", None) or {"lessons": [], "capabilities": []}))
     if u.path == "/api/submitted":
@@ -269,6 +379,11 @@ def get_route(h, app, life, u, q):
     if u.path == "/dash" or u.path.startswith(("/dash/", "/assets/")):
         target = u.path[5:] if u.path.startswith("/dash") else u.path
         return proxy(h, app, user, (target or "/") + ("?" + u.query if u.query else ""))
+    if u.path.startswith(("/panel/", "/panel-dist/")):          # dfdashboard's Panel plots: absolute paths and a live websocket
+        target = u.path + ("?" + u.query if u.query else "")
+        if "websocket" in (h.headers.get("Upgrade") or "").lower():
+            return ws_tunnel(h, app, user, target)
+        return proxy(h, app, user, target)
     return send_json(h, {"error": "not found"}, 404)
 
 
@@ -421,6 +536,84 @@ def post_route(h, app, life, u, body):
                     t.cond.wait_for(lambda: t.done, timeout=30)
             st.delete(sid)
         return send_json(h, {"ok": True, "deleted": len(ids)})
+    if u.path == "/api/background/start":
+        bg = getattr(app, "background", None)
+        if bg is None:
+            return send_json(h, {"error": "background agents are not running on this server"}, 503)
+        a = body.get("agent", "")
+        if a == "learner":
+            r = bg.learn_once(force=True)
+        elif a in ("lessons", "capabilities", "all"):
+            r = bg.consolidate_once(consolidate.report(), force=a)
+            r = (r.get(a) if a != "all" else r) or {"status": "nothing to consolidate"}
+        else:
+            return send_json(h, {"error": "agent is learner, lessons or capabilities"}, 400)
+        if isinstance(r, str):
+            r = {"status": r}
+        return send_json(h, {**r, "agents": bg.agents()})
+    if u.path in ("/api/mcp/check", "/api/mcp/restart"):
+        from . import mcp
+        name = body.get("name") or "all"
+        if u.path.endswith("/check"):
+            r = {"status": "ok", "checks": mcp.check(user["workspace"], list(mcp.specs(user["workspace"])) if name == "all" else [name])}
+        else:
+            r = mcp.restart(user["workspace"], name)
+            R.wlog("mcp-restart", server=name, ok={n: c.get("ok") for n, c in (r.get("checks") or {}).items()})
+        return send_json(h, {**r, **mcp.state(user["workspace"], sum(1 for t in list(app.turns.values()) if not t.done))},
+                         400 if r.get("error") else 200)
+    if u.path in ("/api/workbench/ask", "/api/workbench/rerun"):      # computed answers: TraceViewer queries, no model
+        _fresh_wb()
+        from ..core import evidence as E
+        try:
+            if u.path == "/api/workbench/ask":
+                steps = body.get("steps")
+                rec = E.ask(body.get("pipeline", ""), str(body.get("question", ""))[:400], steps if isinstance(steps, list) else [], chose="you", chat=body.get("session", ""))
+                return send_json(h, {"id": rec["id"], "headline": rec["result"]["headline"]})
+            return send_json(h, E.rerun(body.get("pipeline", ""), str(body.get("id", ""))))
+        except (E.PlanError, pipeline.PipelineError) as e:
+            return send_json(h, {"error": str(e)}, 400)
+    if u.path == "/api/workbench/pin":
+        from ..core import answers
+        try:
+            return send_json(h, {"on": answers.pin(body.get("pipeline", ""), str(body.get("id", "")), bool(body.get("on", True)), user["workspace"]),
+                                 "pins": answers.pins(body.get("pipeline", ""), user["workspace"])})
+        except pipeline.PipelineError as e:
+            return send_json(h, {"error": str(e)}, 400)
+    if u.path in ("/api/workbench/live", "/api/workbench/querychat"):
+        W = _fresh_wb()
+        allowed = user.get("models") or R.provider_models(user.get("provider", "livai"))
+        model = os.environ.get("MOIRAI_AGENTS_MODEL", allowed[0]) if os.environ.get("MOIRAI_AGENTS_MODEL") in allowed else allowed[0]
+        sid = W.new_chat_id()
+        try:
+            if u.path == "/api/workbench/live":          # a live run of an annotated app, with its own run chat
+                c = W.new_live(user["workspace"], body.get("parent", ""), body.get("name", ""), body.get("command", ""), sid,
+                               body.get("values") if isinstance(body.get("values"), dict) else None)
+                st.put({"id": sid, "created": R._now(), "updated": R._now(), "turns": [], "user": user["name"], "title": c["name"],
+                        "mode": "run", "app_dir": None, "folder": "live runs", "model": model})
+                return send_json(h, {"session": sid, "pipeline": c["id"], "command": c["command"], "inputs": c.get("inputs") or {}})
+            c = pipeline.load(body.get("pipeline", ""), user["workspace"])     # the Query view's chat of a pipeline: made once, kept
+            if c["kind"] == "analysis":
+                return send_json(h, {"session": c.get("chat_session") or "", "pipeline": c["id"]})
+            if c.get("query_chat") and st.get(c["query_chat"]):
+                return send_json(h, {"session": c["query_chat"], "pipeline": c["id"]})
+            st.put({"id": sid, "created": R._now(), "updated": R._now(), "turns": [], "user": user["name"], "title": f"Query: {c['name']}",
+                    "mode": "ask", "pipeline": c["id"], "query": True, "app_dir": None, "folder": "queries", "model": model})
+            pipeline.update(c["id"], lambda x: x.update(query_chat=sid))
+            return send_json(h, {"session": sid, "pipeline": c["id"]})
+        except pipeline.PipelineError as e:
+            return send_json(h, {"error": str(e)}, 400)
+    if u.path == "/api/workbench/dataset":
+        W = _fresh_wb()
+        sid = W.new_chat_id()
+        try:
+            c = W.open_dataset(user["workspace"], body.get("path", ""), body.get("name", ""), sid)
+        except pipeline.PipelineError as e:
+            return send_json(h, {"error": str(e)}, 400)
+        allowed = user.get("models") or R.provider_models(user.get("provider", "livai"))
+        st.put({"id": sid, "created": R._now(), "updated": R._now(), "turns": [], "user": user["name"], "title": c["name"],
+                "mode": "analysis", "pipeline": c["id"], "app_dir": None, "folder": "datasets",
+                "model": os.environ.get("MOIRAI_AGENTS_MODEL", allowed[0]) if os.environ.get("MOIRAI_AGENTS_MODEL") in allowed else allowed[0]})
+        return send_json(h, {"session": sid, "pipeline": c["id"], "card": W.card(user["workspace"], c["id"])})
     if u.path == "/api/rename":
         sid = body.get("session", "")
         if not st.rename(sid, body.get("title", "")):

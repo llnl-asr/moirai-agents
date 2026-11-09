@@ -40,7 +40,7 @@
   "tool": "graph_compare_selftest",
   "args": {},
   "expect": {
-   "contains": "\"states\": {\"identical\": \"pass\", \"timestamp_only\": \"inconclusive\", \"different\": \"fail\"}"
+   "contains": "\"states\": {\"identical\": \"pass\", \"timestamp_only\": \"inconclusive\", \"different\": \"fail\", \"nothing_compared\": \"inconclusive\"}"
   }
  }
 ]

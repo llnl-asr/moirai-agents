@@ -259,6 +259,9 @@ def main(argv=None) -> int:
         signal.signal(sig, on_signal)
     threading.Thread(target=lifecycle, args=(app, life, srv), daemon=True, name="lifecycle").start()
     threading.Thread(target=watch_consolidation, args=(app,), daemon=True, name="consolidation").start()
+    from . import background
+    app.background = background.Background(app)
+    threading.Thread(target=background.watch, args=(app,), daemon=True, name="background").start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

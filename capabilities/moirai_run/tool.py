@@ -1,8 +1,10 @@
 """Run pipeline stages 5 and 6: run the annotated app under moirai-service, first a smoke run, then the baseline, watched live on the Dashboard.
 Two shapes: a plain command (one launcher), or a generated `flux batch` run.sh (batch mode): run.sh stays UNMODIFIED; its app job runs a generated
-per-chunk submit wrapper (--submit-script) that starts moirai-service inside the job's own shell. The wrapper is written beforehand by moirai_wrapper_write."""
+per-chunk submit wrapper (--submit-script) that starts moirai-service inside the job's own shell. The wrapper is written beforehand by moirai_wrapper_write.
+A third entry: a flux batch submitted by hand and already finished (BioTox) is attached with moirai_run_attach so that moirai_validate can judge it."""
 import glob
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -11,18 +13,24 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from moirai_agents.core import jobs as J
 from moirai_agents.core import pipeline as P
 from moirai_agents.core import provtrace as T
 
-STAGES = ("moirai_smoke", "baseline")
+STAGES = ("moirai_smoke", "baseline", "live_run")
+LIVE_LIMIT_S = 12 * 3600      # a live run goes for hours: its default limit
 MARKER = "moirai preamble (generated)"
 DFT_REL = "../../dftracer/bin/dftracer_service"
 DFT_GLOB = ("lib", "python*", "site-packages", "dftracer", "bin", "dftracer_service")
 WRAPPER_NAME = "submit_moirai.sh"
 ORIGINAL_REL = "monomer-structure-prediction/submit_smsp.sh"   # Elmerfold's per-chunk submit script, under ELMER_SRC_DIR
+FLUX_JOBS_FORMAT = "{state} {result} {returncode} {runtime}"
+FLUX_ID_RE = re.compile(r"^[A-Za-z0-9]{2,32}$")
+ATTACH_LOG_TAIL = 20000
+TRACE_HOST_RE = re.compile(r"^prov[_-](?P<host>.+?)(?:-spill)?\.pfw(?:\.gz)?$")
 
 
 def _script(env, pid, stage, log, data_dir, command, launcher, nodes):
@@ -345,7 +353,7 @@ def render_batch(original, env, stage_dir, data_dir="", shm_base="/moirai-agents
 def _plan(pipeline, stage, batch_script, queue, limit, data_dir, venv, original=""):
     c = P.load(pipeline)
     P.require_ready(c, stage)
-    integ = P.stage(c, "integrate")["outputs"]
+    integ = P.stage(P.origin(c), "integrate")["outputs"]      # a live run uses its parent's annotated tree
     if not integ.get("env"):
         raise P.PipelineError("the integrate stage has not written moirai_env.sh")
     sdir = P.work(c) / "traces" / stage
@@ -406,7 +414,7 @@ def _start_batch(pipeline, stage, batch_script, queue, limit, data_dir, venv, wa
 def _start(pipeline, stage, command, launcher, nodes, data_dir, wait, limit):
     c = P.load(pipeline)
     P.require_ready(c, stage)
-    integ, cmd = P.stage(c, "integrate")["outputs"], command or c["command"]
+    integ, cmd = P.stage(P.origin(c), "integrate")["outputs"], command or c["command"]
     if not integ.get("env"):
         return {"status": "error", "error": "the integrate stage has not written moirai_env.sh"}
     tdir = P.work(c) / "traces" / stage / "raw"     # dfdashboard's run layout: <root>/<run>/raw/*.pfw.gz
@@ -421,12 +429,209 @@ def _start(pipeline, stage, command, launcher, nodes, data_dir, wait, limit):
             "note": "the Dashboard tab shows the provenance as it arrives"}
 
 
+# ---------------------------------------------------------------- attach a finished, externally submitted flux batch
+def parse_flux_row(text: str):
+    """Pure: the first non-empty line of `flux jobs -n -a -o '{state} {result} {returncode} {runtime}' <id>` as {state, result, returncode, runtime}
+    (fields missing from a short line are ''); None when there is no line."""
+    for line in (text or "").splitlines():
+        t = line.split()
+        if t:
+            return {"state": t[0], "result": t[1] if len(t) > 1 else "", "returncode": t[2] if len(t) > 2 else "", "runtime": t[3] if len(t) > 3 else ""}
+    return None
+
+
+def derive_rc(row: dict, study_ok=None) -> int:
+    """Pure: the return code of an attached job, from flux and never from the caller. 0 only for result COMPLETED with returncode 0 (and study_ok not False);
+    otherwise flux's own positive returncode, else 1. study_ok: the 'ok' of check_study's result.json (None when none was given)."""
+    rcs = str(row.get("returncode", ""))
+    if row.get("result") == "COMPLETED" and rcs == "0":
+        return 1 if study_ok is False else 0
+    return int(rcs) if rcs.isdigit() and int(rcs) > 0 else 1
+
+
+def flux_status(flux_job_id: str, flux: str = "flux", tries: int = 3, pause: float = 1.0) -> dict:
+    """Ask flux for one job: {state, result, returncode, runtime}. Retried `tries` times (flux can answer late); raises P.PipelineError when the id is
+    malformed, flux is missing, or the job stays unknown. Read-only: it runs `flux jobs` and nothing else."""
+    if not FLUX_ID_RE.match(flux_job_id or ""):
+        raise P.PipelineError(f"flux_job_id {flux_job_id!r} is not a flux job id (letters and digits, e.g. f3iKMXkX8ykB)")
+    last = ""
+    for i in range(max(1, int(tries))):
+        try:
+            p = subprocess.run([flux, "jobs", "-n", "-a", "-o", FLUX_JOBS_FORMAT, flux_job_id], capture_output=True, text=True, timeout=30, stdin=subprocess.DEVNULL)
+            last = (p.stderr or p.stdout or "").strip()[-200:]
+            row = parse_flux_row(p.stdout) if p.returncode == 0 else None
+            if row:
+                return row
+        except FileNotFoundError:
+            raise P.PipelineError(f"{flux}: command not found: run from a shell where flux is on PATH")
+        except (subprocess.TimeoutExpired, OSError) as e:
+            last = str(e)
+        if i + 1 < max(1, int(tries)) and pause:
+            time.sleep(pause)
+    raise P.PipelineError(f"flux job {flux_job_id} is unknown, or flux did not answer after {max(1, int(tries))} tries: {last or 'no output'}")
+
+
+def trace_hosts(files) -> dict:
+    """Pure: {host: [files]} read from trace file names prov_<host>[-spill].pfw[.gz] (the service trace of BioTox: prov_<host>.pfw.gz); other names are ignored."""
+    out = {}
+    for f in files:
+        m = TRACE_HOST_RE.match(os.path.basename(f))
+        if m:
+            out.setdefault(m.group("host"), []).append(f)
+    return out
+
+
+def attach_job(pipeline: str, stage: str, flux_job_id: str, output_file: str = "", result_json: str = "", flux: str = "flux", pause: float = 1.0) -> dict:
+    """Record a FINISHED flux job as the stage's job (source 'attached'), in the pipeline's own jobs dir and stage outputs. The rc is derived here from flux
+    and result_json, never given. Raises P.PipelineError, having written nothing, when the stage is not moirai_smoke|baseline, the stage is not ready, a job of
+    the stage is still running, the flux job is unknown or not INACTIVE, or result_json/output_file is unreadable."""
+    if stage not in STAGES:
+        raise P.PipelineError(f"stage must be one of {STAGES}")
+    fid = (flux_job_id or "").strip()
+    c = P.load(pipeline)
+    P.require_ready(c, stage)
+    o = P.stage(c, stage)["outputs"]
+    if o.get("job"):
+        try:
+            prev = J.get(pipeline, o["job"], 0)
+        except P.PipelineError:
+            prev = {}
+        if prev.get("status") == "running":
+            raise P.PipelineError(f"job {o['job']} of stage {stage} is still running: moirai_run_stop it first; nothing was recorded")
+    row = flux_status(fid, flux, 3, pause)
+    if row["state"] != "INACTIVE":
+        raise P.PipelineError(f"flux job {fid} is not finished (state {row['state']}): wait for it to end; nothing was recorded, nothing was cancelled")
+    if not row["result"] or not row["returncode"]:
+        raise P.PipelineError(f"flux job {fid} is INACTIVE but flux gave no result/returncode ({row}): try again; nothing was recorded")
+    study_ok, problems = None, []
+    if result_json:
+        try:
+            d = json.loads(Path(result_json).expanduser().read_text())
+        except (OSError, ValueError) as e:
+            raise P.PipelineError(f"result_json {result_json} is not readable JSON ({e}): pass check_study's result.json of the run dir, or leave it out")
+        if not isinstance(d, dict) or not isinstance(d.get("ok"), bool):
+            raise P.PipelineError(f"result_json {result_json} has no boolean 'ok': it is not a check_study result")
+        study_ok = d["ok"]
+        pr = d.get("problems") or []
+        problems = [str(x) for x in pr] if isinstance(pr, list) else [str(pr)]
+        if not study_ok and not problems:
+            problems = ["check_study reported ok=false without listing problems"]
+    tail = ""
+    if output_file:
+        try:
+            with open(Path(output_file).expanduser(), "rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - ATTACH_LOG_TAIL))
+                tail = fh.read().decode("utf-8", "replace")
+        except OSError as e:
+            raise P.PipelineError(f"output_file {output_file} is not readable ({e}): pass the batch --output file, or leave it out")
+    rc = derive_rc(row, study_ok)
+    try:
+        rt = max(0.0, float(row["runtime"]))
+    except ValueError:
+        rt = 0.0
+    now = time.time()
+    jd = P.pdir(pipeline) / "jobs"
+    jd.mkdir(parents=True, exist_ok=True)
+    jid = "attached-" + re.sub(r"[^a-z0-9_]+", "-", fid.lower())
+    sh, log, rcf = jd / f"{jid}.sh", jd / f"{jid}.log", jd / f"{jid}.rc"
+    lines = [f"attached flux job {fid}: state={row['state']} result={row['result']} returncode={row['returncode']} runtime={row['runtime']} s (read with flux jobs, not given)"]
+    if output_file:
+        lines += [f"--- last {ATTACH_LOG_TAIL} bytes of {output_file} ---", tail.rstrip("\n")]
+    if result_json:
+        lines.append(f"result_json {result_json}: ok={study_ok}" + ("".join(f"\n  problem: {x}" for x in problems)))
+    lines.append(f"attached job rc={rc}" + ("" if rc == 0 else " (flux result/returncode, or result_json ok=false)"))
+    sh.write_text(f"# attached: flux job {fid} was submitted outside moirai_agents; this pipeline ran no script for it\n")
+    log.write_text("\n".join(lines) + "\n")
+    rcf.write_text(f"{rc}\n")
+    os.utime(rcf, (now, now))
+    traces = str(P.work(c) / "traces" / stage / "raw")
+    rec = {"id": jid, "pipeline": pipeline, "stage": stage, "name": f"{stage}-attached", "pid": 0, "cwd": str(P.work(c)), "started": round(now - rt, 1), "limit_s": 0,
+           "script": str(sh), "log": str(log), "rc_file": str(rcf), "source": "attached", "flux_job_id": fid, "flux_state": row["state"], "flux_result": row["result"],
+           "flux_returncode": row["returncode"], "output_file": output_file, "result_json": result_json}
+    (jd / f"{jid}.json").write_text(json.dumps(rec, indent=1))
+    n = len(T.expand(traces))
+    P.record(pipeline, stage, status="running",
+             outputs={"job": jid, "traces": traces, "mode": "attached", "flux_job_id": fid, "hosts_file": "", "batch_output": output_file, "result_json": result_json},
+             note=f"attached finished flux job {fid} ({row['result']}, returncode {row['returncode']}, rc {rc}); {n} trace file(s) in {traces}")
+    return {"status": "ok", "job": jid, "source": "attached", "flux_job_id": fid, "flux_state": row["state"], "flux_result": row["result"], "flux_returncode": row["returncode"],
+            "rc": rc, "elapsed": round(rt, 1), "traces": traces, "trace_files": n, "result_json_ok": study_ok, "problems": problems,
+            "warnings": ([] if n else [f"no trace file under {traces}: moirai_validate will fail trace; the traces of this run must be under that directory"]),
+            "next": "moirai_validate(pipeline, stage)"}
+
+
+# ---------------------------------------------------------------- validate
+def _validate(pipeline: str, stage: str) -> dict:
+    c = P.load(pipeline)
+    o = P.stage(c, stage)["outputs"]
+    v = P.Verdict(stage)
+    if not v.check("ran", bool(o.get("job")), "the run has not started",
+                   "start the run (moirai_smoke_run / moirai_baseline_run); for a flux batch submitted by hand that has FINISHED: moirai_run_attach(pipeline, stage, flux_job_id, output_file, result_json)"):
+        return P.finish_validation(pipeline, v)
+    j = J.get(pipeline, o["job"], 1500)
+    if j["status"] == "running":
+        v.inconclusive("finished", f"still running after {j['elapsed']} s")
+        return P.finish_validation(pipeline, v)
+    v.check("exit_0", j["rc"] == 0, f"rc={j['rc']}{' (timed out)' if j.get('timed_out') else ''}: {j.get('log_tail', '')[-300:]}",
+            "raise limit if it timed out; rc 4/5/6 in batch mode: a chunk job failed / no wrapper ran / --output unreadable, read the batch --output file, the chunk logs (moirai-wrapper: lines) and service-<host>-<job>.log; "
+            "attached: rc comes from flux result/returncode and result_json ok, the problems are at the end of the log")
+    files = T.expand(o["traces"])
+    v.check("trace", bool(files), "no trace file", "read the service log next to the trace prefix")
+    v.check("service_trace", not files or not all("-spill" in f for f in files), "only spill files: no service was running", "check the service log; is /dev/shm big enough?")
+    hosts = []
+    hf = o.get("hosts_file")
+    if hf and os.path.isfile(hf):
+        hosts = list(dict.fromkeys(h.strip() for h in Path(hf).read_text().split() if h.strip()))
+    if hosts:
+        per = {h: [f for f in files if h in os.path.basename(f)] for h in hosts}
+        if not any(per.values()):
+            v.inconclusive("host_traces", f"no trace file name carries a host name of {hosts}: cannot attribute traces to hosts")
+        else:
+            missing = [h for h, fs in per.items() if not fs]
+            spill = [h for h, fs in per.items() if fs and all("-spill" in f for f in fs)]
+            v.check("host_traces", not missing, f"no trace from {missing} (of {hosts})", f"service-<host>-<job>.log next to the traces; did the wrapper start the service on {missing}?")
+            v.check("host_service_trace", not spill, f"only spill traces from {spill}", "the app there did not reach the ring: check /dev/shm/<MOIRAI_SERVICE_SHM> on that host and the service log")
+        P.record(pipeline, stage, outputs={"per_host_traces": {h: len(fs) for h, fs in per.items()}})
+    elif o.get("mode") == "attached" and files:
+        # no wrapper hosts.txt (the run was submitted outside this tool, e.g. BioTox): hosts come only from the trace inventory (prov_<host>.pfw.gz); no names: nothing is judged
+        th = trace_hosts(files)
+        if th:
+            spill = [h for h, fs in th.items() if all("-spill" in f for f in fs)]
+            v.check("host_service_trace", not spill, f"only spill traces from {spill}", "the app there did not reach the ring: check /dev/shm/<MOIRAI_SERVICE_SHM> on that host and the service log")
+            v.assume("attached_hosts", True, f"no wrapper hosts.txt (attached run): {len(th)} host(s) with a service trace by file name: {sorted(th)}")
+            P.record(pipeline, stage, outputs={"per_host_traces": {h: len(fs) for h, fs in th.items()}})
+    g = T.read(o["traces"])
+    n = g.counts()
+    v.check("activities", n["activities"] > 0, f"{n['activities']} activities", "is the annotated code on the executed path? Is the app run from the annotated tree?")
+    v.check("entities", n["entities"] > 0, f"{n['entities']} entities", "activities relate no entity: check the spec")
+    v.check("no_dangling", n["dangling"] == 0, f"{n['dangling']} ids with no EH record", "every related entity must be declared")
+    spec = P.stage(P.origin(c), "annotate")["outputs"].get("spec") or {}
+    seen = {e["type"] for e in g.entities.values()}
+    missing = sorted({e["type"] for a in spec.get("activities", []) for e in a.get("used", []) + a.get("generated", [])} - seen)
+    if stage == "live_run":      # a live run is judged on what it ran; the spec's coverage was proven by the parent's baseline and graph diff
+        v.check("types_seen", True, f"never recorded in this run (information, not a failure): {missing}" if missing else "every spec type recorded")
+    else:
+        v.check("types_seen", not missing, f"never recorded: {missing}", "that code path did not run: use a test input that reaches it, or fix the spec")
+    P.record(pipeline, stage, outputs={"counts": n, "summary": f"{n['activities']} activities, {n['entities']} entities, {n['edges']} edges"})
+    return P.finish_validation(pipeline, v)
+
+
 _FAKE_FLUX = """#!/bin/bash
 case "$1" in
   batch) echo fFAKEBATCH ;;
   watch) exit 0 ;;
   jobs) case "$*" in *returncode*) echo 0 ;; *result*) echo COMPLETED ;; esac ;;
   cancel) exit 0 ;;
+esac
+"""
+_FAKE_FLUX_JOBS = """#!/bin/bash
+[ "$1 $2 $3" = "jobs -n -a" ] || { echo "fake flux: unexpected arguments $*" >&2; exit 2; }
+id="${@: -1}"
+case "$id" in
+  fOKDONE) echo "INACTIVE COMPLETED 0 4515.5" ;;
+  fFAILED) echo "INACTIVE FAILED 1 12.0" ;;
+  fRUNNING) echo "RUN - - 33.0" ;;
+  *) echo "flux-jobs: error: unknown job $id" >&2; exit 1 ;;
 esac
 """
 _RUN_OUT_FAIL = ("flux-job: task(s) exited with exit code 2\nFri Oct 30 23:32:42 PDT 2026: f35QqToh9 failed\n"
@@ -456,9 +661,85 @@ def _run_batch_wrapper(td, name, out_text, hosts_text):
     return p.returncode, p.stdout + p.stderr, r
 
 
+def _attach_selftest(td) -> dict:
+    """moirai_run_attach on a temp pipeline (MOIRAI_AGENTS_PIPELINES_DIR pointed at the temp dir for the duration) with a fake flux: a COMPLETED rc 0 job passes
+    'ran' and 'exit_0' of moirai_validate, a FAILED one fails exit_0, an unfinished or unknown job and a bad stage are refused with nothing recorded,
+    result_json ok=false gives a non-zero rc with its problems in the log."""
+    cases = {}
+    td = Path(td)
+    bindir = td / "attbin"
+    bindir.mkdir()
+    fake = bindir / "flux"
+    fake.write_text(_FAKE_FLUX_JOBS)
+    fake.chmod(0o755)
+    (td / "ok.json").write_text(json.dumps({"ok": True, "problems": []}))
+    (td / "bad.json").write_text(json.dumps({"ok": False, "problems": ["af3_msa output missing"]}))
+    (td / "batch.out").write_text("step done\n")
+    saved = os.environ.get("MOIRAI_AGENTS_PIPELINES_DIR")
+    os.environ["MOIRAI_AGENTS_PIPELINES_DIR"] = str(td / "pipelines")
+    try:
+        pid = P.new("run", "attachtest", source="/x", command="x")["id"]
+
+        def ready(cc):
+            order = P.KINDS["run"]
+            for s in order[:order.index("moirai_smoke")]:
+                cc["stages"][s]["status"] = "passed"
+        P.update(pid, ready)
+        raw = P.work(P.load(pid)) / "traces" / "moirai_smoke" / "raw"
+        raw.mkdir(parents=True)
+        (raw / "prov_nodeA.pfw.gz").write_bytes(b"")
+
+        def att(stage="moirai_smoke", **kw):
+            try:
+                return attach_job(pid, stage, flux=str(fake), pause=0, **kw)
+            except P.PipelineError as e:
+                return {"status": "error", "error": str(e)}
+
+        def njobs():
+            return len(list((P.pdir(pid) / "jobs").glob("*.json"))) if (P.pdir(pid) / "jobs").is_dir() else 0
+
+        def bad_checks():
+            r = _validate(pid, "moirai_smoke")
+            return r, {x["name"] for x in r["failed"]}
+
+        a = att(flux_job_id="fOKDONE", output_file=str(td / "batch.out"), result_json=str(td / "ok.json"))
+        cases["attach_completed_rc0"] = a.get("status") == "ok" and a.get("rc") == 0 and a.get("source") == "attached" and a.get("trace_files") == 1
+        j = J.get(pid, a["job"], 2000) if a.get("job") else {}
+        cases["attach_job_record"] = j.get("status") == "done" and j.get("rc") == 0 and j.get("source") == "attached" and "step done" in j.get("log_tail", "") and j.get("elapsed") == 4515.5
+        r, bad = bad_checks()
+        cases["attach_validate_ran_exit0"] = "ran" not in bad and "exit_0" not in bad and r["total"] >= 3
+        cases["attach_hosts_from_inventory"] = "host_service_trace" not in bad and P.stage(P.load(pid), "moirai_smoke")["outputs"].get("per_host_traces") == {"nodeA": 1}
+        f = att(flux_job_id="fFAILED")
+        cases["attach_failed_rc_nonzero"] = f.get("status") == "ok" and f.get("rc") not in (0, None)
+        r, bad = bad_checks()
+        cases["attach_failed_exit0_fails"] = "exit_0" in bad and "ran" not in bad
+        before = njobs()
+        u = att(flux_job_id="fRUNNING")
+        cases["attach_unfinished_refused"] = u.get("status") == "error" and "not finished" in u.get("error", "")
+        n = att(flux_job_id="fNOSUCH")
+        cases["attach_unknown_refused"] = n.get("status") == "error" and "unknown" in n.get("error", "")
+        cases["attach_bad_id_refused"] = att(flux_job_id="f1; rm -rf x").get("status") == "error"
+        cases["attach_bad_stage_refused"] = att(stage="query", flux_job_id="fOKDONE").get("status") == "error"
+        cases["attach_unreadable_result_json_refused"] = att(flux_job_id="fOKDONE", result_json=str(td / "missing.json")).get("status") == "error"
+        cases["attach_unreadable_output_refused"] = att(flux_job_id="fOKDONE", output_file=str(td / "missing.out")).get("status") == "error"
+        cases["attach_refusals_record_nothing"] = njobs() == before
+        s = att(flux_job_id="fOKDONE", result_json=str(td / "bad.json"))
+        j2 = J.get(pid, s["job"], 2000) if s.get("job") else {}
+        cases["attach_study_false_rc_nonzero"] = s.get("status") == "ok" and s.get("rc") != 0 and s.get("result_json_ok") is False and "af3_msa output missing" in j2.get("log_tail", "")
+        cases["attach_rc_not_a_parameter"] = "rc" not in inspect.signature(attach_job).parameters
+    finally:
+        if saved is None:
+            os.environ.pop("MOIRAI_AGENTS_PIPELINES_DIR", None)
+        else:
+            os.environ["MOIRAI_AGENTS_PIPELINES_DIR"] = saved
+    th = trace_hosts(["/r/prov_nodeA.pfw.gz", "/r/prov_nodeB-spill.pfw.gz", "/r/other.pfw.gz"])
+    cases["attach_trace_hosts"] = sorted(th) == ["nodeA", "nodeB"] and derive_rc({"result": "COMPLETED", "returncode": "0"}) == 0 and derive_rc({"result": "CANCELED", "returncode": "-"}) == 1 and derive_rc({"result": "FAILED", "returncode": "3"}) == 3
+    return cases
+
+
 def _selftest() -> dict:
     """Wrapper write, idempotence and mismatch handling on a temp dir, through the pure render and sync_wrapper; the batch wrapper job text run with a fake flux;
-    the resolver on a fake venv. Nothing else is touched."""
+    the resolver on a fake venv; moirai_run_attach on a temp pipeline with a fake flux. Nothing else is touched."""
     cases = {}
     with tempfile.TemporaryDirectory(prefix="moirai_wrapper_selftest_") as td:
         sd = Path(td) / "traces" / "moirai_smoke"
@@ -532,6 +813,9 @@ def _selftest() -> dict:
         rc, msg, _ = _run_batch_wrapper(td, "noout", None, "nodeA\n")
         cases["batch_output_unreadable"] = rc == 6
         cases["batch_output_parsed"] = r["batch_output"].endswith("/fail/run.out") and batch_output_path("#!/bin/bash\n#flux: --output=/x/y.out\n") == "/x/y.out"
+
+        # attach: a finished, externally submitted flux batch (fake flux, temp pipeline)
+        cases.update(_attach_selftest(td))
     failed = [k for k, v in cases.items() if not v]
     line = "moirai wrapper selftest PASS " + " ".join(f"{k}=ok" for k in cases) if not failed else "moirai wrapper selftest FAIL " + ",".join(failed)
     return {"status": "ok" if not failed else "error", "line": line, "cases": cases}
@@ -562,9 +846,11 @@ def register(mcp):
     def moirai_wrapper_selftest() -> dict:
         """Self-test of the wrapper tools on a temp dir (no pipeline, nothing on the cluster): create, sha256, mode 755, dirs, idempotence, detection and rewrite
         of a differing file, a changed render, mode repair, a run.sh not referencing the wrapper refused; the resolver on a fake venv (python entry script),
-        defaulted vs explicit venv rendering the same text, the python-based fallback; and the batch wrapper job text run under bash with a fake flux against a
-        failing run.out (exit 4, chunk job id named), a clean one (exit 0), a missing/empty hosts.txt (exit 5) and an unreadable output (exit 6).
-        Use after any change to the wrapper text, the batch wrapper or the resolver.
+        defaulted vs explicit venv rendering the same text, the python-based fallback; the batch wrapper job text run under bash with a fake flux against a
+        failing run.out (exit 4, chunk job id named), a clean one (exit 0), a missing/empty hosts.txt (exit 5) and an unreadable output (exit 6); and
+        moirai_run_attach on a temp pipeline with a fake flux (attach_* cases: COMPLETED rc 0 passes 'ran' and 'exit_0' of moirai_validate, FAILED fails exit_0,
+        unfinished/unknown/bad stage refused, result_json ok false gives a non-zero rc).
+        Use after any change to the wrapper text, the batch wrapper, the resolver or the attach tool.
         Returns {status, line, cases}: line is 'moirai wrapper selftest PASS ...' or 'moirai wrapper selftest FAIL <case>'."""
         return _selftest()
 
@@ -579,7 +865,8 @@ def register(mcp):
         returned 0. A run.sh that does not reference the wrapper is refused before anything is written. Run moirai_batch_plan first and get the user's yes.
         queue: the batch queue. data_dir: MOIRAI_DATA_DIR (default the annotated tree). service_venv: venv holding dftracer/bin/dftracer_service (default the venv
         root of integrate's moirai.python; verified executable). original_script: the app's own submit script the wrapper runs
-        (default <annotated>/monomer-structure-prediction/submit_smsp.sh). Returns {status, job, rc, elapsed, traces, wrapper: {action, sha256,
+        (default <annotated>/monomer-structure-prediction/submit_smsp.sh). A flux batch already submitted by hand and FINISHED is not run here: moirai_run_attach.
+        Returns {status, job, rc, elapsed, traces, wrapper: {action, sha256,
         previous_sha256}, log_tail}."""
         if batch_script:
             return _start_batch(pipeline, "moirai_smoke", batch_script, queue, limit, data_dir, service_venv, wait, original_script)
@@ -592,12 +879,43 @@ def register(mcp):
         nodes: one service starts per node. data_dir: where its I/O is traced. limit: seconds before it is stopped. batch_script, queue, service_venv, original_script: as in
         moirai_smoke_run (batch mode ignores command, launcher, nodes: the run.sh decides; service_venv defaults from integrate's moirai.python; the wrapper on disk is
         verified against the fresh render and rewritten, with a report, when it differs; the batch job fails when a chunk job failed). The Dashboard tab shows events
-        as they appear. Returns {status, job, traces, wrapper}: watch with moirai_run_status."""
+        as they appear. A finished flux batch submitted by hand is attached with moirai_run_attach instead. Returns {status, job, traces, wrapper}: watch with moirai_run_status."""
         if batch_script:
             return _start_batch(pipeline, "baseline", batch_script, queue, limit, data_dir, service_venv, wait, original_script)
         if not command:
             raise P.PipelineError("give command (with launcher) or batch_script")
         return _start(pipeline, "baseline", command, launcher, nodes, data_dir, wait, limit)
+
+    @mcp.tool()
+    def moirai_live_run(pipeline: str, command: str = "", launcher: str = "", nodes: int = 1, data_dir: str = "", wait: int = 30, limit: int = LIVE_LIMIT_S,
+                        batch_script: str = "", queue: str = "pbatch", service_venv: str = "", original_script: str = "") -> dict:
+        """Start a LIVE run: the long (multi-hour) run of an app a run pipeline already annotated, under moirai-service, in the background, with provenance written live
+        (the Live Run view draws the graph as it forms). pipeline: a live pipeline (pipeline_new(kind='live', parent=<run pipeline>)); it uses the parent's annotated
+        tree and moirai_env.sh. command: the real run (default the live pipeline's command, which defaults to the parent's). limit: seconds before it is stopped
+        (default 12 h). batch_script, queue, service_venv, original_script: as in moirai_baseline_run. Returns {status, job, traces}: follow with moirai_run_status(pipeline,
+        'live_run'); when it ends, moirai_validate(pipeline, 'live_run'), then the publish_data stage."""
+        if batch_script:
+            return _start_batch(pipeline, "live_run", batch_script, queue, limit, data_dir, service_venv, wait, original_script)
+        return _start(pipeline, "live_run", command, launcher, nodes, data_dir, wait, limit)
+
+    @mcp.tool()
+    def moirai_run_attach(pipeline: str, stage: str, flux_job_id: str, output_file: str = "", result_json: str = "") -> dict:
+        """Attach a flux batch that was submitted BY HAND (e.g. BioTox: biotox_run_script + biotox_run_check, then `flux batch launch.sh`) and has already FINISHED,
+        so that moirai_validate can judge the stage like a started run. Prefer moirai_smoke_run / moirai_baseline_run when they can submit the run; attach only a
+        finished externally submitted job. It submits and cancels nothing and writes only the pipeline's own jobs dir (job record, log, rc file) and the stage outputs
+        (job, traces <work>/traces/<stage>/raw, mode attached, flux_job_id, hosts_file cleared). The job gets source 'attached'.
+        The rc is never taken from the caller: it is derived from `flux jobs -n -a -o '{state} {result} {returncode} {runtime}' <id>` (retried; the job must be
+        INACTIVE): 0 only when result is COMPLETED and returncode 0, else flux's non-zero returncode or 1; with result_json (check_study.py output of the run dir)
+        its boolean 'ok' must also be true for rc 0 (false: rc 1, the problems are at the end of the job log).
+        pipeline: pipeline id. stage: moirai_smoke|baseline (other stages are refused). flux_job_id: the batch job id, e.g. f3iKMXkX8ykB. output_file: the batch --output
+        file; its last 20000 bytes are copied into the job log. result_json: path of check_study's result.json; refused when unreadable or without a boolean 'ok'.
+        Refused (status error, nothing written) when the flux job is unknown or not finished, a job of the stage is still running, the stage is not ready, or a file is unreadable.
+        Returns {status, job, source: attached, flux_job_id, flux_state, flux_result, flux_returncode, rc, elapsed, traces, trace_files, result_json_ok, problems, warnings, next}
+        or {status: error, error}. Then run moirai_validate(pipeline, stage): without a wrapper hosts.txt the per-host checks use only the prov_<host> trace file names."""
+        try:
+            return attach_job(pipeline, stage, flux_job_id, output_file, result_json)
+        except (P.PipelineError, OSError) as e:
+            return {"status": "error", "error": str(e)}
 
     @mcp.tool()
     def moirai_batch_plan(pipeline: str, stage: str, batch_script: str = "", queue: str = "pdebug", limit: int = 2400, data_dir: str = "", service_venv: str = "",
@@ -661,50 +979,14 @@ def register(mcp):
     @mcp.tool()
     def moirai_run_stop(pipeline: str, stage: str) -> dict:
         """Stop a run (the service is stopped and the trace closed; in batch mode the batch wrapper job cancels the batch job, whose app jobs get TERM and stop their service).
-        Use when the user asks, or the run is clearly stuck. Returns {status, id, stopped}."""
+        Use when the user asks, or the run is clearly stuck. An attached (finished) job has nothing to stop. Returns {status, id, stopped}."""
         return J.stop(pipeline, P.stage(P.load(pipeline), stage)["outputs"]["job"])
 
     @mcp.tool()
     def moirai_validate(pipeline: str, stage: str) -> dict:
         """Validate a moirai run: exit 0, a trace from the service and not spill files, activities and entities recorded, no dangling edge, every entity type in
-        the spec seen; in batch mode also one trace per host that ran the wrapper (hosts.txt) and no host with only spill traces. stage: moirai_smoke|baseline.
+        the spec seen; in batch mode also one trace per host that ran the wrapper (hosts.txt) and no host with only spill traces. An attached run (moirai_run_attach)
+        is judged the same way; without a wrapper hosts.txt the per-host evidence comes only from prov_<host> trace file names (spill-only hosts fail
+        host_service_trace; no such names: no per-host judgement). exit_0 is never relaxed. stage: moirai_smoke|baseline.
         Use after the job ended. Returns the verdict {status, failed, unknown, passed, total}."""
-        c = P.load(pipeline)
-        o = P.stage(c, stage)["outputs"]
-        v = P.Verdict(stage)
-        if not v.check("ran", bool(o.get("job")), "the run has not started", "start the run"):
-            return P.finish_validation(pipeline, v)
-        j = J.get(pipeline, o["job"], 1500)
-        if j["status"] == "running":
-            v.inconclusive("finished", f"still running after {j['elapsed']} s")
-            return P.finish_validation(pipeline, v)
-        v.check("exit_0", j["rc"] == 0, f"rc={j['rc']}{' (timed out)' if j.get('timed_out') else ''}: {j.get('log_tail', '')[-300:]}",
-                "raise limit if it timed out; rc 4/5/6 in batch mode: a chunk job failed / no wrapper ran / --output unreadable, read the batch --output file, the chunk logs (moirai-wrapper: lines) and service-<host>-<job>.log")
-        files = T.expand(o["traces"])
-        v.check("trace", bool(files), "no trace file", "read the service log next to the trace prefix")
-        v.check("service_trace", not files or not all("-spill" in f for f in files), "only spill files: no service was running", "check the service log; is /dev/shm big enough?")
-        hosts = []
-        hf = o.get("hosts_file")
-        if hf and os.path.isfile(hf):
-            hosts = list(dict.fromkeys(h.strip() for h in Path(hf).read_text().split() if h.strip()))
-        if hosts:
-            per = {h: [f for f in files if h in os.path.basename(f)] for h in hosts}
-            if not any(per.values()):
-                v.inconclusive("host_traces", f"no trace file name carries a host name of {hosts}: cannot attribute traces to hosts")
-            else:
-                missing = [h for h, fs in per.items() if not fs]
-                spill = [h for h, fs in per.items() if fs and all("-spill" in f for f in fs)]
-                v.check("host_traces", not missing, f"no trace from {missing} (of {hosts})", f"service-<host>-<job>.log next to the traces; did the wrapper start the service on {missing}?")
-                v.check("host_service_trace", not spill, f"only spill traces from {spill}", "the app there did not reach the ring: check /dev/shm/<MOIRAI_SERVICE_SHM> on that host and the service log")
-            P.record(pipeline, stage, outputs={"per_host_traces": {h: len(fs) for h, fs in per.items()}})
-        g = T.read(o["traces"])
-        n = g.counts()
-        v.check("activities", n["activities"] > 0, f"{n['activities']} activities", "is the annotated code on the executed path? Is the app run from the annotated tree?")
-        v.check("entities", n["entities"] > 0, f"{n['entities']} entities", "activities relate no entity: check the spec")
-        v.check("no_dangling", n["dangling"] == 0, f"{n['dangling']} ids with no EH record", "every related entity must be declared")
-        spec = P.stage(c, "annotate")["outputs"].get("spec") or {}
-        seen = {e["type"] for e in g.entities.values()}
-        missing = sorted({e["type"] for a in spec.get("activities", []) for e in a.get("used", []) + a.get("generated", [])} - seen)
-        v.check("types_seen", not missing, f"never recorded: {missing}", "that code path did not run: use a test input that reaches it, or fix the spec")
-        P.record(pipeline, stage, outputs={"counts": n, "summary": f"{n['activities']} activities, {n['entities']} entities, {n['edges']} edges"})
-        return P.finish_validation(pipeline, v)
+        return _validate(pipeline, stage)

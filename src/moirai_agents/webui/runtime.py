@@ -733,6 +733,7 @@ class Turn:
         self.started = _now()
         self.tools: Dict[str, int] = {}
         self.agents: list = []
+        self.agent_uses: set = set()          # tool_use ids of the helpers (Agent/Task) launched in this turn
         self.prov = PROV
         self.message = message + self.upload_note(meta)
         self.io_lock = threading.Lock()
@@ -749,6 +750,8 @@ class Turn:
         with self.cond:
             self.events.append(ev)
             t = ev.get("type")
+            if t == "tool_use" and ev.get("agent") and not ev.get("parent"):
+                self.agent_uses.add(ev.get("id"))
             if t == "tool_log":                       # live output: streamed, not stored (the result has it)
                 lv = self.live.get(ev["id"])
                 if lv is not None:
@@ -785,6 +788,48 @@ class Turn:
                     self.live[tid]["pos"] = pos + len(chunk)
                 self.emit({"type": "tool_log", "id": tid, "text": chunk.decode("utf-8", "replace")})
         shutil.rmtree(self.live_dir, ignore_errors=True)
+
+    def _tail_agents(self) -> None:
+        """A helper started in the background (Agent with run_in_background) does not stream into the turn: Claude Code writes its
+        transcript live beside the chat's own, <config>/projects/<cwd>/<session>/subagents/agent-<id>.jsonl, with a meta.json naming
+        the tool_use that launched it. Follow those of this turn and emit their steps under that tool_use, as a foreground helper's
+        are, so the chat shows what it is doing; then an agent_done event when it finishes."""
+        home, pos, done, final = Path(self.claude_home) / "projects", {}, set(), False
+        while True:
+            final = self.done
+            sid, ids = self.session.get("claude_session"), set(self.agent_uses)
+            for meta in (home.glob(f"*/{sid}/subagents/agent-*.meta.json") if sid and ids else []):
+                try:
+                    m = json.loads(meta.read_text())
+                except (OSError, ValueError):
+                    continue
+                tid = m.get("toolUseId")
+                if tid not in ids or tid in done or m.get("requestShape") != "background":
+                    continue
+                f = meta.with_name(meta.name[:-len(".meta.json")] + ".jsonl")
+                try:
+                    with open(f, "rb") as fh:
+                        fh.seek(pos.get(f, 0))
+                        chunk = fh.read(4 << 20)
+                except OSError:
+                    continue
+                whole = chunk[:chunk.rfind(b"\n") + 1]            # complete lines only; the rest is read next time
+                pos[f] = pos.get(f, 0) + len(whole)
+                for line in whole.decode("utf-8", "replace").splitlines():
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue
+                    if d.get("type") in ("assistant", "user") and isinstance(d.get("message"), dict):
+                        for ev in normalize({"type": d["type"], "message": d["message"], "parent_tool_use_id": tid}):
+                            ev["background"] = True
+                            self.emit(ev)
+                if m.get("finished") and len(whole) == len(chunk):
+                    done.add(tid)
+                    self.emit({"type": "agent_done", "id": tid, "agent": m.get("agentType"), "description": m.get("description")})
+            if final:
+                return
+            time.sleep(2)
 
     def save_uploads(self, files: list) -> list:
         """files: [(name, bytes)] -> metadata only ({name, size, sha256}); content goes to upload_dir."""
@@ -965,6 +1010,7 @@ class Turn:
     def _run(self) -> None:
         try:
             threading.Thread(target=self._tail_live, daemon=True).start()
+            threading.Thread(target=self._tail_agents, daemon=True).start()
             first, resume = self.message, True
             if self.session.get("claude_session") and self.session.get("claude_home") not in (None, self.claude_home):
                 reason = "moved"                    # sign-in changed (e.g. LivAI -> Claude login): can't resume
@@ -1060,6 +1106,7 @@ class Turn:
                 with self.io_lock:                      # all input handled -> let claude exit
                     if self.consumed >= self.sent:
                         if (not learned and not reflected and not msg.get("is_error") and not self.stopped_by_user
+                                and not self.session.get("background")
                                 and self.stdin_open and not os.environ.get("MOIRAI_AGENTS_NO_LEARN_CHECK")):
                             # enforced learning: a turn that recorded nothing gets one more step, in the same context
                             reflected = True
@@ -1148,6 +1195,7 @@ class Turn:
         self.prov.index({"kind": "turn", "user": self.user["name"], "uid": self.user["uid"],
                          "session": self.session["id"], "title": self.session.get("title"),
                          "mode": self.session.get("mode"), "model": self.session.get("model"),
+                         "background": self.session.get("background"),
                          "message": self.session["turns"][-2]["text"][:2000],
                          "file": str(self.prov.chat_file(self.user, self.session).relative_to(self.prov.root))}
                         | summary | {"answer": (res.get("text") or "")[:4000]})

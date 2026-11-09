@@ -35,7 +35,7 @@ Each stage has one owning capability and stops at a user gate.
 
 | Pipeline | Stages |
 |---|---|
-| run | plan, explore, smoke, discover, annotate, integrate, moirai_smoke, baseline, graph, query, package |
+| run | plan, explore, smoke, discover, annotate, integrate, moirai_smoke, baseline, graph, package |
 | analysis | plan, ingest, dashboard, query |
 
 Planning comes first: `PLAN.md`, in the session, has a step per stage. The engine syncs each stage's status and result into it as the run goes, and a failed verdict or process feedback marks a step stale until the plan says what changed. The last stage writes `final_provenance/`, a folder that reproduces the run for someone else, verified from a fresh copy in a clean login shell.

@@ -1,13 +1,18 @@
-"""Explore provenance: built-in graph questions, and the dftracer-utils DataFrame API for anything ad hoc. Shared by both pipelines' last stage."""
+"""Answer provenance questions from the traces, through dftracer-utils' TraceViewer, with the evidence (core.evidence): a question is resolved
+into a plan of concrete steps (entities, activities, time frames, lineage), each step is a TraceViewer query, the result is computed, and the
+agent's write-up must cite the steps. The analysis pipeline's query stage, and the Query view of a run (no stage there: questions are logged on
+the pipeline)."""
 import json
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from moirai_agents.core import moirai_env as M
 from moirai_agents.core import pipeline as P
-from moirai_agents.core import provtrace as T
+from moirai_agents.core import answers as A
+from moirai_agents.core import evidence as E
 
 STAGE = "query"
 
@@ -23,47 +28,106 @@ acts = graph.filter(col("cat").is_in(["moirai", "PROV"]))
 
 
 def _traces(c):
-    if c["kind"] == "analysis":
-        return c["traces"]
-    o = P.stage(c, "baseline")["outputs"]
-    return o.get("traces") or P.stage(c, "moirai_smoke")["outputs"].get("traces", "")
+    return A.traces_of(c)
 
 
 def _log(pipeline, what, result):
     def fn(c):
-        s = c["stages"][STAGE]
-        s["status"] = "running"
-        s["outputs"].setdefault("queries", []).append({"q": what[:300], "result": str(result)[:300]})
-        s["rev"] += 1
+        q = {"q": what[:300], "result": str(result)[:300], "ts": round(time.time(), 1)}
+        if STAGE in P.KINDS.get(c["kind"], []):      # the analysis pipeline's query stage
+            s = c["stages"][STAGE]
+            s["status"] = "running"
+            s["outputs"].setdefault("queries", []).append(q)
+            s["rev"] += 1
+        else:                                         # a run: asked from the Query view, kept on the pipeline (no stage, no verdict to invalidate)
+            c["queries"] = (c.get("queries") or [])[-499:] + [q]
         return {"kind": "query", "q": what[:200]}
     P.update(pipeline, fn)
+
+
+def _run(pipeline, steps):
+    c = P.load(pipeline)
+    tr = _traces(c)
+    if not tr:
+        return None, {"status": "error", "error": "this pipeline has no traces yet"}
+    try:
+        return E.run(tr, steps, E.index_dir_of(pipeline)), None
+    except E.PlanError as e:
+        return None, {"status": "error", "error": str(e)}
 
 
 def register(mcp):
     @mcp.tool()
     def query_summary(pipeline: str) -> dict:
-        """What the provenance holds: counts, entities by type and store, activity kinds with total time, edge and relation kinds, entity type roles. Use first when exploring.
-        Returns {activities, entities, edges, by_type, by_store, activity_kinds, ...}."""
-        c = P.load(pipeline)
-        r = T.read(_traces(c)).summary()
-        _log(pipeline, "summary", {k: r[k] for k in ("activities", "entities", "edges")})
-        return r
+        """What the provenance holds, read with TraceViewer: the entity types (role, description), entities by type, activities by name, the time span.
+        Use first, to turn the user's words into real types and names. Returns {types, entities_by_type, activities_by_name, queries}."""
+        r, err = _run(pipeline, [{"op": "entities", "all": True}, {"op": "group", "from": 0, "by": "type"}, {"op": "activities"}, {"op": "group", "from": 2, "by": "name"}])
+        if err:
+            return err
+        _log(pipeline, "summary", r["steps"][1]["headline"])
+        return {"types": r["types"], "entities_by_type": r["outs"][1]["counts"], "activities_by_name": r["outs"][3]["counts"],
+                "activities": r["steps"][2]["headline"], "queries": [q["query"] for q in r["queries"]]}
 
     @mcp.tool()
     def query_entities(pipeline: str, type: str = "", match: str = "", limit: int = 100) -> dict:
-        """List entities, by exact type and/or a substring of their uri. Use to find the id of what you want to trace. Returns {count, entities: [{id, type, store, uri}]}."""
-        g = T.read(_traces(P.load(pipeline)))
-        rows = [e for e in g.entities.values() if (not type or e["type"] == type) and (not match or match in e.get("uri", ""))]
-        _log(pipeline, f"entities type={type} match={match}", len(rows))
-        return {"count": len(rows), "entities": rows[:limit]}
+        """Find entities with a TraceViewer query, by exact type and/or a substring of their uri. Use to resolve what the user named into entity ids.
+        Returns {count, entities: [{id, type, store, uri}], query}."""
+        r, err = _run(pipeline, [{"op": "entities", **({"type": type} if type else {}), **({"uri_contains": match} if match else {}), **({} if type or match else {"all": True})}])
+        if err:
+            return err
+        ids = r["outs"][0]["ids"]
+        _log(pipeline, f"entities type={type} match={match}", len(ids))
+        rows = [x for x in (r["steps"][0]["table"] or "").splitlines()[2:]][:limit]
+        return {"count": len(ids), "entities": rows, "ids": ids[:limit], "query": r["queries"][-1]["query"]}
 
     @mcp.tool()
     def query_lineage(pipeline: str, entity: str, direction: str = "back") -> dict:
-        """Walk the graph from an entity (its id, a uri substring, or a type). direction=back: everything it came from. direction=forward: everything it fed. Use for 'where did this
-        come from' and 'what used this'. Returns {start, hops, steps: [{hop, activity, from, to}], reached, ends}."""
-        r = T.read(_traces(P.load(pipeline))).lineage(entity, direction)
-        _log(pipeline, f"lineage {direction} {entity}", r.get("reached", r.get("error")))
-        return r
+        """Walk the lineage with TraceViewer queries (one per hop) from the entities matching ``entity``: an id, a type, or a part of the uri. direction=back: what it came
+        from; forward: what it fed. For exploring; the user's answer comes from evidence_answer. Returns {result, table, hops}."""
+        r, err = _run(pipeline, [{"op": "entities", "match": entity}, {"op": "lineage", "from": 0, "direction": direction}])
+        if err:
+            return err
+        _log(pipeline, f"lineage {direction} {entity}", r["steps"][1]["headline"][:200])
+        return {"result": r["steps"][1]["headline"], "table": r["steps"][1]["table"][:6000], "hops": len(r["outs"][1]["hops"])}
+
+    @mcp.tool()
+    def evidence_answer(pipeline: str, question: str, steps: list) -> dict:
+        """Answer the user's provenance question - lineage (where did X come from), downstream impact (what did X affect), what happened when - with
+        evidence. Call it for every such question, after resolving the user's words into real types, ids and time frames (query_summary, query_entities).
+        Nothing here is written by you: each step is a TraceViewer query on the traces, the result is computed from the records, and the answer is kept
+        with its trail (queries, files read, cited records) for the Query view.
+        steps: [{op, ...}], "from" = the 0-based index of an earlier step:
+          entities {type?, uri_contains?, id?, ids?, all?, produced_since?, produced_until?} | activities {name?, pid?, since?, until?} |
+          lineage {from, direction: back|forward, max_hops?} | group {from, by: type|role|store|name|pid} | ends {from} (roots of back, leaves of forward).
+          Times: ISO, epoch seconds or microseconds, or start+30m / end-2h.
+        Example, "where did the top-5 summary come from": [{"op":"entities","type":"topk_summary","uri_contains":"top5"},{"op":"lineage","from":0,"direction":"back"},{"op":"ends","from":1}].
+        Returns {id, steps: [{step, op, resolved, result, table}], result_hash, stats}. Then write the user's answer from these results ONLY and attach it
+        with evidence_synthesis(pipeline, id, text), citing steps as [S1]..[Sn]."""
+        try:
+            rec = E.ask(pipeline, question, steps, chose="agent", chat=os.environ.get("MOIRAI_AGENTS_WEBUI_SESSION", ""))
+        except E.PlanError as e:
+            return {"status": "error", "error": str(e), "fix": "resolve the names with query_summary / query_entities, then fix the plan"}
+        _log(pipeline, f"answer: {question}", rec["result"]["headline"][:200])
+        return {"status": "ok", "id": rec["id"], "steps": [{"step": s["step"], "op": s["op"], "resolved": s["resolved"], "result": s["headline"], "table": s["table"][:4000]}
+                                                           for s in rec["steps"]], "result_hash": rec["result_hash"], "stats": rec["stats"]}
+
+    @mcp.tool()
+    def evidence_synthesis(pipeline: str, id: str, text: str) -> dict:
+        """Attach your write-up for the user to a computed answer (evidence_answer's id). Short Markdown; every claim cites the step it rests on as [S1]..[Sn];
+        use only the numbers and names in the computed results. It is checked: a citation to no step, or a number not in the results, is flagged to the
+        user next to it - fix and call again. Returns {id, synthesis_check: {ok, problems, citations}}."""
+        try:
+            return E.synthesize(pipeline, id, text)
+        except E.PlanError as e:
+            return {"status": "error", "error": str(e)}
+
+    @mcp.tool()
+    def evidence_rerun(pipeline: str, id: str) -> dict:
+        """Repeat a kept answer's plan on the traces as they are now (a live run's traces grow). Returns {same, result_hash, was, files_changed, headline}."""
+        try:
+            return E.rerun(pipeline, id)
+        except E.PlanError as e:
+            return {"status": "error", "error": str(e)}
 
     @mcp.tool()
     def query_dataframe(pipeline: str, code: str, timeout: int = 300) -> dict:
@@ -85,11 +149,15 @@ def register(mcp):
 
     @mcp.tool()
     def query_validate(pipeline: str) -> dict:
-        """Validate the query stage: the traces are readable, and the questions the user asked were run and logged. Use before the last gate. Returns the verdict {status, failed, unknown, passed, total}."""
+        """Validate the analysis pipeline's query stage: the traces are readable, and the questions the user asked were run and logged. Use before its last gate.
+        A run pipeline has no query stage: do not call this for one. Returns the verdict {status, failed, unknown, passed, total}."""
         c = P.load(pipeline)
+        if STAGE not in P.KINDS.get(c["kind"], []):
+            return {"status": "error", "error": f"a {c['kind']} pipeline has no query stage: its questions are answered in the Query view, with no gate"}
         q = P.stage(c, STAGE)["outputs"].get("queries", [])
         v = P.Verdict(STAGE)
         v.check("asked", bool(q), "no query has run", "run the user's questions")
-        v.check("graph", T.read(_traces(c)).counts()["records"] > 0, "no records", "check the traces")
+        r, err = _run(pipeline, [{"op": "entities", "all": True}])
+        v.check("graph", bool(r) and r["stats"]["rows_read"] > 0, (err or {}).get("error", "no provenance records"), "check the traces")
         P.record(pipeline, STAGE, outputs={"summary": f"{len(q)} queries run"})
         return P.finish_validation(pipeline, v)

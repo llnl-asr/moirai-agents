@@ -1,7 +1,7 @@
 {
  "name": "prov_query",
- "description": "Answer questions about provenance - what came from what, what used what - with graph tools and the dftracer-utils DataFrame API. Load for the query stage of either pipeline.",
- "version": 1,
+ "description": "Answer provenance questions - lineage, downstream impact, what happened when - from the traces through dftracer-utils' TraceViewer, with evidence: the question becomes a plan of concrete steps, each a TraceViewer query, the result is computed, and the write-up cites the steps. Load for the analysis pipeline's query stage and for any question in the Query view of a run, live run or dataset.",
+ "version": 3,
  "enabled": true,
  "stages": [
   "query"
@@ -10,6 +10,9 @@
   "query_summary",
   "query_entities",
   "query_lineage",
+  "evidence_answer",
+  "evidence_synthesis",
+  "evidence_rerun",
   "query_dataframe",
   "query_validate"
  ],
@@ -21,6 +24,15 @@
   {
    "version": 1,
    "why": "bundled"
+  },
+  {
+   "version": 2,
+   "why": "answer_publish: evidence-backed answer cards (query plan, evidence, answer), checked against the traces"
+  },
+  {
+   "version": 3,
+   "ts": 1794197130.0,
+   "why": "No model in an answer: evidence_answer runs a plan of TraceViewer queries (resolved entities, time frames, lineage hops) and computes the result with its trail; evidence_synthesis attaches the agent's write-up, checked (citations [Sk], numbers from the result). answer_publish (agent-written answers) removed; query_summary/entities/lineage read through TraceViewer."
   }
  ],
  "pvc": {
@@ -28,6 +40,8 @@
    "query_summary",
    "query_entities",
    "query_lineage",
+   "evidence_answer",
+   "evidence_synthesis",
    "query_dataframe"
   ],
   "validator": [

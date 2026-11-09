@@ -39,7 +39,7 @@ a fixed scope. Find anything with `knowledge_search` first.
 
 Two pipelines, each a list of stages run with the `pipeline_*` tools, one capability per stage:
 
-- **run**: plan -> explore -> smoke -> discover -> annotate -> integrate -> moirai_smoke -> baseline -> graph -> query -> package
+- **run**: plan -> explore -> smoke -> discover -> annotate -> integrate -> moirai_smoke -> baseline -> graph -> package
 - **analysis**: plan -> ingest -> dashboard -> query
 
 For every stage:

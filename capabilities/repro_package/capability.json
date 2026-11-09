@@ -1,10 +1,11 @@
 {
  "name": "repro_package",
- "description": "Generate final_provenance/, the folder that reproduces a run for someone else, and prove it in a clean shell. Load for the package stage.",
- "version": 7,
+ "description": "Generate final_provenance/, the folder that reproduces a run for someone else, and prove it in a clean shell. Load for the package stage. Also a live run's publish_data stage: repro_publish_traces on the live pipeline, then repro_publish_data_validate.",
+ "version": 8,
  "enabled": true,
  "stages": [
-  "package"
+  "package",
+  "publish_data"
  ],
  "tools": [
   "repro_build",
@@ -16,7 +17,8 @@
   "repro_publish_package",
   "repro_publish_traces",
   "repro_publish_permissions",
-  "repro_publish_validate"
+  "repro_publish_validate",
+  "repro_publish_data_validate"
  ],
  "pvc": {
   "predictor": [
@@ -31,7 +33,8 @@
    "repro_validate",
    "repro_batch_selftest",
    "repro_publish_selftest",
-   "repro_publish_validate"
+   "repro_publish_validate",
+   "repro_publish_data_validate"
   ]
  },
  "review": [
@@ -120,6 +123,12 @@
    "by": "haridev",
    "proposal": "befffdac03c4",
    "why": "Consolidation: repro_package is the home of the generic package and publish procedure. It gains the two generic items workload_biotox_repro held alone (polling a long repro_verify, the job-id lint word), and says the copy-mode check is optional (skipped for BioTox). workload_biotox_repro now points here instead of repeating the config.ini, no-overwrite, OUTPUT_ROOT and .chgperm_logs rules."
+  },
+  {
+   "version": 8,
+   "ts": 1794189244.9,
+   "by": "haridev",
+   "why": "Live Run view: publish a live run's data (publish_data stage). repro_publish_traces on a live pipeline publishes its live_run traces as kind 'live' (publish_root and app from the parent's published package; run.sh from the run's script), recorded on publish_data; repro_publish_data_validate checks files, run files and counts."
   }
  ]
 }

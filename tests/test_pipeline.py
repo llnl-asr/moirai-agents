@@ -18,7 +18,7 @@ def stage_pass(pid, name):
 def test_stages_of_each_pipeline():
     r = P.new("run", "app", "/src", "./run")
     a = P.new("analysis", "t", traces="/t")
-    assert list(r["stages"]) == ["plan", "explore", "smoke", "discover", "annotate", "integrate", "moirai_smoke", "baseline", "graph", "query", "package"]
+    assert list(r["stages"]) == ["plan", "explore", "smoke", "discover", "annotate", "integrate", "moirai_smoke", "baseline", "graph", "package"]
     assert list(a["stages"]) == ["plan", "ingest", "dashboard", "query"]
 
 

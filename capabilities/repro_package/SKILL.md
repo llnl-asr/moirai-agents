@@ -29,6 +29,10 @@ This is the home of the generic package and publish procedure. Workload capabili
 - `repro_publish_traces` takes every count from the trace reader (the graph tools), never typed; a fact it cannot find reads `not recorded`. `run.sh` is the exact launch script copied from the run (it can hold the run's own paths); README, run.json and graph_summary.json have the home replaced by `${HOME}`. For an app whose package keeps no run script (BioTox) pass `run_sh=<the stage's launch script>`.
 - `repro_publish_permissions` runs `chgperm.sh --local -q -g moirai <dir>` on the published trees only, after the user agreed. NEVER run chgperm.sh by hand or on anything else; the tool refuses a script or folder outside publish_root. Afterwards it checks group, setgid directories, g=u, no other bits. Every published folder gets it, including the verification traces folder when it is published later.
 
+## Publish a live run's data (the `publish_data` stage of a live pipeline)
+- After the live run ended and `moirai_validate(pipeline, 'live_run')` passed: `repro_publish_traces(pipeline=<live pipeline>)`. It publishes into `<publish_root>/provenance-traces/<app>/<timestamp>/` with publish_root and app from the parent's `repro_publish_package`; give them when the parent never published.
+- Then `repro_publish_data_validate`, then the gate. Never publish while the run is still writing (the counts check fails).
+
 ## Constraints
 - No username, home path, session path or job id in any script. Use `${USER}` and `${HOME}` in `config.ini`.
 - `isolation_root` and `in_place` are outside the session; `isolation_root` is on a file system compute nodes can see.

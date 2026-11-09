@@ -1,0 +1,11 @@
+[
+ {
+  "tool": "live_inputs_validate",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ }
+]

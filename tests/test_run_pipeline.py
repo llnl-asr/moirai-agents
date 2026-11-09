@@ -114,19 +114,21 @@ def test_run_pipeline_end_to_end(tmp_path, monkeypatch, call):
 
     h = call("graph_check", pipeline=pid)
     assert h["artifacts_without_producer"] == 0 and h["lineage_example"]["root_types"] == [] or h["lineage_example"]
-    assert call("graph_compare", pipeline=pid)["missing"] == []
+    assert h["inferences"] == {}                       # no graph inference algorithm yet
     v = call("graph_validate", pipeline=pid)
-    assert v["status"] in ("pass", "inconclusive"), v
-    assert not v["failed"], v
-    P.record(pid, "graph", validation={"status": "pass"})
+    assert v["status"] == "pass" and not v["failed"], v   # the graph stage only validates the graph: no output comparison
+    assert "science_unchanged" not in str(v)
     passes(call, pid, "graph")
+    assert P.summary(P.load(pid))["current"] == "package"  # a run has no query stage
 
+    # questions are asked in the Query view, any time: logged on the pipeline, no stage, no gate
     s = call("query_summary", pipeline=pid)
-    assert (s["activities"], s["entities"], s["edge_kinds"]) == (2, 2, {"generated": 2, "used": 1})
+    assert sum(s["entities_by_type"].values()) == 2 and sum(s["activities_by_name"].values()) == 2 and all(q.startswith("TraceViewer(") for q in s["queries"])
     assert call("query_entities", pipeline=pid, type="fitted")["count"] == 1
     assert call("query_lineage", pipeline=pid, entity="fitted")["hops"] >= 1
-    assert call("query_validate", pipeline=pid)["status"] == "pass"
-    passes(call, pid, "query")
+    assert "no query stage" in call("query_validate", pipeline=pid)["error"]
+    c = P.load(pid)
+    assert len(c["queries"]) == 3 and "query" not in P.summary(c)["stages"][-1]["name"]
 
     r = call("repro_build", pipeline=pid, output_root="${HOME}/repro/${APP}")
     assert r["status"] == "ok" and {"config.ini", "README.md", "patches/provenance.patch", "inputs/source.tar.gz", "scripts/run_all.sh", "scripts/prov_check.py"} <= set(r["files"])

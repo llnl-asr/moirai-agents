@@ -2,8 +2,11 @@
 const PANEL_S=4000;
 let PIPES=[],curPipe=null,dash={pid:null,run:'',seen:'',view:'provenance'},shown=null;
 function act(path,body){return api(path,body)}
-function showTab(t){const c=t==='chat',d=t==='dash';try{history.replaceState(null,'',d?'#dashboard':location.pathname)}catch(_){}$('#chatview').hidden=!c;$('#dashview').hidden=!d;$('#stateview').hidden=c||d;$('#tabchat').classList.toggle('on',c);$('#tabdash').classList.toggle('on',d);if(d)dashRender()}
-$('#tabchat').onclick=()=>showTab('chat');$('#tabdash').onclick=()=>showTab('dash');
+const TABS={wb:['#wbview','#tabwb','#workbench'],chat:['#chatview','#tabchat',''],pipe:['#pipeview','#tabpipe','#pipeline'],hist:['#histview','#tabhist','#history'],dash:['#dashview','#tabdash','#dashboard']};
+function showTab(t){if(t==='state')t='pipe';if(!TABS[t])t='chat';try{history.replaceState(null,'',TABS[t][2]||location.pathname)}catch(_){}
+ for(const [k,[v,b]] of Object.entries(TABS)){$(v).hidden=k!==t;$(b).classList.toggle('on',k===t)}
+ if(t==='dash')dashRender();if(t==='pipe'){delete $('#pipeview').dataset.h;pipeRender()}if(t==='hist')histRender(true)}
+$('#tabchat').onclick=()=>showTab('chat');$('#tabdash').onclick=()=>showTab('dash');$('#tabpipe').onclick=()=>showTab('pipe');$('#tabwb').onclick=()=>{showTab('wb');if(typeof wbLoad==='function')wbLoad()};$('#tabhist').onclick=()=>showTab('hist');
 
 // ---- Steps + Jobs
 const DASH_VIEWS=[['provenance','behaviors'],['prov-runtime','runtime'],['prov-temporal','temporal'],['prov-graph','graph']];   // dfdashboard's Provenance views
@@ -13,9 +16,9 @@ async function pollPipes(){if(!me)return;const d=await api('api/pipelines'+(sess
  $('#steps').innerHTML=PIPES.length?PIPES.slice(0,3).map(p=>`${p.goal?`<div class="pgoal">${esc(p.goal)}</div>`:''}<div class="phead">${esc(p.name)} <span>${esc(p.kind)}${p.session?' · session '+esc(p.session.run_id):''}</span></div>`+p.stages.map(s=>{
    const dl=([v,label])=>`<a href="#dashboard" data-run="${esc(s.run)}" data-view="${v}" data-label="${esc(s.name+' of '+p.name)}">${label}</a>`;
    return `<div class="step ${p.current===s.name?'cur':''}"><span class="sdot ${esc(s.status)}" title="${esc(STEP_WORD[s.status]||s.status)}"></span><a href="#" class="nm" data-pid="${esc(p.id)}" data-stage="${esc(s.name)}" title="what happened in this step">${esc(s.name)}</a>${s.diagrams?`<a href="#" class="dgl" data-pid="${esc(p.id)}" data-stage="${esc(s.name)}" title="${s.diagrams} diagram${s.diagrams>1?'s':''} of this step, kept as an output of the pipeline">diagram</a>`:''}${s.run?`<span class="l">${DASH_VIEWS.map(dl).join(' · ')}</span>`:''}${s.status==='needs_user'?'<span class="wait">waiting for you</span>':''}</div>`}).join('')).join(''):'<div class="lesson st">no pipeline in this chat</div>';
- $('#steps').querySelectorAll('[data-stage]').forEach(a=>a.onclick=e=>{e.preventDefault();shown={pid:a.dataset.pid,stage:a.dataset.stage};showTab('state');stateRender()});
+ $('#steps').querySelectorAll('[data-stage]').forEach(a=>a.onclick=e=>{e.preventDefault();shown={pid:a.dataset.pid,stage:a.dataset.stage};PV_PID=a.dataset.pid;showTab('pipe')});
  $('#steps').querySelectorAll('[data-run]').forEach(a=>a.onclick=e=>{e.preventDefault();dash.run=a.dataset.run;dash.view=a.dataset.view;dash.label=a.dataset.label;showTab('dash')});
- if(!$('#stateview').hidden)stateRender();
+ if(!$('#pipeview').hidden)pipeRender();
  pollSubmitted();
  const lv=PIPES.find(p=>p.dashboard);$('#tablive').hidden=!(lv&&lv.dashboard.live&&(lv.jobs||[]).some(j=>j.status==='running'));
  if(lv&&lv.dash_run!==dash.seen){dash.seen=lv.dash_run;dashOpen(lv)}}   // a new run takes over; a path you opened stays until then
@@ -56,7 +59,7 @@ async function pollSubmitted(){const box=$('#jobs');if(box.querySelector('detail
 // ---- A step's state: what happened in it, opened from its name
 const STEP_WORD={needs_user:'waiting for you'};
 const when=t=>t?new Date(t*1000).toLocaleString():'';
-async function stateRender(){const q=shown,s=await api(`api/pipeline/${encodeURIComponent(q.pid)}/${encodeURIComponent(q.stage)}`),v=$('#stateview');if(q!==shown)return;
+async function stateRender(){const q=shown,s=await api(`api/pipeline/${encodeURIComponent(q.pid)}/${encodeURIComponent(q.stage)}`),v=$('#pvdetail');if(q!==shown||!v)return;
  if(!s||s.error){v.textContent=s?s.error:'';return}
  const part=(h,b)=>b?`<h4>${h}</h4>${b}`:'',c=s.checks,chk=(x,cl)=>`<div class="chk ${cl}"><b>${esc(x.name)}</b> ${esc(x.detail)}${x.fix?`<div class="fix">${esc(x.fix)}</div>`:''}</div>`;
  const html=`<h2>${esc(s.name)}</h2><div class="sub">${esc(STEP_WORD[s.status]||s.status)} · ${esc(s.owner)}${s.started?' · started '+when(s.started):''}${c.status?` · checks ${esc(c.status)} (${c.passed}/${c.total})`:''}</div>${s.summary?`<p>${esc(s.summary)}</p>`:''}`
@@ -74,13 +77,28 @@ let LESSONS=[],CAPS={};
 const ledit=(id,body,acts)=>`<div class="ledit" hidden data-for="${esc(id)}">${body}<div class="acts">${acts}<button data-do="agent" title="Send your note to the agent in this chat and let it rework this">Ask the agent</button><button data-do="cancel">Cancel</button></div><div class="msg"></div></div>`;
 const revs=x=>(x.revisions||[]).map(r=>`<div class="rev">✎ ${esc(r.by)}${r.note?': '+esc(r.note):' edited it'}</div>`).join('');
 const editing=sel=>!!document.querySelector(sel+' .ledit:not([hidden])');
+// Lessons and capabilities: what needs you first, approve everything waiting at once, and hide what is decided
+const DMSG={};
+const hideDecided=k=>{try{return localStorage.getItem('moirai_hide_'+k)==='1'}catch(_){return false}};
+const decideBar=(k,pending,decided)=>`<div class="dbar" data-k="${k}">${pending?`<button class="btn primary" data-all="${k}">✓ Approve all (${pending})</button>`:'<span class="sub">nothing waiting</span>'}<label title="Show only what is waiting for you"><input type="checkbox" data-hide="${k}" ${hideDecided(k)?'checked':''}> hide decided${decided?` (${decided})`:''}</label><span class="dmsg">${esc(DMSG[k]||'')}</span></div>`;
+function wireDecideBar(k,ids,approve,refresh){const bar=document.querySelector(`.dbar[data-k="${k}"]`);if(!bar)return;
+ const h=bar.querySelector('[data-hide]');h.onchange=()=>{try{localStorage.setItem('moirai_hide_'+k,h.checked?'1':'0')}catch(_){}refresh()};
+ const a=bar.querySelector('[data-all]');if(!a)return;a.onclick=async e=>{e.preventDefault();e.stopPropagation();const list=ids();if(!list.length)return;
+  if(!confirm(`Approve all ${list.length} waiting ${k==='lessons'?'lessons? Each is written into its capability.':'capability changes? Each is checked again and installed.'}`))return;
+  a.disabled=true;const m=bar.querySelector('.dmsg'),bad=[];
+  for(let i=0;i<list.length;i++){m.textContent=`approving ${i+1}/${list.length}…`;let r=null;try{r=await approve(list[i])}catch(err){r={error:String(err)}}if(!r||r.error)bad.push(`${list[i]}: ${(r&&r.error)||'no answer'}`)}
+  DMSG[k]=bad.length?`${list.length-bad.length} approved, ${bad.length} not: ${bad.join('; ').slice(0,300)}`:`✓ ${list.length} approved`;
+  setTimeout(()=>{delete DMSG[k]},bad.length?60000:8000);a.disabled=false;refresh()}}
 const toggleEdit=(root,id)=>{const e=root.querySelector(`.ledit[data-for="${id}"]`);e.hidden=!e.hidden;if(!e.hidden)e.querySelector('textarea').focus()};
 async function pollLessons(force){if(!me||(!force&&editing('#lessons')))return;const d=await api('api/lessons');if(!d||!d.lessons)return;const L=LESSONS=d.lessons,np=L.filter(x=>x.status==='pending').length;
  $('#lcount').textContent=L.length?`(${np?np+' pending · ':''}${L.length})`:'';
  const open=new Set([...document.querySelectorAll('#lessons details[open]')].map(e=>e.dataset.id));
- $('#lessons').innerHTML=L.length?L.slice(0,40).map(x=>{const p=x.status==='pending';
+ const hide=hideDecided('lessons'),shown=L.map((x,i)=>[x,i]).sort((a,b)=>(a[0].status==='pending'?0:1)-(b[0].status==='pending'?0:1)||a[1]-b[1]).map(a=>a[0]).filter(x=>!hide||x.status==='pending');
+ const bar=decideBar('lessons',np,L.length-np);
+ $('#lessons').innerHTML=bar+(shown.length?shown.slice(0,hide?200:60).map(x=>{const p=x.status==='pending';
   const acts=p?'<button data-do="save">Save</button><button class="primary" data-do="approve">Save &amp; accept</button>':x.status==='applied'?'<button data-do="save" title="It waits for you to accept it; this lesson stays until then">Propose correction</button><button class="primary" data-do="approve" title="Replace it now">Correct now</button>':'<button class="primary" data-do="save">Reopen with edit</button>';
-  return `<details class="lesson" data-id="${esc(x.id)}" ${open.has(x.id)?'open':''}><summary><span class="ldot ${esc(x.status)}" title="${esc(x.status)}"></span><span class="t">${esc(x.text)}</span>${p?`<button class="x" data-l="${esc(x.id)}" data-a="1" title="Accept: write into ${esc(x.capability)}">✓</button><button class="x" data-l="${esc(x.id)}" data-a="" title="Reject">✗</button>`:''}</summary><div class="body"><div class="tg">${esc(x.capability)} · ${esc(x.source)}</div><div>${esc(x.text)}</div>${x.evidence?`<div class="st">evidence: ${esc(x.evidence)}</div>`:''}<div class="st">${esc(x.status)}${x.decided_by?' · decided by '+esc(x.decided_by):''}${x.supersedes?' · corrects '+esc(x.supersedes):''}${x.superseded_by?' · replaced by '+esc(x.superseded_by):''}</div>${revs(x)}${x.status==='superseded'?'':`<div class="acts"><button data-ed="${esc(x.id)}">✎ ${x.status==='applied'?'correct':'refine'}</button></div>`+ledit(x.id,`<label>lesson</label><textarea>${esc(x.text)}</textarea><label>capability</label><input class="tgt" value="${esc(x.capability)}"><label>what was wrong (optional, kept with the lesson)</label><input class="note">`,acts)}</div></details>`}).join(''):'<div class="lesson st">no lessons yet</div>';
+  return `<details class="lesson" data-id="${esc(x.id)}" ${open.has(x.id)?'open':''}><summary><span class="ldot ${esc(x.status)}" title="${esc(x.status)}"></span><span class="t">${esc(x.text)}</span>${p?`<button class="x" data-l="${esc(x.id)}" data-a="1" title="Accept: write into ${esc(x.capability)}">✓</button><button class="x" data-l="${esc(x.id)}" data-a="" title="Reject">✗</button>`:''}</summary><div class="body"><div class="tg">${esc(x.capability)} · ${esc(x.source)}</div><div>${esc(x.text)}</div>${x.evidence?`<div class="st">evidence: ${esc(x.evidence)}</div>`:''}<div class="st">${esc(x.status)}${x.decided_by?' · decided by '+esc(x.decided_by):''}${x.supersedes?' · corrects '+esc(x.supersedes):''}${x.superseded_by?' · replaced by '+esc(x.superseded_by):''}</div>${revs(x)}${x.status==='superseded'?'':`<div class="acts"><button data-ed="${esc(x.id)}">✎ ${x.status==='applied'?'correct':'refine'}</button></div>`+ledit(x.id,`<label>lesson</label><textarea>${esc(x.text)}</textarea><label>capability</label><input class="tgt" value="${esc(x.capability)}"><label>what was wrong (optional, kept with the lesson)</label><input class="note">`,acts)}</div></details>`}).join(''):`<div class="lesson st">${L.length?'nothing waiting for you':'no lessons yet'}</div>`);
+ wireDecideBar('lessons',()=>L.filter(x=>x.status==='pending').map(x=>x.id),id=>act('api/lesson/decide',{id,approve:true}),()=>pollLessons(true));
  $('#lessons').querySelectorAll('[data-l]').forEach(b=>b.onclick=async ev=>{ev.preventDefault();ev.stopPropagation();b.disabled=true;await act('api/lesson/decide',{id:b.dataset.l,approve:!!b.dataset.a});pollLessons(true)})}
 $('#lessons').addEventListener('click',async ev=>{const b=ev.target.closest('button');if(!b)return;
  if(b.dataset.ed)return toggleEdit($('#lessons'),b.dataset.ed);
@@ -98,7 +116,9 @@ const capEdit=(key,skill,code,acts)=>ledit(key,`<label>skill</label><textarea cl
 async function pollCaps(force){if(!me||(!force&&editing('#capabilities')))return;const d=await api('api/capabilities');if(!d||!d.active)return;CAPS=Object.fromEntries(d.pending.map(p=>[p.id,p]));
  $('#ccount').textContent=`(${d.active.length}${d.pending.length?' · '+d.pending.length+' to approve':''})`;
  const P=d.pending.map(p=>`<div class="capp"><b>${esc(p.kind)}: ${esc(p.name)}</b><div class="why">${esc(p.why)}</div>${(p.review||[]).map(r=>`<div class="flag">⚠ ${esc(r)}</div>`).join('')}${revs(p)}<details><summary>skill</summary><pre>${esc(p.skill)}</pre></details>${p.diff?`<details><summary>diff</summary><pre>${esc(p.diff)}</pre></details>`:`<details><summary>tool.py</summary><pre>${esc(p.code)}</pre></details>`}<div class="acts"><button class="btn primary" data-c="${p.id}" data-a="1">Approve</button><button class="btn" data-c="${p.id}" data-a="">Reject</button><button class="btn" data-ed="${p.id}">✎ Refine</button></div>${capEdit(p.id,p.skill,p.code,'<button data-do="save">Save</button><button class="primary" data-do="approve">Save &amp; approve</button>')}</div>`).join('');
- $('#capabilities').innerHTML=P+CAP_GROUPS.map(([key,name])=>{const cs=d.active.filter(c=>capGroup(c)===key);return cs.length?group(key,`<b>${name}</b> <span class="cnt">${cs.length}</span>`,name,cs.map(capRow).join('')):''}).join('');
+ const hideC=hideDecided('capabilities');
+ $('#capabilities').innerHTML=decideBar('capabilities',d.pending.length,d.active.length)+P+(hideC?(d.pending.length?'':'<div class="lesson st">nothing waiting for you</div>'):CAP_GROUPS.map(([key,name])=>{const cs=d.active.filter(c=>capGroup(c)===key);return cs.length?group(key,`<b>${name}</b> <span class="cnt">${cs.length}</span>`,name,cs.map(capRow).join('')):''}).join(''));
+ wireDecideBar('capabilities',()=>d.pending.map(p=>p.id),async id=>{const r=await act('api/capability/decide',{id,approve:true});return r&&r.status==='error'?{error:r.error}:r},()=>pollCaps(true));
  $('#capabilities').querySelectorAll('details.jg').forEach(e=>e.addEventListener('toggle',ev=>{if(ev.target===e)GROUP_OPEN[e.dataset.g]=e.open}));
  if(d.pending.length){const s=document.querySelector('details[data-sec=capabilities]');if(s)s.open=true}
  $('#capabilities').querySelectorAll('[data-c]').forEach(b=>b.onclick=async()=>{b.disabled=true;const r=await act('api/capability/decide',{id:b.dataset.c,approve:!!b.dataset.a});if(r&&r.status==='error')alert(r.error);pollCaps(true)})}
@@ -117,8 +137,8 @@ const CONSOL_ASK={lessons:'Consolidate the lessons. Call consolidation_report an
  capabilities:'Consolidate the capabilities. Call consolidation_report and read the capabilities groups, then read each capability with capability_get. For an overlap, propose moving what is shared to the better home with capability_update, and ask me before disabling anything. If rules conflict, ask me which holds before proposing anything. If a group is different on purpose, use consolidation_keep. Work on this node only: no jobs, no compute nodes. List what you proposed.'};
 async function pollConsolidation(){if(!me)return;const d=await api('api/consolidation');if(!d||d.error)return;
  for(const [key,id] of [['lessons','#lconsol'],['capabilities','#cconsol']]){const G=d[key]||[],b=$(id),c=G.filter(g=>g.kind==='conflict').length;b.hidden=!G.length;b.classList.toggle('bad',c>0);
-  b.textContent=`consolidate ${G.length}`;b.title=`${c} possible conflict${c===1?'':'s'}, ${G.length-c} overlap${G.length-c===1?'':'s'}. Click to start it in a new chat on this node.\n`+G.slice(0,6).map(g=>`${g.kind}: ${g.ids.join(', ')}`).join('\n');
-  b.onclick=ev=>{ev.preventDefault();ev.stopPropagation();$('#newbtn').onclick();showTab('chat');setMode('run');setTimeout(()=>sendText(CONSOL_ASK[key],false,[]),0)}}}
+  b.textContent=`consolidate ${G.length}`;b.title=`${c} possible conflict${c===1?'':'s'}, ${G.length-c} overlap${G.length-c===1?'':'s'}. Click to run the consolidation agent now, in the background (Agents panel).\n`+G.slice(0,6).map(g=>`${g.kind}: ${g.ids.join(', ')}`).join('\n');
+  b.onclick=ev=>{ev.preventDefault();ev.stopPropagation();bgStart(key==='lessons'?'consolidation-lessons':'consolidation-capabilities')}}}
 
 // ---- gates: an ask_user that names a pipeline and a stage
 const askCard0=Renderer.prototype.askCard;
@@ -146,7 +166,27 @@ function dashRender(){const v=$('#dashview');if(v.hidden)return;
 function themeNow(){return document.documentElement.dataset.theme||(matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light')}
 function themeIcon(){$('#themebtn').textContent=themeNow()==='dark'?'☀':'☾'}
 $('#themebtn').onclick=()=>{const t=themeNow()==='dark'?'light':'dark';document.documentElement.dataset.theme=t;try{localStorage.setItem('moirai_theme',t)}catch(_){}themeIcon();if(typeof dgTheme==='function')dgTheme()};themeIcon();
-$('#statusbtn').onclick=e=>{e.stopPropagation();const w=$('#statuswrap'),o=w.classList.toggle('open');$('#statusbtn').setAttribute('aria-expanded',o)};
+$('#statuspanel').onclick=e=>e.stopPropagation();
+$('#statusbtn').onclick=e=>{e.stopPropagation();const w=$('#statuswrap'),o=w.classList.toggle('open');$('#statusbtn').setAttribute('aria-expanded',o);if(o)loadMcp()};
+// ---- MCP servers in Settings: state of each (last check, copies serving chats now), check and restart
+let MCP={servers:[],busy:{}};
+async function loadMcp(){const d=await api('api/mcp');if(d&&Array.isArray(d.servers)){MCP={...MCP,...d};drawMcp()}}
+function mcpLine(s){const c=s.check,busy=MCP.busy[s.name]||MCP.busy.all;
+ const st=busy?'run':c?(c.ok?'ok':c.ok===false?'bad':''):'';
+ const det=busy?`${busy}…`:c?(c.ok?`${c.tools} tools · started in ${c.secs}s`:(c.detail||'failed')):'not checked yet';
+ return `<div class="mcp-row"><span class="mcp-dot ${st}"></span><b>${esc(s.name)}</b><span class="note" title="${esc(det)}">${esc(det)}${s.processes?` · serving ${s.processes} chat process${s.processes===1?'':'es'}`:''}</span>
+  <button class="btn mcp-r" data-mcp="${esc(s.name)}" ${busy?'disabled':''} title="Stop the copies serving chats, then start it once and check that it works">⟳ Restart</button></div>`}
+function drawMcp(){const box=$('#mcpbox');if(!box)return;
+ box.innerHTML=`<div class="sp-h" style="margin-top:12px;display:flex;align-items:center;gap:8px">MCP servers<span style="margin-left:auto;display:flex;gap:6px">
+   <button class="btn mcp-r" data-check="all" title="Start each server once the way Claude Code does and list its tools">Check</button><button class="btn mcp-r" data-mcp="all" ${MCP.busy.all?'disabled':''}>⟳ Restart all</button></span></div>`+
+  (MCP.servers||[]).map(mcpLine).join('')+(MCP.chats_running?`<div class="note" style="margin-top:4px">${MCP.chats_running} chat${MCP.chats_running===1?' is':'s are'} running: a restart drops the server from ${MCP.chats_running===1?'it':'them'} until the next message.</div>`:'');
+ box.querySelectorAll('[data-mcp]').forEach(b=>b.onclick=()=>mcpAct('restart',b.dataset.mcp));
+ box.querySelectorAll('[data-check]').forEach(b=>b.onclick=()=>mcpAct('check',b.dataset.check))}
+async function mcpAct(kind,name){if(MCP.busy[name])return;
+ if(kind==='restart'&&MCP.chats_running&&!confirm(`${MCP.chats_running} chat(s) are running. Restarting ${name==='all'?'the MCP servers':name} drops ${name==='all'?'them':'it'} from those chats until their next message. Restart now?`))return;
+ MCP.busy[name]=kind==='restart'?'restarting':'checking';drawMcp();
+ const r=await api('api/mcp/'+kind,{name});delete MCP.busy[name];
+ if(r&&r.error)alert(r.error);if(r&&Array.isArray(r.servers))MCP={...MCP,...r};drawMcp()}
 document.addEventListener('click',e=>{if(!$('#statuswrap').contains(e.target))$('#statuswrap').classList.remove('open')});
 new MutationObserver(()=>$('#statusbtn').classList.toggle('bad',!!document.querySelector('#pills .pill.bad'))).observe($('#pills'),{childList:true,subtree:true});
 
@@ -162,7 +202,8 @@ async function pollVersion(){let v;try{v=await(await fetch('api/version')).json(
  if(VER===null){VER=v.version;return}
  if(v.version>VER){const typing=$('#input').value.trim();
   if(!running&&!typing&&!document.querySelector('.ask:not(.done) textarea:focus')&&!RELOADING){RELOADING=true;location.reload()}}}
-function startPanels(){if(location.hash==='#dashboard')showTab('dash');pollPipes();pollConsolidation();pollLessons();pollCaps();pollVersion();
+function startPanels(){const h={'#dashboard':'dash','#pipeline':'pipe','#history':'hist','#chat':'chat'}[location.hash],vw={'#annotate':'ann','#live':'live','#query':'query','#workbench':''}[location.hash];
+ if(typeof WB!=='undefined'&&WB.role==='domain')setRole('domain');if(h&&!(typeof WB!=='undefined'&&WB.role==='domain'))showTab(h);else if(typeof wbShow==='function')wbShow(vw||WB.view);pollPipes();pollBackground();pollConsolidation();pollLessons();pollCaps();pollVersion();
  (function(){const K='moirai_secs';let st={};try{st=JSON.parse(localStorage.getItem(K)||'{}')}catch(_){}
   document.querySelectorAll('details.sec').forEach(d=>{if(d.dataset.sec in st)d.open=!!st[d.dataset.sec];d.addEventListener('toggle',()=>{st[d.dataset.sec]=d.open;try{localStorage.setItem(K,JSON.stringify(st))}catch(_){}})})})()}
 setInterval(()=>{if(me&&document.visibilityState==='visible')pollPipes()},PANEL_S);

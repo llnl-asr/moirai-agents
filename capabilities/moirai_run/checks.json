@@ -254,5 +254,69 @@
   "expect": {
    "contains": "no ':::' input list"
   }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "attach_completed_rc0=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "attach_validate_ran_exit0=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "attach_failed_exit0_fails=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "attach_unfinished_refused=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "attach_study_false_rc_nonzero=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "attach_refusals_record_nothing=ok"
+  }
+ },
+ {
+  "tool": "moirai_run_attach",
+  "args": {
+   "pipeline": "nope-1",
+   "stage": "moirai_smoke",
+   "flux_job_id": "fABCDEF"
+  },
+  "expect": {
+   "contains": "no pipeline"
+  }
+ },
+ {
+  "tool": "moirai_run_attach",
+  "args": {
+   "pipeline": "nope-1",
+   "stage": "plan",
+   "flux_job_id": "fABCDEF"
+  },
+  "expect": {
+   "contains": "stage must be one of"
+  }
  }
 ]

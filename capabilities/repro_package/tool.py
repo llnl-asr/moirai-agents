@@ -564,6 +564,7 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 TS_RE = re.compile(r"^\d{8}_\d{6}$")
 SKIP_DIRS = {".chgperm_logs"}
 KINDS = ("baseline", "verification")
+TRACE_KINDS = KINDS + ("live",)      # live: a live pipeline's long run (its publish_data stage); not part of the package publish plan
 PKG_FILES = ("README.md", "config.ini", "scripts/run_all.sh")
 
 
@@ -736,7 +737,7 @@ def render_run_files(kind, app, ts, s, info, meta):
     if "verification" in meta:
         doc["verification"] = meta["verification"]
     graph = {"summary": {k: v for k, v in s.items() if k not in ("types", "relation_kinds")}, "entity_relations": rel, "types": s.get("types", [])}
-    what = "the pipeline's baseline run" if kind == "baseline" else "the in-place verification run of the published package"
+    what = {"baseline": "the pipeline's baseline run", "live": "a live, long run of the annotated app"}.get(kind, "the in-place verification run of the published package")
     L = [f"# {app} provenance trace -- {ts}", "",
          f"{kind.capitalize()} run ({what}), traced with the dftracer entity/relation API. Job {run['jobid']} ({run['queue']}), {run['runtime_s']} s, {run['result']}.", "",
          "## Layout", "", "- `raw/` -- dftracer traces, one `.pfw.gz` per process", "- `run.json` -- everything below, machine-readable", "- `run.sh` -- exact launch script; `graph_summary.json` -- graph summary"]
@@ -759,8 +760,8 @@ def publish_traces_core(root, app, run_dir, ts, kind, summary, meta, run_sh=""):
     """Copy a run's raw traces (+ .dftindex) and write README.md, run.json, run.sh, graph_summary.json into <root>/provenance-traces/<app>/<ts>/ (new dir only).
     run_sh: the exact launch script; default <run_dir>/run.sh, else <run_dir>/../../work/<scale>/run.sh (the package layout)."""
     _names(app, ts)
-    if kind not in KINDS:
-        raise ValueError(f"kind must be one of {KINDS}")
+    if kind not in TRACE_KINDS:
+        raise ValueError(f"kind must be one of {TRACE_KINDS}")
     root, run_dir = Path(root), Path(run_dir)
     if not root.is_dir():
         raise ValueError(f"publish_root {root} is not a directory")
@@ -1094,7 +1095,7 @@ def _verification_record(pipeline):
 def register(mcp):
     @mcp.tool()
     def repro_build(pipeline: str, output_root: str = "${HOME}/moirai_repro/${APP}", mode: str = "") -> dict:
-        """Generate final_provenance/ in the session: config.ini, scripts, the provenance patch, the spec, pinned versions and a standalone checker. Use after the query stage, or again after
+        """Generate final_provenance/ in the session: config.ini, scripts, the provenance patch, the spec, pinned versions and a standalone checker. Use after the graph stage, or again after
         a fix: it starts over. output_root: where a reader's run writes; keep ${USER} or ${HOME}, never a literal name. mode: '' detects it (batch when the moirai_smoke or baseline stage ran a
         generated flux batch run.sh: its outputs hold batch_script or submit_command), 'batch' or 'generic' forces it. Batch mode writes a per-chunk wrapper template, a run.sh generator call, a
         flux batch with a wait and failure checks, and never starts a service on the login node. Returns {status, package, mode, files, source, pins, warnings}."""
@@ -1409,7 +1410,7 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
         return {"status": "ok" if r["ok"] else "error", **r}
 
     @mcp.tool()
-    def repro_publish_traces(pipeline: str, publish_root: str, app: str, run_dir: str = "", timestamp: str = "", kind: str = "baseline", flux_job: str = "", run_sh: str = "") -> dict:
+    def repro_publish_traces(pipeline: str, publish_root: str = "", app: str = "", run_dir: str = "", timestamp: str = "", kind: str = "baseline", flux_job: str = "", run_sh: str = "") -> dict:
         """Copy a run's raw traces (+ .dftindex) and write README.md, run.json, run.sh, graph_summary.json into <publish_root>/provenance-traces/<app>/<timestamp>/ (new dir only). Every
         count comes from the graph tools (moirai trace reader), never typed; a missing fact reads 'not recorded'. kind=baseline: the pipeline's baseline run (run_dir default: the folder
         holding the baseline stage's raw traces; run.sh: the baseline stage's run script; timestamp default: its flux job start, as repro_publish_plan). kind=verification: the in-place run of the
@@ -1417,8 +1418,28 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
         first if the job has finished; verification.json is copied along). flux_job: the flux id of the run, for job id / runtime / start. run_sh: the exact launch script when the stage did not record one (BioTox: provenance/runs/baseline/launch.sh). Returns {status, target, files, trace_files, trace_bytes, counts}."""
         c = P.load(pipeline)
         meta, wrapper = {}, None
+        stage_name = STAGE
+        if c["kind"] == "live":           # the publish_data stage of a live run: where and as what come from the parent's published package
+            kind, stage_name = "live", "publish_data"
+            po = P.stage(P.origin(c), STAGE)["outputs"]
+            publish_root, app = publish_root or po.get("publish_root", ""), app or po.get("publish_app", "")
+        if not publish_root or not app:
+            return {"status": "error", "error": "give publish_root and app (a live run takes them from its parent's repro_publish_package)"}
         try:
-            if kind == "baseline":
+            if kind == "live":
+                lo = P.stage(c, "live_run")["outputs"]
+                if not lo.get("traces"):
+                    return {"status": "error", "error": "the live run has no traces: run moirai_live_run first"}
+                rd = Path(run_dir) if run_dir else Path(lo["traces"]).parent
+                job = J.get(pipeline, lo["job"], 40000) if lo.get("job") else {}
+                fid = flux_job or _find_flux_id(job.get("log_tail", ""))
+                meta.update(queue=lo.get("queue"), scale="live")
+                run_sh = run_sh or lo.get("run_script") or lo.get("batch_script") or job.get("script") or ""
+                wrapper = lo.get("wrapper")
+                started = P.stage(c, "live_run").get("started") or job.get("started")
+                if not timestamp and not fid and started:
+                    timestamp = _stamp(float(started))
+            elif kind == "baseline":
                 base = P.stage(c, "baseline")["outputs"]
                 rd = Path(run_dir) if run_dir else Path(base["traces"]).parent
                 fid = flux_job or (_find_flux_id(J.get(pipeline, base["job"], 40000).get("log_tail", "")) if base.get("job") else "")
@@ -1459,8 +1480,29 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
             r = publish_traces_core(publish_root, app, rd, timestamp, kind, summary, meta, run_sh)
         except (ValueError, FileExistsError, OSError, KeyError, subprocess.CalledProcessError) as e:
             return {"status": "error", "error": f"{type(e).__name__}: {e}"}
-        P.record(pipeline, STAGE, outputs={f"published_{kind}": r["target"]}, note=f"{kind} traces published to {r['target']}")
+        P.record(pipeline, stage_name, outputs={f"published_{kind}": r["target"], "published_counts": g.counts()}, note=f"{kind} traces published to {r['target']}")
         return {"status": "ok", **r, "counts": g.counts()}
+
+    @mcp.tool()
+    def repro_publish_data_validate(pipeline: str) -> dict:
+        """Validator of a live run's publish_data stage: the run's traces were published (repro_publish_traces on the live pipeline), the published folder holds every raw trace
+        file, run.sh, README.md and run.json, and the published traces read to the same counts as the run's own. Use after repro_publish_traces on a live pipeline, before its gate.
+        Returns the verdict {status, failed, unknown, passed, total}."""
+        c = P.load(pipeline)
+        if c["kind"] != "live":
+            return {"status": "error", "error": "publish_data is the stage of a live pipeline"}
+        o, lo = P.stage(c, "publish_data")["outputs"], P.stage(c, "live_run")["outputs"]
+        v = P.Verdict("publish_data")
+        tgt = Path(o.get("published_live") or "")
+        if v.check("published", bool(o.get("published_live")) and tgt.is_dir(), f"not published: {o.get('published_live') or 'no target recorded'}", "repro_publish_traces(pipeline=<this live pipeline>)"):
+            src = T.expand(lo.get("traces", ""))
+            pub = sorted((tgt / "raw").glob("*.pfw.gz"))
+            v.check("all_files", len(pub) == len([f for f in src if f.endswith(".pfw.gz")]), f"{len(pub)} published vs {len(src)} in the run", "publish again into a new folder: a file was added after publishing, or the copy failed")
+            v.check("run_files", all((tgt / n).is_file() for n in ("run.sh", "README.md", "run.json")), "run.sh, README.md or run.json missing", "repro_publish_traces writes them: publish again")
+            a, b = T.read(str(tgt / "raw")).counts(), T.read(lo["traces"]).counts()
+            keys = ("entities", "activities", "edges", "relations")
+            v.check("same_counts", all(a[k] == b[k] for k in keys), f"published {[a[k] for k in keys]} vs run {[b[k] for k in keys]} ({', '.join(keys)})", "the run was still writing when it was published: publish after it ends")
+        return P.finish_validation(pipeline, v)
 
     @mcp.tool()
     def repro_publish_permissions(publish_root: str, group_script: str, group: str = "moirai", app: str = "elmerfold", timestamps: str = "") -> dict:
