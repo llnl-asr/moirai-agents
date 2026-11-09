@@ -1,26 +1,6 @@
 # Lessons: live_inputs
 
-- [L-eea6c864] BioTox live-run inputs.
-
-Offered (live_inputs_write, validated 3/3): input JSON (config/trypsin.json or config/Nav1_2_KIIIA.json), dock_mode (only 'all'; 'best' crashes gen.py with KeyError SAMPLE), dock_chains (A, B, A,B), seeds_per_chunk, num_samples, PEP_NSTRUCT (baseline 4, app default 200), PEP_RADIUS (50), nodes, queue (pbatch, pdebug), minutes. Left out: FLEX_DB, AF3_ENV, the per-case helper-script flags (cif, pep, sc, csv, rankings, flex_preparation/flex_process) and the bank. User request on pipeline biotox-prov-big-20261104-124916: keep config JSON, dock mode/chains, seeds, PEP_NSTRUCT, PEP_RADIUS, nodes, queue, time limit; drop FLEX_DB/AF3_ENV/helper flags.
-
-Seeds are not a flag or env var: the AF3 seeds are the modelSeeds of the chosen input JSON (trypsin [5], Nav1_2_KIIIA [1,5]); the tunables are seeds_per_chunk and num_samples of gen.py.
-
-Detection: live_inputs_detect finds only argparse flags of the per-case helper scripts and PEP_* names, so curation comes from the real launch (baseline launch.sh maestro line, gen.py, or the package scripts), not from the detector.
-
-PEP_NSTRUCT and PEP_RADIUS are YAML env-block variables: gen.py --pargs pep_nstruct/pep_radius only change the recorded run_config entity; the real write into the run copy of biotox.yaml is done by biotox_run_script (or make_run in the package). They need a run-copy yaml edit.
-
-Command template rule (user: "from the baseline's real launch", "ask me before changing anything else"): a template must only use settings the launch it wraps really takes. Read the launch's scripts first, write ONE template, and report ineffective wanted inputs as a builder change/open point, not as dead slots or repeated rewrites. Earlier three variants (flux run, flux batch --wrap, with and without num_samples) each passed live_inputs_validate 3/3 although PEP_NSTRUCT/PEP_RADIUS had no effect. A plain `flux batch --wrap maestro run` template lacks the real launch.sh preamble (python/3.12 module, moirai env, ld_clean, conductor service), so it is only a simplification; a faithful live run calls a generator (biotox_run_script) or the package launch.
-
-Progression of what the launch honours: the first published package's run_all.sh (env overrides SCALE, QUEUE, INPUT_JSON, DOCK_MODE, DOCK_CHAINS_<scale>, SEEDS_PER_CHUNK, NUM_SAMPLES, PEP_NSTRUCT, MINUTES at most 120, STEP_MINUTES; REUSE_VENV=1) did NOT take PEP_RADIUS, nodes (fixed to 1) or a longer time limit. An intermediate package template was env-driven: `SCALE=baseline INPUT_JSON=.. DOCK_MODE=.. DOCK_CHAINS_baseline=.. SEEDS_PER_CHUNK=.. PEP_NSTRUCT_baseline=.. NODES_baseline=.. QUEUE=.. MINUTES_baseline=.. scripts/03_build.sh && scripts/04_run.sh` (env overrides config.ini; PEP_RADIUS had no launcher flag); baseline runs need APPROVED_NODES/APPROVED_OVER_120 (user's own words, never invented).
-
-CURRENT (biotox-v2 package, with PEP_RADIUS via make_run --pep-radius, NODES_baseline, MINUTES_baseline): the template wraps the package's own scripts/run_all.sh as `env SCALE=baseline REUSE_VENV=1 QUEUE=.. NODES_baseline=.. APPROVED_NODES=.. MINUTES_baseline=.. STEP_MINUTES_baseline=.. INPUT_JSON=.. DOCK_MODE=.. DOCK_CHAINS_baseline=.. SEEDS_PER_CHUNK=.. PEP_NSTRUCT_baseline=.. PEP_RADIUS=.. bash -l <package>/scripts/run_all.sh`. At SCALE=baseline the package reads the *_baseline names, not the smoke names; PEP_RADIUS is a single setting. Eleven inputs written (input_json, dock_mode, dock_chains, seeds_per_chunk, pep_nstruct, pep_radius, nodes, approved_nodes, queue, minutes, step_minutes), live_inputs_validate passed 3/3. This supersedes the earlier flux batch --wrap template. approved_nodes defaults to empty and must hold the user's own approval text for nodes above 1; nodes above 1 or minutes above 120 need the user's approval text (APPROVED_NODES / APPROVED_OVER_120).
-
-After live_inputs_write, call live_inputs_render and compare the slots to what was written (one stored spec was found replaced, 6 inputs with a different command, without a later write).
-
-Repeated request: the same BioTox live-inputs request arrived repeatedly (twice, later four times). Earlier turns ended without any reply text, which is why the user repeated it. Once a request is done, the saved spec is already written and passed: verify with live_inputs_validate and live_inputs_render (no values) plus pipeline_status (chat_session matches the pipeline), then answer from the stored spec. Show the inputs and the example command in the reply itself. Do not rewrite the spec and do not change anything the user did not list: the user said to ask first.
-
-- [L-f2e0805a] BioTox live-run inputs.
+- [L-e726306e] BioTox live-run inputs.
 
 Offered (live_inputs_write, validated 3/3): input JSON (config/trypsin.json or config/Nav1_2_KIIIA.json), dock_mode (only 'all'; 'best' crashes gen.py with KeyError SAMPLE), dock_chains (A, B, A,B), seeds_per_chunk, num_samples, PEP_NSTRUCT (baseline 4, app default 200), PEP_RADIUS (50), nodes, queue (pbatch, pdebug), minutes. Left out: FLEX_DB, AF3_ENV, the per-case helper-script flags (cif, pep, sc, csv, rankings, flex_preparation/flex_process) and the bank. User request on pipeline biotox-prov-big-20261104-124916: keep config JSON, dock mode/chains, seeds, PEP_NSTRUCT, PEP_RADIUS, nodes, queue, time limit; drop FLEX_DB/AF3_ENV/helper flags.
 

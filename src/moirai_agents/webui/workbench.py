@@ -42,6 +42,22 @@ def _state(c: Dict[str, Any], js: List[dict]) -> str:
     return "idle"
 
 
+def _running_jobs(pid: str, js: List[dict], ws: str) -> List[dict]:
+    """The pipeline's running jobs: name, elapsed seconds, and the last line of the log (what it is doing now)."""
+    out = []
+    for j in js:
+        if j.get("status") != "running":
+            continue
+        last = ""
+        try:
+            tail = (jobs.get(pid, j["id"], 600, ws) or {}).get("log_tail", "")
+            last = next((x.strip() for x in reversed(tail.splitlines()) if x.strip()), "")[:200]
+        except Exception:  # noqa: BLE001
+            pass
+        out.append({"id": j.get("id"), "name": j.get("name"), "stage": j.get("stage"), "elapsed": j.get("elapsed"), "last": last})
+    return out[:6]
+
+
 def items(ws: str, busy: Optional[set] = None) -> Dict[str, List[dict]]:
     """apps: run pipelines (the Annotate view), lives: live runs (the Live Run view, each under its app), datasets: analysis
     pipelines; every one of them can be asked in the Query view. campaigns = apps, for older pages."""
@@ -55,7 +71,8 @@ def items(ws: str, busy: Optional[set] = None) -> Dict[str, List[dict]]:
                "dash_run": P.dash_run(c, ws), "jobs_running": sum(1 for j in js if j.get("status") == "running"),
                "steps": [{"name": n, "status": c["stages"][n]["status"]} for n in P.KINDS.get(c["kind"], c["stages"]) if n in c["stages"]],
                "summary": (c["stages"].get(cur or "", {}).get("outputs") or {}).get("summary", ""),
-               "parent": c.get("parent") or "", "query_chat": c.get("query_chat") or ""}
+               "parent": c.get("parent") or "", "query_chat": c.get("query_chat") or "",
+               "jobs": _running_jobs(c["id"], js, ws)}
         if busy and row["chat"] in busy:          # the agent is working in its chat: a gate it asked about is being answered or acted on
             row["busy"] = True
             if row["state"] in ("needs_you", "idle"):

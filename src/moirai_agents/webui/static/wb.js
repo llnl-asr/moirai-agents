@@ -65,7 +65,7 @@ $('#wbview').addEventListener('click',e=>{const t=e.target.closest('[data-target
  if(e.target.closest('[data-newlive]')){e.preventDefault();wbHome('live')}});
 
 // ---- the list on the left: the apps (and datasets); the selected one stays selected across the views
-async function wbLoad(){if(!me)return;const d=await api('api/workbench');if(!d||d.error)return;WB.items=d;
+async function wbLoad(){if(!me)return;const d=await api('api/workbench');if(!d||d.error)return;WB.items=d;renderNow(d);
  if(!document.body.classList.contains('views'))return;
  if(!WB.app&&session){const it=[...d.apps,...d.lives,...d.datasets].find(x=>x.chat===session||x.query_chat===session);if(it){WB.app=appOf(it.id);savePick()}}
  if(WB.app&&!wbItem(WB.app)){WB.app=null;savePick()}
@@ -273,7 +273,7 @@ async function wbAnnotate(first){if(!WB.sel||!WB.sel.item)return;const it=WB.sel
   <div class="wb-card"><div class="wb-sec">Live run inputs</div>${it.live_inputs?`<ul class="wb-li-list">${it.live_inputs.inputs.map(i=>`<li><b>${esc(i.label||i.name)}</b> ${i.kind==='choice'?`<span class="sub">${(i.options||[]).length} choices</span>`:''} <span class="sub">default ${esc(i.default??'-')}</span></li>`).join('')}</ul>${pro()?`<code class="wb-cmd">${esc(it.live_inputs.command)}</code>`:''}`:
    `<div class="sub">What a scientist can tune when starting a live run. The agent writes them once it has explored and annotated the app.</div><button class="btn" id="wbdetect" style="margin-top:6px">Detect them now</button>`}</div>
   ${gapsCard(it)}${pro()||WB.stage?'<div class="wb-card" id="wbstage"></div>':''}`;
- const html=headOf(it)+`<div class="wb-strip"><span class="sub">annotate</span>${strip(it,setup)}<span class="sub" style="margin-left:12px">check &amp; publish</span>${strip(it,['graph','package'])}</div>${needYou(it)}
+ const html=headOf(it)+`<div class="wb-strip"><span class="sub">annotate</span>${strip(it,setup)}<span class="sub" style="margin-left:12px">check &amp; publish</span>${strip(it,['graph','package'])}</div>${needYou(it)}${nowCard(it)}
   <div class="vw-grid"><div class="vw-main"><div class="wq-tools"><b class="vw-t">${title}</b>${aggLegend(mode)}<span class="wq-btns"><button id="agfit">fit</button></span></div>
    <div id="aggann" class="vw-graph"></div><div id="agginfo" class="wq-info" hidden></div></div><div class="vw-side">${side}</div></div>`;
  if(v.dataset.h!==html){v.dataset.h=html;const keepG=AGG.ann&&$('#aggann');const old=keepG?$('#aggann'):null;v.innerHTML=html;if(old)$('#aggann').replaceWith(old);wireHead(v);$('#agfit').onclick=()=>aggFit(AGG.ann&&AGG.ann.cy);
@@ -290,7 +290,7 @@ async function wbLive(first){if(!WB.sel||!WB.sel.item)return;const it=WB.sel.ite
  const el=it.started?dur(Math.max(0,Date.now()/1000-it.started)):'';
  const kpi=(k,val,sub)=>`<div class="wb-kpi"><div class="v">${esc(val??'-')}</div><div class="k">${k}${sub?`<span>${esc(sub)}</span>`:''}</div></div>`;
  const head=targetBar()+headOf(it,`${el&&lr.status==='running'?`<span class="sub">running for ${el}</span>`:''}<span class="sub">${L&&L.reading?'reading the traces…':L&&L.quiet_s!=null?'last provenance '+dur(L.quiet_s)+' ago':''}</span><button class="btn" data-goto="query" data-id="${esc(pid)}">⌕ Query this run</button>`)+
-  `<div class="wb-strip">${strip(it)}</div>${needYou(it)}${L&&L.stalled?`<div class="wb-need bad">⚠ No new provenance for ${dur(L.quiet_s)} while the run is going. Ask the chat to check the job.</div>`:''}`;
+  `<div class="wb-strip">${strip(it)}</div>${needYou(it)}${nowCard(it)}${L&&L.stalled?`<div class="wb-need bad">⚠ No new provenance for ${dur(L.quiet_s)} while the run is going. Ask the chat to check the job.</div>`:''}`;
  const kpis=`<div class="wb-kpis">${kpi('entities',n.entities,r.entities_per_h!=null?`+${r.entities_per_h}/h`:'')}${kpi('activities',n.activities,r.activities_per_h!=null?`+${r.activities_per_h}/h`:'')}${kpi('links',n.edges)}${pro()?kpi('types',n.types)+kpi('records read',n.records):''}</div>`;
  const seg=`<div class="seg" id="lgseg">${[['agg','Aggregated'],['inst','Instances'],['temp','Temporal']].map(([k,l])=>`<button data-g="${k}" class="${WB.lgmode===k?'on':''}">${l}</button>`).join('')}</div>`;
  const feed=((L&&L.feed)||[]).slice(0,pro()?20:8).map(f=>`<li><b>${esc(f.type)}</b> <span title="${esc(f.uri)}">${esc((f.uri||f.id).split('/').pop().slice(0,48))}</span> <span class="sub">← ${esc(f.by)}</span></li>`).join('');
@@ -590,3 +590,25 @@ function gapsCard(it){const gs=it.gaps||[];if(!gs.length)return '';const open=gs
  return `<div class="wb-card"><div class="wb-sec">Provenance gaps <span class="sub">${open.length} open · ${gs.length-open.length} fixed</span></div><ul class="wb-gaps">${gs.slice().reverse().slice(0,pro()?30:8).map(g=>
   `<li class="${esc(g.status)}"><b>${esc(g.status==='open'?'open':g.status==='closed'?'✓ closed':'fixed, run pending')}</b> ${esc(GAP_L[g.kind]||g.kind)} <code>${esc(g.subject)}</code>${g.cause?` <span class="sub">· ${esc(g.cause.replace(/_/g,' '))}</span>`:''}${pro()&&g.how?`<div class="sub">${esc(g.how)}</div>`:''}</li>`).join('')}</ul>
   ${open.length?`<button class="btn" id="wbgapgo">Work on the ${open.length} open gap${open.length>1?'s':''}</button>`:''}</div>`}
+
+// ---- what is running now, from any tab: every app or run with a running job, a working agent, or a question for you
+function activeOf(d){return [...d.apps,...d.lives,...d.datasets].filter(x=>(x.jobs||[]).length||x.busy||['running','working','needs_you'].includes(x.state))}
+function nowText(x){const st=STEP_L[x.current]||x.current||'',j=x.jobs||[],agent=x.busy?'agent working':x.state==='needs_you'?'waiting for your answer':'agent idle';
+ return `${st?esc(st)+' · ':''}${j.length?j.map(y=>`${esc(y.name)} ${dur(y.elapsed||0)}`).join(', ')+' · ':''}${agent}`}
+function renderNow(d){let el=$('#wbnow');if(!el){const nav=document.querySelector('header nav.tabs');if(!nav)return;nav.insertAdjacentHTML('afterend','<div id="wbnow"></div>');el=$('#wbnow')}
+ const act=activeOf(d),need=act.filter(x=>x.state==='needs_you'&&!x.busy).length,run=act.length-need;
+ if(!act.length){el.innerHTML='';return}
+ const open=el.classList.contains('open');
+ el.innerHTML=`<button class="wbnow-b" title="What is running now, and where">${run?`<span class="wbd run"></span>${run} running`:''}${need?`${run?' · ':''}<span class="wbd wait"></span>${need} need${need>1?'':'s'} you`:''}</button>
+  <div class="wbnow-p">${act.map(x=>{const v=x.kind==='live'?'live':x.kind==='analysis'?'query':'ann',[cls]=WB_STATE[x.busy?'working':x.state]||[''];
+   return `<a href="#" data-now="${esc(x.id)}" data-v="${v}"><span class="wbd ${cls}"></span><b>${esc(x.name)}</b> <span class="sub">${esc(VIEW_L[v])}${x.app?' · run of '+esc(x.app):''}</span><div class="sub">${nowText(x)}</div>${(x.jobs||[]).map(y=>y.last?`<div class="wbnow-l">${esc(y.last)}</div>`:'').join('')}</a>`}).join('')}</div>`;
+ el.classList.toggle('open',open);
+ el.querySelector('.wbnow-b').onclick=e=>{e.stopPropagation();el.classList.toggle('open')};
+ el.querySelectorAll('[data-now]').forEach(a=>a.onclick=e=>{e.preventDefault();el.classList.remove('open');goView(a.dataset.v,a.dataset.now)})}
+document.addEventListener('click',e=>{const el=$('#wbnow');if(el&&!el.contains(e.target))el.classList.remove('open')});
+setInterval(async()=>{if(!me||document.visibilityState!=='visible')return;if(document.body.classList.contains('views'))return wbLoadQuiet();
+ const d=await api('api/workbench');if(d&&!d.error){WB.items=d;renderNow(d)}},10000);
+// the Now card of a view: the step that is running, its jobs and what they print, and whether the agent is on it
+function nowCard(it){const j=it.jobs||[],cur=STEP_L[it.current]||it.current;if(!j.length&&!agentBusy(it))return '';
+ return `<div class="wb-now"><b>▶ Now:</b> ${cur?esc(cur):''}${j.map(y=>`<div>job <code>${esc(y.name)}</code> running for ${dur(y.elapsed||0)}${y.last?` <span class="sub">· ${esc(y.last)}</span>`:''}</div>`).join('')}
+  <div class="sub">${agentBusy(it)?'The agent is working on it in the chat on the left.':'The agent is not watching the job right now: ask in the chat on the left (“how is it going?”) and it checks it.'}</div></div>`}

@@ -389,3 +389,14 @@ def test_captured_values_are_properties_of_the_nodes_they_describe(tmp_path):
                                                                                               "capture": {"inputs": {"command": "self.run_str"}}}]})
     diff = {n["id"]: n for n in G.diff(exp, G.runtime(g))["nodes"]}
     assert diff["t:filtered"]["attrs"] == ["depth", "n_seqs"] and diff["a:filter"]["inputs"] == ["--qid", "command"]
+
+
+def test_running_a_stage_again_resets_the_stages_built_on_it(tmp_path):
+    run = integrated_app(tmp_path)
+    for st in ("moirai_smoke", "baseline", "graph", "package"):
+        P.update(run["id"], lambda c, st=st: c["stages"][st].update(status="passed", validation={"status": "pass"}, gate={"approved": True}))
+    P.record(run["id"], "baseline", status="running", note="re-run after re-annotating")
+    c = P.load(run["id"])
+    assert [c["stages"][s]["status"] for s in ("moirai_smoke", "baseline", "graph", "package")] == ["passed", "running", "pending", "pending"]
+    assert c["stages"]["graph"]["validation"] is None and c["stages"]["package"]["gate"] is None
+    assert "baseline is running again" in c["stages"]["graph"]["history"][-1]["note"]

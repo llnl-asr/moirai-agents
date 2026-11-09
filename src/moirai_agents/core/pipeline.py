@@ -258,6 +258,16 @@ def record(pid: str, name: str, status: Optional[str] = None, outputs: Optional[
 
     def fn(c):
         s = stage(c, name)
+        if status == "running" and s["status"] != "running":
+            if s["status"] in ("passed", "failed", "needs_user"):
+                s["started"] = round(time.time(), 1)           # a re-run starts now
+            # the stages after it were built on the run being replaced: they go back to pending (their outputs stay, for reference)
+            order = KINDS.get(c["kind"], [])
+            for later in order[order.index(name) + 1:] if name in order else []:
+                ls = c["stages"].get(later)
+                if ls and ls["status"] != "pending":
+                    ls.update(status="pending", validation=None, gate=None)
+                    ls["history"].append({"ts": round(time.time(), 1), "note": f"reset: {name} is running again, so this stage must run again on its result"})
         if status:
             s["status"] = status
             s.setdefault("started", round(time.time(), 1))
