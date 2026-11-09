@@ -11,12 +11,15 @@ Cross-references: [[query_explain]] [[prov_query]]
 summary and the facts, and folds the details. Blocks and their shapes: `core/explain.py`.
 
 ## Rules
+- Always a narrative that answers the question: the direct answer first, then what differs and what stays the same, then how it was found. Never point at the result instead of answering.
+- Link every claim to where it can be checked: [R n] is row n of the result table, [S n] is step n. Quote values in backticks: the validator looks each one up in the row or step it links.
 - High level first: the summary says in one or two plain sentences what this part is: the write-up's first sentence; tables and bullets of the write-up as blocks; the synthesis check; the gaps as a table.
 - Details carry everything else, typed: a table is a `table` block (never markdown in text), a query is a `query` block, several values are a list (chips), name -> value is `kv`.
 - Format values with `core.explain`: `fmt_num` / `fmt_value` (thousands separators, epoch seconds and microseconds as UTC times), `split_values` for "a | b" and "a,b".
 - Deterministic: no model, every word from the answer record.
 
 ## Constraints
+- The validator `explain_answer_check` checks against the traces when given the pipeline: the plan runs again with TraceViewer and every claim is looked up in what it computes. The Query view runs it on every answer.
 - Every number in the summary and facts is in the answer or a count of it (`explain.check`).
 - Summary under 320 characters; at most 4 facts.
 

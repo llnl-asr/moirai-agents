@@ -17,6 +17,7 @@ summary and the facts, and folds the details. Blocks and their shapes: `core/exp
 - Deterministic: no model, every word from the answer record.
 
 ## Constraints
+- The validator `explain_plan_check` checks against the traces when given the pipeline: the plan runs again with TraceViewer and every claim is looked up in what it computes. The Query view runs it on every answer.
 - Every number in the summary and facts is in the answer or a count of it (`explain.check`).
 - Summary under 320 characters; at most 4 facts.
 

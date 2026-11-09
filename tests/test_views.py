@@ -436,3 +436,31 @@ def test_an_answer_without_a_lineage_step_carries_the_subgraph_it_used():
     o = EV._touched([{"kind": "inputs", "runs": [{"activity": "1:10"}], "ids": []}], ctx)
     assert o["activities"] == ["1:10"] and set(o["entities"]) == {"e1", "p1", "e2"}
     assert EV._touched([{"kind": "group", "counts": {}}], {}) is None
+
+
+def test_every_part_is_checked_against_the_traces_and_the_confidence_counts_what_was_calculated(tmp_path):
+    from moirai_agents.core import capstore as S, evidence as E
+    run = integrated_app(tmp_path)
+    d = tmp_path / "traces" / "raw"
+    d.mkdir(parents=True)
+    rec_in = lambda i, uri: {"name": "EH", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"id": i, "type": "draw.input", "uri": uri, "store": 0}}   # noqa: E731
+    (d / "a.pfw.gz").write_bytes(member(et("clean", 3), et("plot", 2), et("draw.input", 4), eh("c", "clean"), eh("p", "plot"),
+                                        rec_in("i1", "--qid=0.2"), rec_in("i2", "--diff=3000"), rec_in("i3", "--qid=0.4"),
+                                        act("draw", 2, used=["c", "i1", "i2"], generated=["p"]), act("draw", 3, used=["c", "i3", "i2"], generated=["p"])))
+    P.record(run["id"], "baseline", outputs={"traces": str(d)})
+    rec = E.ask(run["id"], "What are the draw parameters?", [{"op": "inputs", "activity": "draw"}])
+    v = S.call("query_explain", "query_explain_validate", pipeline=run["id"], answer_id=rec["id"])
+    assert v["status"] == "pass", v
+    assert all(p["data"].startswith("checked against the traces") for p in v["parts"].values())
+    ans = S.call("explain_answer", "explain_answer", answer=rec)
+    assert "[R" in ans["summary"] + " ".join(b.get("text", "") for b in ans["body"]) and "No write-up" not in ans["summary"]
+    lie = {**rec, "result": {**rec["result"], "table": rec["result"]["table"].replace("3000", "4000")}}     # a value the traces do not have
+    bad = S.call("explain_answer", "explain_answer_check", answer=lie, pipeline=run["id"])
+    assert bad["status"] == "fail" and any("4000" in x for x in bad["problems"])
+    c = S.call("answer_confidence", "confidence_score", pipeline=run["id"], answer_id=rec["id"])
+    assert c["score"] == 100 and c["stale"] is False and c["llm_inferred"] == 0
+    guess = {**rec, "synthesis": "The draw used qid 0.2 and 0.4 [S1].\nThese come from the trace.\nIt converges 2.5 times faster with 0.4."}
+    g = S.call("answer_confidence", "confidence_score", answer=guess)
+    assert [i["how"] for i in g["items"] if i.get("llm")] == ["llm_verified", "wording", "llm"] and g["llm_inferred"] == 1
+    assert "2.5" in [i for i in g["items"] if i["how"] == "llm"][0]["why"] and g["score"] == 75      # 3 of the 4 parts with values come from queries; wording is not counted
+    assert S.call("answer_confidence", "confidence_validate", answer=guess)["status"] == "pass"

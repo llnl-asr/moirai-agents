@@ -37,13 +37,14 @@ def register(mcp):
 
     @mcp.tool()
     def query_explain_validate(pipeline: str = "", answer_id: str = "", answer: dict = None) -> dict:
-        """Validator: each of the four parts of an answer's explanation passes its own capability's check (explain_<part>_check).
-        Returns {status: pass|fail, parts: {part: {status, problems}}}."""
+        """Validator: each of the four parts of an answer's explanation passes its own capability's validator (explain_<part>_check) - with a
+        pipeline, against the traces: the plan runs again with TraceViewer and every claim is looked up in what it computes.
+        Returns {status: pass|fail, parts: {part: {status, problems, data}}}."""
         a = answer if answer else _answer(pipeline, answer_id)
         out = {}
         for name in X.PARTS:
             try:
-                out[name] = S.call(f"explain_{name}", f"explain_{name}_check", answer=a)
+                out[name] = S.call(f"explain_{name}", f"explain_{name}_check", answer=a, pipeline=pipeline)
             except Exception as e:
                 out[name] = {"status": "fail", "problems": [f"explain_{name}_check failed: {e}"]}
         return {"status": "pass" if all(v.get("status") == "pass" for v in out.values()) else "fail", "parts": out}

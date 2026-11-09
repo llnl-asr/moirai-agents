@@ -389,12 +389,12 @@ function wbQPanel(){const p=$('#wqpanel');if(!p||!WB.sel||!WB.sel.item)return;co
  const ev=(a.evidence||[]).map((e,i)=>{const can=e.entity||e.activity;return `<li class="${can?'wq-pk':''}${on('e'+i)}" ${can?`data-pk="e${i}"`:''} title="${can?'show it on the graph':'not a graph record'}"><span class="ev-i">${EV_I[e.kind]||'•'}</span><span>${esc(e.text||'')}${pro()&&e.entity?` <code>${esc(String(e.entity).slice(0,40))}</code>`:''}${e.activity?` <code>${esc(e.activity)}</code>`:''}${pro()&&e.tool?` <span class="sub">via ${esc(e.tool)}</span>`:''}</span></li>`}).join('');
  const body=a.verified?`<div class="ap-ans">${md(a.answer||'')}</div>`:`<div class="ap-unv"><b>Unverified: evidence and lineage only.</b><ul>${(a.problems||[]).map(x=>`<li>${esc(x)}</li>`).join('')}</ul><details><summary>the unverified summary</summary>${md(a.answer||'')}</details></div>`;
  const pinned=WB.pins.includes(a.id);
- p.innerHTML=`<div class="wq-q"><span class="ac-badge ${a.verified?'ok':'bad'}">${a.verified?'✓ verified against the traces':'⚠ unverified'}</span><b>${esc(a.question||'')}</b><span class="sub">${a.ts?new Date(a.ts*1000).toLocaleString():''} · ${a.direction==='forward'?'downstream impact':a.direction==='both'?'lineage both ways':'lineage'}</span></div>
+ p.innerHTML=cfHtml(cfOf(a))+`<div class="wq-q"><span class="ac-badge ${a.verified?'ok':'bad'}">${a.verified?'✓ verified against the traces':'⚠ unverified'}</span><b>${esc(a.question||'')}</b><span class="sub">${a.ts?new Date(a.ts*1000).toLocaleString():''} · ${a.direction==='forward'?'downstream impact':a.direction==='both'?'lineage both ways':'lineage'}</span></div>
   <section class="wq-sec"><h4 class="wq-pk${on('t')}" data-pk="t"><span class="n">1</span>Query plan <span class="sub">targets</span></h4><div class="ap-plan">${plan}</div></section>
   <section class="wq-sec"><h4><span class="n">2</span>Evidence <span class="sub">select one to see it</span></h4><ul class="ap-ev">${ev||'<li class="sub">none</li>'}</ul>
    ${(a.gaps||[]).length?`<div class="ap-gaps tv-gaps"><b>Gaps</b><ul>${a.gaps.map((g,i)=>`<li>${esc(typeof g==='string'?g:(g.detail||g.subject||''))}${it.kind!=='analysis'?`<div><button class="btn" data-ogap="${i}" title="Open the app's Annotate chat: explore the code for this gap, fix the annotation, learn it in the capabilities">Improve coverage</button></div>`:''}</li>`).join('')}</ul>
     ${it.kind!=='analysis'&&a.gaps.length>1?`<button class="btn primary" data-ogap="*">Improve coverage of all ${a.gaps.length} gaps</button>`:''}</div>`:''}
-   <div class="ap-conf"><span>confidence</span><i style="--w:${conf}%"></i><b>${conf}%</b></div></section>
+   </section>
   <section class="wq-sec"><h4 class="wq-pk${Q.pick?'':' on'}" data-pk=""><span class="n">3</span>Answer <span class="sub">its whole part</span></h4>${body}
    ${a.sensitive?`<div class="ap-sens wq-pk${on('s')}" data-pk="s">⛔ <b>${a.sensitive.count}</b> entities derive from sensitive inputs: restrict or review before sharing. <span class="sub">show them</span></div>`:''}
    <div class="ap-stats"><span><b>${st.sources??'-'}</b> sources</span><span><b>${st.artifacts??'-'}</b> artifacts</span>${pro()?`<span><b>${st.records??'-'}</b> records read</span>`:''}</div></section>
@@ -571,9 +571,22 @@ function stepArgs(s){const a=s.args||{},r=s.resolved||{},bits=[];
  if(a.name)bits.push(a.name);if(a.activity)bits.push(`of ${a.activity}`);if(a.pid!=null)bits.push(`pid ${a.pid}`);if(a.from!=null)bits.push(`from [S${a.from+1}]`);if(a.direction)bits.push(a.direction==='back'?'backward (where it came from)':'forward (what it affected)');if(a.by)bits.push(`by ${a.by}`);
  const tm=r.time||r.produced;if(tm)bits.push(`time ${tm[0]} → ${tm[1]}${a.since||a.until||a.produced_since||a.produced_until?` (from “${[a.since||a.produced_since,a.until||a.produced_until].filter(Boolean).join(' / ')}”)`:''}`);
  return bits.join(' · ')}
-function synthHtml(t){return md(t||'').replace(/\[S(\d+)\]/g,(m,n)=>`<a href="#" class="scite" data-pk="s${n}">S${n}</a>`)}
+function synthHtml(t){return md(t||'').replace(/\[S(\d+)\]/g,(m,n)=>`<a href="#" class="scite" data-pk="s${n}" title="step ${n}: select it and its records on the graph">S${n}</a>`).replace(/\[R(\d+)\]/g,(m,n)=>`<a href="#" class="rcite" data-row="${n}" title="open row ${n} of the result table">R${n}</a>`)}
+// [R n]: open the result's details and show that row
+document.addEventListener('click',e=>{const a=e.target.closest&&e.target.closest('.rcite');if(!a)return;e.preventDefault();e.stopPropagation();
+ const d=document.querySelector('#wqpanel details[data-xp=result]');if(!d)return;d.open=true;XPOPEN.result=true;
+ const tr=d.querySelector(`table[data-anchor=result] tr[data-row="${a.dataset.row}"]`);if(!tr)return;tr.scrollIntoView({block:'center',behavior:'smooth'});
+ tr.classList.remove('flash');void tr.offsetWidth;tr.classList.add('flash')},true);
 // ---- an answer explained in four parts (the query_explain capability): summary first, details folded, one look per kind of block
-const XP={},XPOPEN={};
+const XP={},XPOPEN={},CF={};
+const CF_HOW={query:'TraceViewer query',derived:'derived from a step',narrative:'from the result',llm_verified:'query values, LLM wording',wording:'wording only (not counted)',llm_query:'agent query, LLM summary',llm:'value derived by the LLM',gap:'gap'};
+// the confidence capability's score: how much of the answer was calculated vs inferred, every LLM-inferred part flagged
+function cfHtml(c){if(!c||c.loading)return '<div class="cf sub">confidence: computing…</div>';if(c.error)return `<div class="cf sub">confidence: ${esc(c.error)}</div>`;
+ const tone=c.score>=90?'hi':c.score>=70?'mid':c.score>=40?'lo':'bad';
+ const rows=(c.items||[]).map(i=>`<tr class="${i.llm?'llm':''}"><td><span class="cf-how ${esc(i.how)}">${esc(CF_HOW[i.how]||i.how)}</span></td><td>${synthHtml(i.what||'')}${i.why?`<div class="sub">${esc(i.why)}</div>`:''}</td><td class="n">${i.weight??'–'}</td></tr>`).join('');
+ return `<details class="cf cf-${tone}" ontoggle="XPOPEN.conf=this.open" ${XPOPEN.conf?'open':''}><summary><span class="cf-score">${c.score}</span><span class="cf-main"><b>Confidence: ${esc(c.label)}</b>${c.llm_inferred?` <span class="cf-llm">${c.llm_inferred} with values derived by the LLM</span>`:''}<span class="cf-bar"><i style="width:${c.score}%"></i></span><span class="sub">${esc(c.summary)} ${esc(c.data||'')}</span></span></summary>
+  <div class="xp-tw"><table class="xp-t"><thead><tr><th>how it was obtained</th><th>part of the answer</th><th class="n">weight</th></tr></thead><tbody>${rows}</tbody></table></div><div class="sub">score = the weighted share of the parts × 100; halved when the traces no longer give the result</div></details>`}
+function cfOf(a){const k=a.id+':'+(a.result_hash||'')+':'+(a.synthesis||'').length+':'+(a.ts||'')+':'+(a.answer||'').length;if(!CF[k]){CF[k]={loading:1};api('api/workbench/confidence?pipeline='+encodeURIComponent(WB.sel.id)+'&id='+encodeURIComponent(a.id)).then(r=>{CF[k]=r||{error:'failed'};if(Q.sel===a.id)wbQPanel()})}return CF[k]}
 function xpVal(v){if(Array.isArray(v))return `<span class="xp-chips">${v.map(x=>`<span class="xp-chip${x==='…'?' more':''}">${esc(x)}</span>`).join('')}</span>`;
  const t=String(v??'');if(!t)return '<span class="sub">–</span>';
  const shown=/^\/|^[a-z]+:\/\//.test(t)?`<code>${esc(t)}</code>`:esc(t);
@@ -582,18 +595,20 @@ function xpBlock(b){const T=b.type;
  if(T==='text')return `<div class="xp-text">${synthHtml(b.text)}</div>`;
  if(T==='kv')return `<dl class="xp-kv">${(b.rows||[]).map(([k,v])=>`<dt>${esc(k)}</dt><dd>${xpVal(v)}</dd>`).join('')}</dl>`;
  if(T==='table'){const num=new Set(b.numeric||[]);
-  return `<div class="xp-tw"><table class="xp-t"><thead><tr>${b.columns.map((c,i)=>`<th class="${num.has(i)?'n':''}">${esc(c)}</th>`).join('')}</tr></thead><tbody>${(b.rows||[]).map(r=>`<tr>${r.map((c,i)=>`<td class="${num.has(i)?'n':''}">${xpVal(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>${b.total>(b.rows||[]).length?`<div class="sub">showing ${b.rows.length} of ${b.total}</div>`:''}`}
+  const an=b.anchor;
+  return `<div class="xp-tw"><table class="xp-t"${an?` data-anchor="${esc(an)}"`:''}><thead><tr>${an?'<th class="rn">#</th>':''}${b.columns.map((c,i)=>`<th class="${num.has(i)?'n':''}">${esc(c)}</th>`).join('')}</tr></thead><tbody>${(b.rows||[]).map((r,ri)=>`<tr${an?` data-row="${ri+1}"`:''}>${an?`<td class="rn">R${ri+1}</td>`:''}${r.map((c,i)=>`<td class="${num.has(i)?'n':''}">${xpVal(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>${b.total>(b.rows||[]).length?`<div class="sub">showing ${b.rows.length} of ${b.total}</div>`:''}`}
  if(T==='query')return `<div class="xp-q"><div class="xp-qh"><b>${esc(b.label||'')}</b> <span>${esc(b.why||'')}</span><span class="xp-meta">${esc(b.meta||'')}</span></div><pre><code>${esc(b.code||'')}</code></pre></div>`;
  if(T==='stats')return `<div class="xp-facts">${(b.items||[]).map(x=>`<span><b>${esc(x.value)}</b> ${esc(x.label)}</span>`).join('')}</div>`;
  if(T==='list')return `<ul class="xp-list">${(b.items||[]).map(x=>`<li>${synthHtml(x)}</li>`).join('')}</ul>`;
  if(T==='note')return `<div class="xp-note ${b.tone==='ok'?'ok':'warn'}">${b.tone==='ok'?'✓':'⚠'} ${esc(b.text||'')}</div>`;
  return `<pre>${esc(JSON.stringify(b))}</pre>`}
 const fmtFact=v=>typeof v==='number'?v.toLocaleString():esc(String(v));
-function xpPart(x,n,a){const groups=(x.details||[]).filter(g=>!(x.part==='answer'&&g.title==='Gaps'&&(a.gaps||[]).length)),k=x.part,open=XPOPEN[k];
+function xpPart(x,n,a,chk){const groups=(x.details||[]).filter(g=>!(x.part==='answer'&&g.title==='Gaps'&&(a.gaps||[]).length)),k=x.part,open=XPOPEN[k];
  const steps=k==='plan'?`<div class="xp-steps">${(a.steps||[]).map(s=>`<a href="#" class="xp-step${Q.pick==='s'+s.step?' on':''}" data-pk="s${s.step}" title="show S${s.step}'s records on the graph">S${s.step} ${esc(OPWORD[s.op]||s.op)}</a>`).join('')}</div>`:'';
  const head=k==='result'?`<h4 class="wq-pk${Q.pick?'':' on'}" data-pk="">`:'<h4>';
  return `<section class="wq-sec xp" data-part="${k}">${head}<span class="n">${n}</span>${esc(x.title||k)}</h4>
-  <p class="xp-sum">${synthHtml(x.summary||'')}</p>${(x.facts||[]).length?`<div class="xp-facts">${x.facts.map(f=>`<span><b>${fmtFact(f.value)}</b> ${esc(f.label)}</span>`).join('')}</div>`:''}${steps}
+  ${chk?(()=>{const pr=(chk.problems||[]).filter(x=>x!==chk.shared);return `<span class="xp-chk ${chk.status==='pass'?'ok':'bad'}" title="${esc(chk.data||'')}">${chk.status==='pass'?'✓ checked against the traces':pr.length?'⚠ '+pr.length+' problem'+(pr.length===1?'':'s')+' against the traces':'⚠ result changed: see above'}</span>`})():''}
+  <p class="xp-sum">${synthHtml(x.summary||'')}</p>${(x.body||[]).map(xpBlock).join('')}${chk&&(chk.problems||[]).filter(x=>x!==chk.shared).length?`<div class="xp-note warn">⚠ ${(chk.problems||[]).filter(x=>x!==chk.shared).slice(0,5).map(esc).join('<br>')}</div>`:''}${(x.facts||[]).length?`<div class="xp-facts">${x.facts.map(f=>`<span><b>${fmtFact(f.value)}</b> ${esc(f.label)}</span>`).join('')}</div>`:''}${steps}
   ${groups.length?`<details class="xp-more" data-xp="${k}" ${open?'open':''}><summary>details</summary>${groups.map(g=>`<div class="xp-g${g.pick&&Q.pick===g.pick?' on':''}"><div class="xp-gt${g.pick?' wq-pk':''}"${g.pick?` data-pk="${esc(g.pick)}" title="show these records on the graph"`:''}>${esc(g.title||'')}</div>${(g.blocks||[]).map(xpBlock).join('')}</div>`).join('')}</details>`:''}</section>`}
 function wbQPanelTV(p,a){const on=k=>Q.pick===k?' on':'',st=a.stats||{},sc=a.synthesis_check||{},pinned=WB.pins.includes(a.id),steps=a.steps||[],fixable=WB.sel.item.kind!=='analysis';
  const plan=steps.map(s=>`<li class="wq-pk${on('s'+s.step)}" data-pk="s${s.step}"><b>S${s.step}</b> ${esc(OPWORD[s.op]||s.op)} <span class="sub">${esc(stepArgs(s))}</span><div class="tv-hl">${esc(s.headline)}</div>
@@ -604,7 +619,7 @@ function wbQPanelTV(p,a){const on=k=>Q.pick===k?' on':'',st=a.stats||{},sc=a.syn
  const reads=(a.reads||[]).map(r=>`<tr><td>${esc(r.file)}</td><td>${fmtBytes(r.bytes)}</td><td><code>${esc(r.sha256_ends)}</code></td><td>${new Date(r.mtime*1000).toLocaleString()}</td></tr>`).join('');
  const qs=(a.queries||[]).map(q=>`<div class="tv-q"><b>Q${q.n}</b> <span class="sub">${esc(q.why)} · ${q.rows} row${q.rows===1?'':'s'} · ${q.secs}s</span><pre>${esc(q.query)}</pre></div>`).join('');
  const cites=steps.map(s=>`<details><summary>S${s.step}: ${s.cited} record${s.cited===1?'':'s'}</summary><table class="tv-t"><tr><th>record</th><th>file</th><th>pid</th><th>time</th><th>id</th></tr>${(s.cites||[]).slice(0,pro()?300:40).map(c=>`<tr><td>${esc(c.rec)}</td><td>${esc(c.file)}</td><td>${esc(c.pid)}</td><td>${c.ts?esc(isoUs(c.ts)):'-'}</td><td><code>${esc(c.id||'')}</code></td></tr>`).join('')}</table></details>`).join('');
- const key=a.id+':'+(a.result_hash||''),xp=XP[key];
+ const key=a.id+':'+(a.result_hash||'')+':'+(a.synthesis||'').length+':'+(a.ts||''),xp=XP[key];      // a write-up added later is a new explanation
  if(!xp){XP[key]={loading:true};api('api/workbench/explain?pipeline='+encodeURIComponent(WB.sel.id)+'&id='+encodeURIComponent(a.id)).then(r=>{XP[key]=r&&!r.error&&r.parts?r:{error:(r&&r.error)||'failed'};if(Q.sel===a.id)wbQPanel()})}
  const gapsHtml=`${(a.gaps||[]).length?`<section class="wq-sec tv-gaps"><h4><span class="n">!</span>Gaps <span class="sub">what the provenance could not show</span></h4>
    <ul>${a.gaps.map(g=>`<li><b>${esc(GAP_L[g.kind]||g.kind)}</b> <code>${esc(g.subject)}</code> <a href="#" class="scite" data-pk="s${g.step}">S${g.step}</a><div class="sub">${esc(g.detail)}</div>
@@ -612,7 +627,11 @@ function wbQPanelTV(p,a){const on=k=>Q.pick===k?' on':'',st=a.stats||{},sc=a.syn
    ${fixable&&a.gaps.length>1?`<button class="btn primary" data-gap="*">Improve coverage of all ${a.gaps.length} gaps</button>`:''}
    ${fixable?'':'<div class="sub">A dataset has no annotation here: improve it on the app that produced it.</div>'}</section>`:''}
 `;
- const secs=xp&&xp.parts?xp.parts.map((x,i)=>xpPart(x,i+1,a)+(x.part==='answer'?gapsHtml:'')).join(''):`  <section class="wq-sec"><h4><span class="n">1</span>Plan <span class="sub">select a step to see its records on the graph</span></h4><ol class="tv-plan">${plan}</ol></section>
+ const ck=(xp&&xp.checks)||{},fails=Object.values(ck).filter(c=>c.status!=='pass'),common=fails.length===4&&fails.every(c=>(c.problems||[])[0]===(fails[0].problems||[])[0])?fails[0].problems[0]:'',
+  notes=[...new Set(Object.values(ck).map(c=>c.note).filter(Boolean))];
+ if(common)Object.values(ck).forEach(c=>c.shared=common);
+ const banner=(common?`<div class="xp-note warn">⚠ ${esc(common)}</div>`:'')+notes.map(n=>`<div class="xp-note info">ℹ ${esc(n)}</div>`).join('');
+ const secs=xp&&xp.parts?cfHtml(xp.confidence)+banner+xp.parts.map((x,i)=>xpPart(x,i+1,a,ck[x.part])+(x.part==='answer'?gapsHtml:'')).join(''):`<div class="cf sub">checking the answer against the traces and scoring its confidence…</div>  <section class="wq-sec"><h4><span class="n">1</span>Plan <span class="sub">select a step to see its records on the graph</span></h4><ol class="tv-plan">${plan}</ol></section>
   <section class="wq-sec"><h4 class="wq-pk${Q.pick?'':' on'}" data-pk=""><span class="n">2</span>Result <span class="sub">computed, its whole part</span></h4><div class="tv-hl big">${esc(res.headline||'')}</div>${res.table?`<div class="ap-ans">${md(res.table)}</div>`:''}</section>
   <section class="wq-sec"><h4><span class="n">3</span>Answer <span class="sub">${a.synthesis?'written by the agent from the result; [S] cites a step':''}</span></h4>${syn}</section>
   ${(a.gaps||[]).length?`<section class="wq-sec tv-gaps"><h4><span class="n">!</span>Gaps <span class="sub">what the provenance could not show</span></h4>

@@ -26,6 +26,8 @@ READ_LIMIT = 8 << 20
 def expand(traces: str) -> List[str]:
     """A directory, a glob or a file -> the .pfw/.pfw.gz files in it (spill files are traces too)."""
     t = os.path.expanduser(traces)
+    if os.pathsep in t and not os.path.exists(t):        # several paths: the exact files an answer read
+        return sorted({f for part in t.split(os.pathsep) if part for f in expand(part)})
     if os.path.isdir(t):
         return sorted(glob.glob(os.path.join(t, "**", "*.pfw*"), recursive=True))
     return sorted(glob.glob(t, recursive=True))

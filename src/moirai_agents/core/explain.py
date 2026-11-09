@@ -45,7 +45,8 @@ def fmt_num(x: Any) -> str:
     if isinstance(x, bool) or not isinstance(x, (int, float)):
         return str(x)
     if is_epoch_s(x):
-        return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(x)) + " UTC"
+        ms = f".{int(round((x % 1) * 1000)) % 1000:03d}" if isinstance(x, float) and x % 1 else ""     # runs a moment apart stay apart
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(x)) + ms + " UTC"
     if 1.0e15 <= x <= 2.2e15:
         return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(x / 1e6)) + f".{int(x % 1e6):06d} UTC"
     if isinstance(x, int) or float(x).is_integer():
@@ -182,7 +183,7 @@ def check(p: Dict[str, Any], answer: Dict[str, Any], name: str = "") -> List[str
     if "|" in s and "---" in s:
         bad.append("summary: a table belongs in details, as a table block")
     known = known_numbers(answer)
-    for n in _numbers(s) + [str(f.get("value")) for f in p.get("facts") or [] if isinstance(f.get("value"), (int, float))]:
+    for n in _numbers(re.sub(r"`[^`]*`|\[[RS]\d+\]", "", s)) + [str(f.get("value")) for f in p.get("facts") or [] if isinstance(f.get("value"), (int, float))]:
         if n.replace(",", "") not in known and not re.fullmatch(r"[0-9]", n):
             bad.append(f"summary/facts: {n} is neither in the answer nor a count of it")
     if len(p.get("facts") or []) > 4:
@@ -199,3 +200,130 @@ def check(p: Dict[str, Any], answer: Dict[str, Any], name: str = "") -> List[str
             elif b["type"] == "text" and re.search(r"^\|.*\|\s*$", b["text"], re.M):
                 bad.append(f"details {d.get('title')!r}: a markdown table in a text block: make it a table block")
     return bad
+
+
+# ------------------------------------------------------------------------------------------------ checked against the traces
+
+_FRESH: Dict[Any, Any] = {}
+FRESH_S = 120
+
+
+def load_answer(pipeline: str, answer_id: str) -> Dict[str, Any]:
+    from . import answers as A
+    rec = next((a for a in A.listing(pipeline, limit=10 ** 6) if a.get("id") == answer_id), None)
+    if not rec:
+        raise ValueError(f"no answer {answer_id} on {pipeline}")
+    return rec
+
+
+def source_of(pipeline: str, answer: Dict[str, Any]) -> Dict[str, Any]:
+    """Which traces to check an answer against: the files it was computed on, when they all still exist (an answer about an earlier
+    baseline is checked against that baseline, not the newest one); otherwise the pipeline's traces now. {traces, own, current, newer}."""
+    import os
+    from . import answers as A, pipeline as P
+    current = A.traces_of(P.load(pipeline)) or ""
+    paths = [r.get("path") for r in answer.get("reads") or [] if r.get("path")]
+    own = bool(paths) and all(os.path.exists(x) for x in paths)
+    now = set(provtrace_files(current))
+    newer = bool(paths) and bool(now) and not set(paths) <= now
+    return {"traces": os.pathsep.join(paths) if own else current, "own": own, "current": current, "newer": newer}
+
+
+def provtrace_files(traces: str) -> List[str]:
+    from . import provtrace as T
+    return T.expand(traces) if traces else []
+
+
+def fresh(pipeline: str, answer: Dict[str, Any]) -> Dict[str, Any]:
+    """The answer's plan run again with TraceViewer on the traces it was computed on (kept for FRESH_S seconds, so the four parts'
+    validators share one run): {result_hash, steps, result, reads, queries, stats, source}."""
+    from . import evidence as EV
+    src = source_of(pipeline, answer)
+    if not src["traces"]:
+        raise ValueError(f"{pipeline} has no traces to check against")
+    key = (pipeline, answer.get("id"), answer.get("result_hash"), src["traces"])
+    hit = _FRESH.get(key)
+    if hit and time.time() - hit[0] < FRESH_S:
+        return hit[1]
+    r = EV.run(src["traces"], (answer.get("plan") or {}).get("steps") or [], EV.index_dir_of(pipeline))
+    last = r["steps"][-1] if r["steps"] else {}
+    out = {"result_hash": r["result_hash"], "steps": r["steps"], "result": {"headline": last.get("headline", ""), "table": last.get("table", "")},
+           "reads": r["reads"], "queries": r["queries"], "stats": r["stats"], "source": src}
+    _FRESH[key] = (time.time(), out)
+    return out
+
+
+def against(pipeline: str, answer: Optional[Dict[str, Any]], answer_id: str, part_check) -> Dict[str, Any]:
+    """Run a part's validator: the explanation's shape and numbers against the answer record, and - with a pipeline - every claim against the
+    traces the answer was computed on (its plan run again). part_check(answer, fresh_or_None) -> problems. When the traces no longer give the
+    answer's result, that one finding is reported, not every row it touches. Returns {status, problems, data, note}."""
+    a = answer if answer else load_answer(pipeline, answer_id)
+    if not pipeline:
+        bad = part_check(a, None)
+        return {"status": "fail" if bad else "pass", "problems": bad, "data": "not checked against the traces: give pipeline (and answer_id)", "note": ""}
+    try:
+        f = fresh(pipeline, a)
+    except Exception as e:                                # noqa: BLE001 - a check that cannot run is a failed check, said why
+        return {"status": "fail", "problems": [f"could not check against the traces: {e}"], "data": "not checked", "note": ""}
+    src = f["source"]
+    files = ", ".join(sorted({r.get("file", "") for r in f["reads"]}))
+    mine = ", ".join(sorted({r.get("file", "") for r in a.get("reads") or []}))
+    note = (f"Computed on {mine}, an earlier run than the app's traces now: ask again to answer about the current run."
+            if src["newer"] and src["own"] else "")
+    reordered = f["result_hash"] != a.get("result_hash") and same_result(a, f)
+    if reordered:                                         # the same records and values, listed in another order: the record stands
+        note = (note + " " if note else "") + "The traces give the same records and values, listed in another order."
+        bad = part_check(a, None)
+    elif f["result_hash"] != a.get("result_hash"):
+        bad = part_check(a, None)                         # the record itself still has to hold; row-by-row against changed traces says nothing new
+        gone = missing_files(a)
+        bad.insert(0, (f"the traces it was computed on ({', '.join(gone)}) are gone; the app's traces now ({files}) give another result. Ask the question again."
+                       if gone else f"the traces ({files}) no longer give this result: {a.get('result_hash')} then, {f['result_hash']} now. Ask the question again."))
+    else:
+        bad = part_check(a, f)
+    data = (f"checked against {'the traces it was computed on' if src['own'] else 'the app traces now'} ({files}): the plan ran again, "
+            f"{plural(len(f['queries']), 'TraceViewer query', 'TraceViewer queries')}, {plural(int(f['stats'].get('rows_read') or 0), 'record')} read")
+    return {"status": "fail" if bad else "pass", "problems": bad, "data": data, "note": note}
+
+
+def missing_files(answer: Dict[str, Any]) -> List[str]:
+    import os
+    return [r.get("file", "") for r in answer.get("reads") or [] if r.get("path") and not os.path.exists(r["path"])]
+
+
+def _tokens(s: str) -> List[str]:
+    return sorted(t for t in re.split(r"[\s|;,=]+", (s or "").replace("\\|", "|")) if t and t not in ("…", "...", "---"))
+
+
+def same_result(answer: Dict[str, Any], f: Dict[str, Any]) -> bool:
+    """The traces give the same result as the answer, up to order: per step the same values (as a multiset of tokens), or - when a long
+    list was cut to its first values - the same records cited and the same counts."""
+    old, new = answer.get("steps") or [], f.get("steps") or []
+    if len(old) != len(new):
+        return False
+    key = lambda c: (c.get("file"), c.get("pid"), c.get("ts"), c.get("id"))       # noqa: E731
+    for o, n in zip(old, new):
+        if _tokens(o.get("headline", "") + " " + o.get("table", "")) == _tokens(n.get("headline", "") + " " + n.get("table", "")):
+            continue
+        if (int(o.get("cited") or 0) == int(n.get("cited") or 0) and int(o.get("cited") or 0) <= len(o.get("cites") or [])
+                and {key(c) for c in o.get("cites") or []} == {key(c) for c in n.get("cites") or []}
+                and re.split(r";\s|:\s", o.get("headline", ""), maxsplit=1)[0] == re.split(r";\s|:\s", n.get("headline", ""), maxsplit=1)[0]):
+            continue
+        return False
+    return True
+
+
+def cell_text(c: Any) -> str:
+    return " | ".join(map(str, c)) if isinstance(c, list) else str(c)
+
+
+def claims(text: str) -> List[Any]:
+    """The claims of a narrative: (quoted values, [R n] rows, [S n] steps) per clause - a clause ends at a link or at ; . : boundaries."""
+    out = []
+    for clause in re.split(r"(?<=\])[;,.]?\s+|;\s+", text or ""):
+        rows = [int(n) for n in re.findall(r"\[R(\d+)\]", clause)]
+        steps = [int(n) for n in re.findall(r"\[S(\d+)\]", clause)]
+        vals = [(v[2:] if v.startswith("…/") else v).rstrip("…") for v in re.findall(r"`([^`]*)`", clause)]
+        if (rows or steps) and vals:
+            out.append((vals, rows, steps))
+    return out

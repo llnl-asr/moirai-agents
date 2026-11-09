@@ -60,12 +60,29 @@ def register(mcp):
         return explain(answer)
 
     @mcp.tool()
-    def explain_evidence_check(answer: dict) -> dict:
-        """Validator: the evidence explanation is well formed, its numbers come from the answer, and every query and file read is listed.
-        Returns {status: pass|fail, problems}."""
-        p = explain(answer)
-        bad = X.check(p, answer, "evidence")
-        nq = sum(1 for d in p["details"] for b in d["blocks"] if b.get("type") == "query")
-        if nq != len(answer.get("queries") or []):
-            bad.append(f"details: {nq} query blocks for {len(answer.get('queries') or [])} queries")
-        return {"status": "fail" if bad else "pass", "problems": bad}
+    def explain_evidence_check(answer: dict = None, pipeline: str = "", answer_id: str = "") -> dict:
+        """Validator: the evidence explanation is well formed and lists every query and file, and - against the traces - the files read are
+        the same files (sha256 of their ends), the same number of records is read and the same records are cited.
+        Give pipeline and answer_id (or answer and pipeline) to check against the traces: the plan runs again with TraceViewer and the files, records read and records cited are compared.
+        Without a pipeline only the record is checked. Returns {status: pass|fail, problems, data: what was checked against}."""
+        def part_check(a, f):
+            p = explain(a)
+            bad = X.check(p, a, "evidence")
+            nq = sum(1 for d in p["details"] for b in d["blocks"] if b.get("type") == "query")
+            if nq != len(a.get("queries") or []):
+                bad.append(f"details: {nq} query blocks for {len(a.get('queries') or [])} queries")
+            if f:
+                now = {r.get("file"): r.get("sha256_ends") for r in f["reads"]}
+                for r in a.get("reads") or []:
+                    if r.get("file") not in now:
+                        bad.append(f"{r.get('file')} is no longer read")
+                    elif now[r["file"]] != r.get("sha256_ends"):
+                        bad.append(f"{r.get('file')} changed since (sha256 of its ends {r.get('sha256_ends')} then, {now[r['file']]} now)")
+                if int((a.get("stats") or {}).get("rows_read") or 0) != int(f["stats"].get("rows_read") or 0):
+                    bad.append(f"{f['stats'].get('rows_read')} records read now, {(a.get('stats') or {}).get('rows_read')} said")
+                for old, new in zip(a.get("steps") or [], f["steps"]):
+                    key = lambda c: (c.get("file"), c.get("pid"), c.get("ts"), c.get("id"))      # noqa: E731
+                    if sorted(map(key, old.get("cites") or []), key=str) != sorted(map(key, new.get("cites") or []), key=str):
+                        bad.append(f"S{old.get('step')}: the records it cites are not the ones the traces give now")
+            return bad
+        return X.against(pipeline, answer, answer_id, part_check)

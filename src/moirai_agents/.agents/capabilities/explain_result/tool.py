@@ -60,6 +60,7 @@ def explain(answer: dict) -> dict:
         facts.append({"label": noun if t["total"] == 1 or noun.endswith("s") else noun + "s", "value": t["total"]})
         if info["varied"]:
             facts.append({"label": "differ between runs", "value": len(info["varied"])})
+        t["anchor"] = "result"                     # its rows are R1, R2, ...: the answer links them
         details.append({"title": "The result", "blocks": [t] + ([X.block("note", tone="warn", text=f"showing {len(t['rows'])} of {X.fmt_num(t['total'])} rows")]
                                                                if t["total"] > len(t["rows"]) else [])})
     if head and not t:
@@ -83,11 +84,31 @@ def register(mcp):
         return explain(answer)
 
     @mcp.tool()
-    def explain_result_check(answer: dict) -> dict:
-        """Validator: the result explanation is well formed, its numbers come from the answer, and a result with a table is shown as a
-        table block, never as markdown text. Returns {status: pass|fail, problems}."""
-        p = explain(answer)
-        bad = X.check(p, answer, "result")
-        if X.md_table((answer.get("result") or {}).get("table") or "") and not any(b.get("type") == "table" for d in p["details"] for b in d["blocks"]):
-            bad.append("details: the result table must be a table block")
-        return {"status": "fail" if bad else "pass", "problems": bad}
+    def explain_result_check(answer: dict = None, pipeline: str = "", answer_id: str = "") -> dict:
+        """Validator: the result explanation is well formed (summary from the answer, the result as a table block) and - against the traces -
+        the result table is the one the traces give, and every value the explanation shows is in it.
+        Give pipeline and answer_id (or answer and pipeline) to check against the traces: the plan runs again with TraceViewer and every row and value shown is looked up in the result it computes.
+        Without a pipeline only the record is checked. Returns {status: pass|fail, problems, data: what was checked against}."""
+        def part_check(a, f):
+            p = explain(a)
+            bad = X.check(p, a, "result")
+            if X.md_table((a.get("result") or {}).get("table") or "") and not any(b.get("type") == "table" for d in p["details"] for b in d["blocks"]):
+                bad.append("details: the result table must be a table block")
+            if f:
+                if (f["result"].get("table") or "") != ((a.get("result") or {}).get("table") or ""):
+                    bad.append("the result table the traces give now differs from the one explained")
+                ft = X.md_table(f["result"].get("table") or "")
+                shown = next((b for d in p["details"] if d.get("title") == "The result" for b in d["blocks"] if b.get("type") == "table"), None)
+                if shown and ft:
+                    for i, row in enumerate(shown["rows"]):
+                        truth = " | ".join(X.cell_text(c) for c in (ft["rows"][i] if i < len(ft["rows"]) else []))
+                        truth += " " + " ".join(X.fmt_value(v) for c in (ft["rows"][i] if i < len(ft["rows"]) else []) for v in X.split_values(X.cell_text(c)))
+                        for c in row:
+                            for v in (c if isinstance(c, list) else [c]):
+                                if v not in ("…", "", "-") and str(v) not in truth:
+                                    bad.append(f"row {i + 1}: {X.clip(v, 60)!r} is not in the traces' result")
+                                    break
+                if not X.check({**p, "details": []}, f, "result") == []:
+                    bad += [x.replace("in the answer", "in the traces' result") for x in X.check({**p, "details": []}, f, "result")]
+            return bad
+        return X.against(pipeline, answer, answer_id, part_check)

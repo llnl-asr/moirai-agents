@@ -354,7 +354,8 @@ def _captured(s, k, v, cat, outs, ctx, suffix, relation):
     rows = v.q(f"step {k + 1}: the {suffix} values of those {len(acts)} {name} run(s)",
                f'.filter(col("name") == "EH" & col("args.type") == {et!r} & col("args.id").is_in(<{len(ids)} ids>))', build)
     vals = {str(r["args.id"]): kv(r.get("args.uri", "")) for r in rows if r.get("args.id")}
-    runs = [{"activity": a["id"], "pid": a["pid"], "ts": a["ts"], "pairs": [p for x in a[relation] for p in vals.get(x, [])], "ref": a["ref"]} for a in acts]
+    runs = [{"activity": a["id"], "pid": a["pid"], "ts": a["ts"], "pairs": [p for x in a[relation] for p in vals.get(x, [])], "ref": a["ref"]}
+            for a in sorted(acts, key=lambda a: (a.get("ts") or 0, str(a.get("pid")), a["id"]))]       # one order every time: same result, same hash
     return {"kind": suffix, "activity": name, "runs": runs, "ids": sorted(vals),
             "resolved": {"activity": name, "time": sub["resolved"]["time"]}, "cites": ([a["ref"] for a in acts] + [_ref(r) for r in rows])[:MAX_CITE]}
 
@@ -380,7 +381,7 @@ def _attributes(s, k, v, cat, outs, ctx):
     for r in rows:
         if ends(str(r.get("args.type", "")), ".attribute") and kv(r.get("args.uri", "")):
             by.setdefault(of.get(str(r["args.id"]), "?"), []).extend(kv(r["args.uri"]))
-    runs = [{"entity": e, "pairs": p} for e, p in by.items()]
+    runs = [{"entity": e, "pairs": sorted(p)} for e, p in sorted(by.items())]                              # one order every time
     return {"kind": "attribute", "runs": runs, "ids": sorted(by), "cites": ([_ref(r) for r in rel] + [_ref(r) for r in rows])[:MAX_CITE]}
 
 
