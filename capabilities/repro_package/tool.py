@@ -123,7 +123,9 @@ log "done: $OUTPUT_ROOT/run.json"
 CHECK = r'''#!/usr/bin/env python3
 """Standalone provenance check: python stdlib only. It needs nothing from the tools that made this package.
     prov_check.py <trace dir> <spec.json> <expected.json> <scale> <run.json>
-Fails on no trace, a dangling id, an undescribed type, an artifact type with no producer, or counts that differ from the original run."""
+Fails on no trace, a dangling id, an undescribed type, an artifact type with no producer, a different number of activities than the original run, or an entity type of the original run
+that is missing (extra types are allowed). Entity and edge counts must equal the original run only when expected.json has no entity types (an old build); when the run captured inputs or
+attributes (an expected type name ends with .input or .attribute) those counts depend on the run, so they are reported with a note and never fail."""
 import glob, gzip, json, os, sys
 traces, spec, expected, scale, out = sys.argv[1:6]
 spec, expected = json.load(open(spec)), json.load(open(expected)).get(scale)
@@ -159,10 +161,18 @@ if dangling:
 fails += [f"type {t} has no description" for t in sorted(seen) if not types.get(t)]
 fails += [f"artifact type {t} was not produced" for t in spec.get("scientific_artifacts", []) if t not in made]
 got = {"activities": acts, "entities": len(ents), "edges": len(edges)}
+exp_types = sorted((expected or {}).get("types") or [])
+run_dependent = any(str(t).endswith((".input", ".attribute")) for t in exp_types)
+note = ""
 if expected:
-    fails += [f"{k}: {got[k]}, the original run had {expected[k]}" for k in got if got[k] != expected.get(k)]
-json.dump({"scale": scale, "counts": got, "expected": expected, "failures": fails, "ok": not fails}, open(out, "w"), indent=1)
-print(json.dumps({"counts": got, "failures": fails}))
+    fails += [f"entity type {t} was not seen, the original run had it" for t in exp_types if t not in seen]
+    keys = ["activities"] if run_dependent else list(got)
+    fails += [f"{k}: {got[k]}, the original run had {expected.get(k)}" for k in keys if got[k] != expected.get(k)]
+    if run_dependent:
+        note = (f"entities {got['entities']} (original run {expected.get('entities')}) and edges {got['edges']} (original run {expected.get('edges')}) are informational: "
+                "the run captures inputs and attributes, so their number depends on the run; activities, entity types and dangling ids are checked")
+json.dump({"scale": scale, "counts": got, "expected": expected, "note": note, "failures": fails, "ok": not fails}, open(out, "w"), indent=1)
+print(json.dumps({"counts": got, "note": note, "failures": fails}))
 sys.exit(1 if fails else 0)
 '''
 
@@ -1058,6 +1068,97 @@ def publish_selftest():
     return {"status": "ok" if not bad else "error", "line": line, "cases": cases}
 
 
+# ------------------------------------------------------------------ what a run is expected to reproduce
+def ref_expected(g):
+    """Pure: the reference of one scale for expected.json, from a trace reader Graph: the three counts and the sorted list of entity TYPES seen (same source as the counts)."""
+    c = g.counts()
+    out = {k: c[k] for k in ("activities", "entities", "edges")}
+    out["types"] = sorted({e.get("type") for e in g.entities.values() if e.get("type")})
+    return out
+
+
+def run_dependent(expected):
+    """Pure: True when the expected types show that the run captured inputs or attributes (a type name ends with '.input' or '.attribute'), so entity and edge counts vary from run to run."""
+    return any(str(t).endswith((".input", ".attribute")) for t in ((expected or {}).get("types") or []))
+
+
+def judge_record(rj):
+    """Pure: (failures, ok) of a package run.json for the verification record. ok = no failures. When the expected types show run-dependent values, 'entities:' and 'edges:' count
+    differences (from an older prov_check.py) are not failures."""
+    fails = list((rj or {}).get("failures") or [])
+    if run_dependent((rj or {}).get("expected")):
+        fails = [f for f in fails if not re.match(r"\s*(entities|edges):", str(f))]
+        return fails, ("failures" in rj) and not fails
+    return fails, bool((rj or {}).get("ok"))
+
+
+def check_selftest():
+    """Sandbox: the generated prov_check.py on traces made here, and the pure helpers. Nothing touches a cluster."""
+    import gzip
+    from types import SimpleNamespace
+    cases = {}
+    ref = {"activities": 2, "entities": 3, "edges": 4}
+    base_types = ("out", "x.input")
+    with tempfile.TemporaryDirectory(prefix="repro_check_selftest_") as td:
+        td = Path(td)
+        (td / "check.py").write_text(CHECK)
+        (td / "spec.json").write_text(json.dumps({"scientific_artifacts": []}))
+
+        def traces(name, n_in, acts=2, types=base_types):
+            d = td / name
+            d.mkdir()
+            recs = [{"name": "ET", "cat": "moirai", "ph": "M", "args": {"type": t, "description": "d " + t}} for t in types]
+            ids = []
+            for t in types:
+                for k in ([0] if t == "out" else range(n_in)):
+                    ids.append((f"{t}-{k}", t))
+            recs += [{"name": "EH", "cat": "moirai", "ph": "M", "args": {"id": i, "type": t}} for i, t in ids]
+            outs = [i for i, t in ids if t == "out"]
+            ins = [i for i, t in ids if t != "out"]
+            for a in range(acts):
+                rel = {"generated": outs, "used": ins} if a == 0 else {"used": outs}
+                recs.append({"name": "act", "cat": "moirai", "ph": "X", "args": {"relations": {k: v for k, v in rel.items() if v}}})
+            with gzip.open(d / "p0.pfw.gz", "wt") as fh:
+                fh.write("[\n" + "\n".join(json.dumps(r) + "," for r in recs) + "\n")
+            return d
+
+        def run(d, exp):
+            (td / "expected.json").write_text(json.dumps({"smoke": exp} if exp is not None else {}))
+            o = td / "out.json"
+            o.unlink(missing_ok=True)
+            r = subprocess.run([sys.executable, str(td / "check.py"), str(d), str(td / "spec.json"), str(td / "expected.json"), "smoke", str(o)], capture_output=True, text=True)
+            return r.returncode, (json.loads(o.read_text()) if o.exists() else {})
+        typed = {**ref, "types": sorted(base_types)}
+        rc1, o1 = run(traces("a", 2), typed)
+        cases["reference_passes"] = rc1 == 0 and o1["counts"] == ref
+        rc2, o2 = run(traces("b", 9), typed)
+        cases["same_types_other_counts_pass"] = rc2 == 0 and o2["counts"]["entities"] != ref["entities"] and o2["counts"]["edges"] != ref["edges"] and o2["failures"] == [] and "informational" in o2["note"]
+        cases["counts_reported_not_failed"] = o2["expected"]["entities"] == 3 and o2["counts"]["entities"] == 10 and not any(f.startswith(("entities", "edges")) for f in o2["failures"])
+        rc3, o3 = run(traces("c", 2, types=base_types + ("y.attribute",)), typed)
+        cases["extra_type_allowed"] = rc3 == 0
+        rc4, o4 = run(traces("d", 2, types=("out",)), typed)
+        cases["missing_type_fails"] = rc4 == 1 and any("x.input" in f for f in o4["failures"])
+        rc5, o5 = run(traces("e", 2, acts=3), typed)
+        cases["activity_count_fails"] = rc5 == 1 and any(f.startswith("activities") for f in o5["failures"])
+        rc6, o6 = run(traces("f", 9), dict(ref))
+        cases["no_types_keeps_exact_counts"] = rc6 == 1 and any(f.startswith("entities") for f in o6["failures"])
+        plain = {**ref, "types": ["out", "seq"]}
+        rc7, o7 = run(traces("g", 9, types=("out", "seq")), plain)
+        rc8, o8 = run(traces("h", 2, types=("out", "seq")), plain)
+        cases["non_input_types_keep_exact_counts"] = rc7 == 1 and any(f.startswith("entities") for f in o7["failures"]) and rc8 == 0
+        rc9, o9 = run(traces("i", 2, acts=0), typed)
+        cases["no_provenance_fails"] = rc9 == 1
+    g = SimpleNamespace(counts=lambda: {"activities": 5, "entities": 3, "edges": 7, "relations": 0}, entities={"a": {"type": "t.input"}, "b": {"type": "out"}, "c": {"type": "out"}})
+    cases["ref_expected_has_types"] = ref_expected(g) == {"activities": 5, "entities": 3, "edges": 7, "types": ["out", "t.input"]}
+    old = {"expected": {"types": ["a.input", "b"]}, "failures": ["entities: 9, the original run had 3", "edges: 1, the original run had 2"], "ok": False}
+    cases["record_ok_without_count_failures"] = judge_record(old) == ([], True)
+    cases["record_fails_on_activities"] = judge_record({**old, "failures": old["failures"] + ["activities: 3, the original run had 2"]})[1] is False
+    cases["record_keeps_exact_without_types"] = judge_record({"expected": {"entities": 3}, "failures": ["entities: 9, the original run had 3"], "ok": False}) == (["entities: 9, the original run had 3"], False)
+    cases["record_empty_is_not_ok"] = judge_record({})[1] is False
+    line = "repro check selftest PASS " + " ".join(f"{k}=ok" for k in cases) if all(cases.values()) else "repro check selftest FAIL " + ",".join(k for k, v in cases.items() if not v)
+    return {"status": "ok" if all(cases.values()) else "error", "line": line, "cases": cases}
+
+
 def _verification_record(pipeline):
     """Write <OUTPUT_ROOT>/verification.json once the in-place job has finished. Returns {status, ...}; status 'running' while it runs."""
     c = P.load(pipeline)
@@ -1082,9 +1183,10 @@ def _verification_record(pipeline):
         start = rsh.stat().st_mtime if rsh.exists() else time.time()
         src = "mtime of run.sh (flux unavailable)"
     now = tree_hashes(pkg)
+    fails, run_ok = judge_record(rj)
     rec = {"kind": "verification", "in_place": True, "package": "provenance-repro", "scale": vf["scale"], "job": vf["job"], "flux_job": flux, "job_start": _stamp(start), "job_start_source": src,
-           "seconds": float(secs) if secs else j.get("elapsed"), "exit_codes": {"run_all": j["rc"]}, "counts": rj.get("counts"), "expected": rj.get("expected"), "failures": rj.get("failures"),
-           "ok": bool(rj.get("ok")) and j["rc"] == 0, "overrides": vf.get("overrides", {}), "not_exercised": vf.get("not_exercised", []), "package_hashes_before": vf.get("hashes_before"),
+           "seconds": float(secs) if secs else j.get("elapsed"), "exit_codes": {"run_all": j["rc"]}, "counts": rj.get("counts"), "expected": rj.get("expected"), "note": rj.get("note", ""), "failures": fails,
+           "ok": run_ok and j["rc"] == 0, "overrides": vf.get("overrides", {}), "not_exercised": vf.get("not_exercised", []), "package_hashes_before": vf.get("hashes_before"),
            "package_hashes": now, "package_unchanged": now == vf.get("hashes_before"), "login_shell": "env -i bash -l"}
     rec["ok"] = rec["ok"] and rec["package_unchanged"]
     (out / "verification.json").write_text(json.dumps(rec, indent=2))
@@ -1098,7 +1200,9 @@ def register(mcp):
         """Generate final_provenance/ in the session: config.ini, scripts, the provenance patch, the spec, pinned versions and a standalone checker. Use after the graph stage, or again after
         a fix: it starts over. output_root: where a reader's run writes; keep ${USER} or ${HOME}, never a literal name. mode: '' detects it (batch when the moirai_smoke or baseline stage ran a
         generated flux batch run.sh: its outputs hold batch_script or submit_command), 'batch' or 'generic' forces it. Batch mode writes a per-chunk wrapper template, a run.sh generator call, a
-        flux batch with a wait and failure checks, and never starts a service on the login node. Returns {status, package, mode, files, source, pins, warnings}."""
+        flux batch with a wait and failure checks, and never starts a service on the login node. inputs/expected.json holds, for the smoke and baseline traces, the activity, entity and edge
+        counts and the sorted entity types (from the trace reader); the checker requires equal activities and every type, and counts entities and edges only when the run captures no inputs or attributes.
+        Returns {status, package, mode, files, source, pins, warnings}."""
         c = P.load(pipeline)
         integ, ann, base = P.stage(c, "integrate")["outputs"], P.stage(c, "annotate")["outputs"], P.stage(c, "baseline")["outputs"]
         smoke_run = P.stage(c, "moirai_smoke")["outputs"]
@@ -1114,9 +1218,9 @@ def register(mcp):
         warnings = []
         (pkg / "patches" / "provenance.patch").write_text(_patch(src, dst, list(ann["files"]) + (["_moirai_prov.py"] if (dst / "_moirai_prov.py").exists() else [])))
         (pkg / "inputs" / "spec.json").write_text(json.dumps(ann["spec"], indent=1))
-        expected = {"smoke": {k: v for k, v in T.read(smoke_run["traces"]).counts().items() if k in ("activities", "entities", "edges")}}
+        expected = {"smoke": ref_expected(T.read(smoke_run["traces"]))}
         if base.get("traces"):
-            expected["baseline"] = {k: v for k, v in T.read(base["traces"]).counts().items() if k in ("activities", "entities", "edges")}
+            expected["baseline"] = ref_expected(T.read(base["traces"]))
         (pkg / "inputs" / "expected.json").write_text(json.dumps(expected, indent=1))
         url, ref = "", ""
         if re.match(r"^(https?://|git@|ssh://)", c["source"]):
@@ -1177,7 +1281,8 @@ bash -l scripts/run_all.sh    # a login shell: it needs the `module` command and
 
 Smoke = the first `SMOKE_LINES` lines of the first chunk of `INCHUNKS`; baseline = all of `INCHUNKS`. Each takes about 8 minutes, dominated by a ~270 s dbcast broadcast (`mpifileutils`).
 `04_run.sh` submits the batch job, waits with `flux watch`, then `scripts/check_batch.py` fails the run when the batch `--output` file holds `exited with exit code <non-zero>` or a line ending
-` failed` (a batch job's own return code does not reflect its chunk jobs), or when `hosts.txt` is empty. `scripts/prov_check.py` then compares the counts with `inputs/expected.json`.
+` failed` (a batch job's own return code does not reflect its chunk jobs), or when `hosts.txt` is empty. `scripts/prov_check.py` then compares the run with `inputs/expected.json`: the number of
+activities and the entity types must match; when the run captures inputs and attributes the entity and edge counts depend on the run and are only reported.
 
 ## The two environments
 
@@ -1209,6 +1314,7 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
 ```
 
 `scripts/run_all.sh` runs the numbered scripts in order, and each can be run alone. The result is judged by `scripts/prov_check.py`, which needs only Python, and written to `$OUTPUT_ROOT/run.json`.
+The number of activities and the entity types must match `inputs/expected.json`; when the run captures inputs and attributes the entity and edge counts depend on the run and are only reported.
 
 | Script | Does |
 |---|---|
@@ -1231,7 +1337,8 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
         Copy mode: isolation_root, a parent folder outside the session on a file system compute nodes can see; the package is copied to a new folder there. In-place mode (in_place = the
         published package folder, e.g. <publish_root>/provenance-repro/<app>): the package is run AS IT IS, no copy; only HOME, USER, TERM and SCALE are passed, plus the venv/limit overrides
         you give (they are written into the record). Its trace output goes to the package's own OUTPUT_ROOT (config.ini). When the job has finished a verification record
-        <OUTPUT_ROOT>/verification.json is written (job ids, scale, seconds, counts vs expected.json, exit codes, the package's file hashes before and after, whether unchanged); call again
+        <OUTPUT_ROOT>/verification.json is written (job ids, scale, seconds, counts vs expected.json, exit codes, the package's file hashes before and after, whether unchanged); its ok means no
+        failures, and entity/edge count differences are never failures when expected.json shows the run captures inputs or attributes (activities, entity types and dangling ids decide). Call again
         with the same in_place after a timeout to complete the record. scale: smoke or baseline. reuse_venv: a venv to reuse instead of building one (batch mode: the app's own venv).
         moirai_venv: batch mode only, the moirai venv to reuse (needed with reuse_venv). limit: seconds for the whole run; in batch mode the flux batch time limit is derived from it.
         wait: seconds to wait now; the run goes on in the background (a batch run takes ~8 min) and repro_validate judges it later. Batch mode never starts a service on the login node.
@@ -1311,7 +1418,8 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
     @mcp.tool()
     def repro_validate(pipeline: str) -> dict:
         """Validate the package: it holds no user, workspace or job path, its scripts parse and source the loader, a batch package starts no service in 04_run.sh, and an isolated run passed with the
-        original counts. When the package was published (repro_publish_package recorded publish_root) the published tree is checked too, as repro_publish_validate does (group moirai).
+        original activities and entity types (entity and edge counts only when the run captures no inputs or attributes). When the package was published (repro_publish_package recorded
+        publish_root) the published tree is checked too, as repro_publish_validate does (group moirai).
         Use before the last gate. Returns the verdict {status, failed, unknown, passed, total}."""
         c = P.load(pipeline)
         o = P.stage(c, STAGE)["outputs"]
@@ -1336,7 +1444,8 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
             return P.finish_validation(pipeline, v)
         v.check("isolated_run", j["rc"] == 0, f"rc={j['rc']}: {j.get('log_tail', '')[-300:]}", "read the log: something the session provided is missing from the package")
         run = (Path(vf["output_root"]) if vf.get("in_place") else Path(vf["iso_dir"]) / "out") / "run.json"
-        if v.check("reproduced", run.exists() and json.loads(run.read_text()).get("ok"), run.read_text()[:300] if run.exists() else "no run.json", "the counts differ: is the app deterministic? Is the input the same?"):
+        if v.check("reproduced", run.exists() and json.loads(run.read_text()).get("ok"), run.read_text()[:300] if run.exists() else "no run.json",
+                   "activities or an entity type differ: is the app deterministic? Is the input the same? (entity and edge counts vary when the run captures inputs or attributes: rebuild so expected.json holds the types)"):
             note = f"; NOT exercised: {', '.join(vf['not_exercised'])}" if vf.get("not_exercised") else ""
             P.record(pipeline, STAGE, outputs={"summary": f"reproduced in a clean shell ({vf.get('scale')}): {json.loads(run.read_text())['counts']}{note}"})
         if o.get("publish_root"):
@@ -1349,6 +1458,14 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
         """Check the batch mode on pure renders, with no cluster: the per-chunk wrapper template, the 04_run text (both scales), the chunk-failure patterns on the real failing run.out text and a clean
         one, the command parse and config render, and that no script holds a user, workspace, session or job path. Use after changing repro_package. Returns {status, line, cases, notes}."""
         return _selftest()
+
+    @mcp.tool()
+    def repro_check_selftest() -> dict:
+        """Sandbox test of the generated prov_check.py and the verification record logic, no cluster: trace sets made on the spot. Covers: the same entity types with different entity and edge counts
+        pass (counts are reported with a note) when the types end in .input/.attribute; extra types pass; a missing type fails; a different activity count fails; an expected.json without types, or
+        with other types, keeps the exact count comparison; expected.json types come from the trace reader; the verification record keeps ok = no failures and drops entity/edge count differences
+        when the run captures inputs or attributes. Use after any change to the checker or expected.json. Returns {status, line, cases}: line is 'repro check selftest PASS ...' or 'FAIL <cases>'."""
+        return check_selftest()
 
     @mcp.tool()
     def repro_publish_selftest() -> dict:

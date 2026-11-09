@@ -1,7 +1,7 @@
 {
  "name": "prov_graph",
  "description": "Build the provenance graph of the baseline run and gate on its health - every artifact produced and rooted in real inputs; compare plain vs traced outputs by content (tar members, zstd) and tell timestamp-only differences from real ones. Load for the graph stage.",
- "version": 5,
+ "version": 7,
  "enabled": true,
  "stages": [
   "graph"
@@ -24,7 +24,7 @@
  },
  "review": [
   "imports subprocess: runs commands",
-  "line 248: writes or deletes files (write_text)"
+  "line 325: writes or deletes files (write_text)"
  ],
  "history": [
   {
@@ -56,6 +56,20 @@
    "by": "haridev",
    "proposal": "ef4c424da114",
    "why": "Run ef35f429283f graph gate: graph_validate passed 8/8 while graph_compare compared 0 members (default file list = smoke outputs_created = only provenance/PLAN.md, reported missing), so science_unchanged was a vacuous pass. Fix: default to the baseline_plain vs baseline study dirs with the AF3 outputs-af3 tree and *_cut50.pdb (Rosetta is unseeded, not defaulted); record compare_files; comparing zero files is inconclusive, never a pass. The model_group_name date stamp in model.cif is already caught by VOLATILE_DEFAULT as timestamp_only."
+  },
+  {
+   "version": 6,
+   "ts": 1794205404.6532621,
+   "by": "haridev",
+   "proposal": "b11787101b83",
+   "why": "graph_compare compared a plain file with itself (absolute outputs_created joined under both dirs): 10 tars 'identical', compared_members 0, science_unchanged inconclusive. Add files argument, directory-walk default, self-compare guard, absolute-path normalisation, and make zero-member/missing comparisons inconclusive."
+  },
+  {
+   "version": 7,
+   "ts": 1794207413.192016,
+   "by": "haridev",
+   "proposal": "63a99ac18dfc",
+   "why": "science_unchanged stayed inconclusive forever when only timestamp_only members differed (elmerfold-prov-20261030-125944: 70 members compared, 0 different, 10 hhsearch_output.hhr Date/Command headers), because nothing could record the user's call and pipeline_advance refuses inconclusive. graph_compare now takes accept_timestamp_only (the user's own words)."
   }
  ]
 }

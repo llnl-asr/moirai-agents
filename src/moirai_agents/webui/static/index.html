@@ -157,13 +157,20 @@ function dayBreak(ts){const d=ts?new Date(ts*1000):new Date();if(dayKey(d)===las
 function msgEl(role,ts){const emp=$('#log .empty');if(emp)emp.remove();$('#pdfbtn').disabled=false;dayBreak(ts);
  const d=document.createElement('div');d.className='msg '+role;d.innerHTML=`<div class="who">${role==='user'?'you':'moirai-agents'}${timeTag(ts)}</div><div class="bubble"></div>`;
  $('#log').appendChild(d);return d.querySelector('.bubble')}
-function scroll(){const l=$('#log');if(l.scrollHeight-l.scrollTop-l.clientHeight<200)l.scrollTop=l.scrollHeight}
-// Jump to the newest message and stay there while late content (plots, markdown) settles,
-// unless the user scrolls away first.
+// Every chat stays at its end: opening a chat, new events, late renders (plots, markdown, images) and the chat pane being shown or
+// resized (switching Annotate / Live Run / Query) all keep it at the bottom - until the user scrolls up; scrolling back down re-sticks.
+let stick=true;
+(()=>{const l=$('#log');
+ l.addEventListener('scroll',()=>{stick=l.scrollHeight-l.scrollTop-l.clientHeight<40},{passive:true});
+ const keep=()=>{if(stick)l.scrollTop=l.scrollHeight};
+ new MutationObserver(keep).observe(l,{childList:true,subtree:true,characterData:true});
+ if(window.ResizeObserver)new ResizeObserver(keep).observe(l);
+ l.addEventListener('load',keep,true)})();
+function scroll(){const l=$('#log');if(stick||l.scrollHeight-l.scrollTop-l.clientHeight<200){stick=true;l.scrollTop=l.scrollHeight}}
+// Jump to the newest message and stay there while late content settles, unless the user scrolls away first.
 let pinUntil=0;
-function toBottom(){const l=$('#log');l.scrollTop=l.scrollHeight;pinUntil=Date.now()+2500;
- const tick=()=>{if(Date.now()>pinUntil)return;l.scrollTop=l.scrollHeight;requestAnimationFrame(tick)};requestAnimationFrame(tick)}
-['wheel','touchstart','keydown','mousedown'].forEach(t=>addEventListener(t,e=>{if(t!=='keydown'||$('#log').contains(e.target)||e.key==='PageUp'||e.key==='ArrowUp')pinUntil=0},{passive:true}));
+function toBottom(){const l=$('#log');stick=true;l.scrollTop=l.scrollHeight;pinUntil=Date.now()+4000;
+ const tick=()=>{if(Date.now()>pinUntil||!stick)return;l.scrollTop=l.scrollHeight;requestAnimationFrame(tick)};requestAnimationFrame(tick)}
 const AG={main:null,agents:{}};
 function agentsReset(){AG.main={name:'moirai-agents (main)',status:'idle',last:'',n:0,t0:Date.now()};AG.agents={};drawAgents()}
 function drawAgents(){const all=[AG.main,...Object.values(AG.agents)].filter(Boolean);

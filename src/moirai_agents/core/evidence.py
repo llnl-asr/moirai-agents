@@ -37,6 +37,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from . import pipeline as P
 from . import provtrace as T
+from .aggregate import ends       # a type the trace cut at 31 characters still counts as <x>.attribute / .input / .output
 
 MAX_STEPS, MAX_HOPS, MAX_NODES, MAX_CITE, MAX_ROWS, MAX_IN = 8, 30, 5000, 300, 200, 4000
 OPS = ("entities", "activities", "lineage", "group", "ends", "inputs", "outputs", "attributes")
@@ -334,7 +335,7 @@ def kv(uri: str) -> List[tuple]:
 
 
 def is_captured(etype: str) -> bool:
-    return isinstance(etype, str) and etype.endswith(CAPTURED)
+    return ends(etype, CAPTURED)
 
 
 def _captured(s, k, v, cat, outs, ctx, suffix, relation):
@@ -377,7 +378,7 @@ def _attributes(s, k, v, cat, outs, ctx):
     of = {str(r["args.subject"]): str(r.get("args.object")) for r in rel}
     by: Dict[str, List] = {}
     for r in rows:
-        if str(r.get("args.type", "")).endswith(".attribute") and kv(r.get("args.uri", "")):
+        if ends(str(r.get("args.type", "")), ".attribute") and kv(r.get("args.uri", "")):
             by.setdefault(of.get(str(r["args.id"]), "?"), []).extend(kv(r["args.uri"]))
     runs = [{"entity": e, "pairs": p} for e, p in by.items()]
     return {"kind": "attribute", "runs": runs, "ids": sorted(by), "cites": ([_ref(r) for r in rel] + [_ref(r) for r in rows])[:MAX_CITE]}
@@ -525,7 +526,7 @@ def detect_gaps(steps: List[Dict[str, Any]], outs: List[Dict[str, Any]], cat: Di
         gaps.setdefault(gid, {"id": gid, "kind": kind, "subject": str(subject), "detail": detail, "step": k + 1})
 
     def has_inputs(a):
-        return any(str((cat["entities"].get(x) or {}).get("type", "")).endswith(".input") for x in a["used"])
+        return any(ends(str((cat["entities"].get(x) or {}).get("type", "")), ".input") for x in a["used"])
 
     def no_inputs(ids, k):
         by = Counter(acts[i]["name"] for i in ids if i in acts and not has_inputs(acts[i]))
@@ -596,10 +597,10 @@ def _graph(o, cat, ctx, cap: int = 150) -> Dict[str, Any]:
     keep = set(ents) | set(aids)
     nodes = [{"id": i, "kind": "entity", "type": (cat["entities"].get(i) or {}).get("type", ""), "uri": (cat["entities"].get(i) or {}).get("uri", ""),
               "label": (os.path.basename(((cat["entities"].get(i) or {}).get("uri") or i).rstrip("/")) or i)[:40], "start": i in o["start"], "end": i in o["ends"],
-              "attrs": [val(s) for s in cat.get("parts", {}).get(i, []) if str((cat["entities"].get(s) or {}).get("type", "")).endswith(".attribute")]} for i in ents]
+              "attrs": [val(s) for s in cat.get("parts", {}).get(i, []) if ends(str((cat["entities"].get(s) or {}).get("type", "")), ".attribute")]} for i in ents]
     nodes += [{"id": a, "kind": "activity", "label": acts[a]["name"], "pid": acts[a]["pid"], "ts": acts[a]["ts"], "dur": acts[a]["dur"],
-               "inputs": [val(x) for x in acts[a]["used"] if str((cat["entities"].get(x) or {}).get("type", "")).endswith(".input")],
-               "outputs": [val(x) for x in acts[a]["generated"] if str((cat["entities"].get(x) or {}).get("type", "")).endswith(".output")]} for a in aids if a in acts]
+               "inputs": [val(x) for x in acts[a]["used"] if ends(str((cat["entities"].get(x) or {}).get("type", "")), ".input")],
+               "outputs": [val(x) for x in acts[a]["generated"] if ends(str((cat["entities"].get(x) or {}).get("type", "")), ".output")]} for a in aids if a in acts]
     edges = []
     for a in aids:
         if a in acts:

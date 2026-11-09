@@ -64,8 +64,22 @@ def expected(spec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 CAPTURED = (".input", ".output", ".attribute")      # the types prov_annotate's helper records (v7): one entity per value, uri name=value
 
 
+TYPE_MAX = 31      # the trace keeps at most 31 characters of an entity type: "of3_template_alignment.attribute" is read back as "...attribut"
+
+
+def ends(t: Any, *suffixes: str) -> bool:
+    """True when the entity type t ends with one of the suffixes, also when the trace cut the type at TYPE_MAX characters."""
+    if not isinstance(t, str):
+        return False
+    sfx = suffixes[0] if len(suffixes) == 1 and isinstance(suffixes[0], tuple) else suffixes
+    if t.endswith(tuple(sfx)):
+        return True
+    i = t.rfind(".")
+    return len(t) >= TYPE_MAX and i > 0 and len(t) - i >= 2 and any(s.startswith(t[i:]) for s in sfx)
+
+
 def captured_type(t: Any) -> bool:
-    return isinstance(t, str) and t.endswith(CAPTURED)
+    return ends(t, CAPTURED)
 
 
 def fold(g: Any) -> Dict[str, Dict[str, List[str]]]:
@@ -75,13 +89,13 @@ def fold(g: Any) -> Dict[str, Dict[str, List[str]]]:
     uri = lambda i: (g.entities.get(i) or {}).get("uri", "") or i       # noqa: E731
     out: Dict[str, Dict[str, List[str]]] = {"attrs": {}, "inputs": {}, "outputs": {}}
     for r in g.relations:
-        if etype.get(r["subject"], "").endswith(".attribute") and r.get("object"):
+        if ends(etype.get(r["subject"], ""), ".attribute") and r.get("object"):
             out["attrs"].setdefault(r["object"], []).append(uri(r["subject"]))
     for e in g.edges:
         t = etype.get(e["entity"], "")
-        if t.endswith(".input") and e["kind"] == "used":
+        if ends(t, ".input") and e["kind"] == "used":
             out["inputs"].setdefault(e["activity"], []).append(uri(e["entity"]))
-        elif t.endswith(".output") and e["kind"] == "generated":
+        elif ends(t, ".output") and e["kind"] == "generated":
             out["outputs"].setdefault(e["activity"], []).append(uri(e["entity"]))
     return out
 
@@ -125,7 +139,7 @@ def runtime(g: Any) -> Dict[str, Any]:
 
 
 def _captured(node_id: str) -> bool:
-    return node_id.startswith("t:") and node_id.endswith(CAPTURED)
+    return node_id.startswith("t:") and ends(node_id, CAPTURED)
 
 
 def diff(exp: Dict[str, Any], run: Dict[str, Any]) -> Dict[str, Any]:

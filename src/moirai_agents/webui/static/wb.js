@@ -155,7 +155,7 @@ async function wbOpen(id){const it=wbItem(id);if(!it)return;
  $('#wbview').innerHTML='<div class="sub" style="padding:20px">loading…</div>';
  let chat=it.chat;
  if(WB.view==='query'){const r=await api('api/workbench/querychat',{pipeline:id});chat=r&&r.session;if(chat&&it.kind!=='analysis')it.query_chat=chat}
- if(chat&&chat!==session)openSession(chat);else if(!chat&&session)$('#newbtn').onclick();
+ if(chat&&chat!==session)openSession(chat);else if(chat)toBottom();else if(!chat&&session)$('#newbtn').onclick();
  setMode(WB.view==='query'?(it.kind==='analysis'?'analysis':'ask'):'run');
  await wbTick(true);WB.timer=setInterval(()=>{if(document.visibilityState==='visible'&&WB.sel)wbTick(false)},5000);
  if(WB.view==='query'&&Q.ask){const q=Q.ask;Q.ask=null;setTimeout(()=>sendText(q,running,[]),700)}}
@@ -195,6 +195,17 @@ function propLines(n,max){const p=propsOf(n);if(!p.length)return '';const head=n
  return '\n'+head+p.slice(0,max).map(x=>clip(String(x),30)).join(n.kind==='type'||!String(p[0]).includes('=')?', ':'\n')+(p.length>max?` (+${p.length-max})`:'')}
 function propList(d){const p=propsOf(d);return p.length?`<div class="wq-props">${p.slice(0,60).map(x=>`<code>${esc(x)}</code>`).join(' ')}${p.length>60?` <span class="sub">+${p.length-60} more</span>`:''}</div>`:''}
 
+// the hover box of a node: what it is, and its inputs, outputs, parameters and attributes (names for a type or an activity kind, values for an instance)
+function tipHtml(d){const name=String(d.name||d.label||d.id).split('\n')[0],k=d.kind==='type'?'entity type':d.kind;
+ const p=d.kind==='activity'?[['inputs',d.inputs],['outputs',d.outputs]]:[[d.kind==='type'?'attributes':'attributes',d.attrs]];
+ const rows=p.filter(([,v])=>v&&v.length).map(([l,v])=>`<div class="tip-h">${l}${d.kind==='type'||(d.kind==='activity'&&!String(v[0]).includes('='))?' (names)':''}</div><div class="wq-props">${v.slice(0,40).map(x=>`<code>${esc(x)}</code>`).join(' ')}${v.length>40?` <span class="sub">+${v.length-40}</span>`:''}</div>`).join('');
+ return `<b>${esc(name)}</b> <span class="sub">${esc(k)}${d.type?' · '+esc(d.type):''}${d.role?' · '+esc(d.role):''}${d.count?' · ×'+d.count:''}</span>${d.uri?`<div class="sub tip-u">${esc(d.uri)}</div>`:''}${d.kind==='activity'&&d.pid!=null?`<div class="sub">pid ${esc(d.pid)}${d.ts?' · '+esc(isoUs(d.ts)):''}</div>`:''}${rows||'<div class="sub">nothing recorded about it beyond this</div>'}`}
+function hoverTip(cy,box){const host=box.parentElement;let tip=host.querySelector(':scope > .cy-tip');if(!tip){tip=document.createElement('div');tip.className='cy-tip';tip.hidden=true;host.appendChild(tip)}
+ cy.on('mouseover','node',e=>{const p=e.renderedPosition||e.target.renderedPosition(),bb=box.getBoundingClientRect(),hb=host.getBoundingClientRect();
+  tip.innerHTML=tipHtml(e.target.data());tip.hidden=false;const x=bb.left-hb.left+p.x+14,y=bb.top-hb.top+p.y+14;
+  tip.style.left=Math.max(4,Math.min(x,host.clientWidth-tip.offsetWidth-6))+'px';tip.style.top=Math.max(4,Math.min(y,host.clientHeight-tip.offsetHeight-6))+'px'});
+ cy.on('mouseout','node',()=>{tip.hidden=true});cy.on('pan zoom',()=>{tip.hidden=true})}
+
 // ---- the aggregated view: entity types and activity kinds, how they relate, with counts; in the Annotate view the diff
 // of what the annotation promised against what was recorded. Kept across refreshes: counts and statuses update in place.
 const AGG={};
@@ -210,7 +221,7 @@ async function drawAgg(key,boxId,d,hl,onTap){const box=$('#'+boxId);if(!box)retu
  if(!d||!d.nodes||!d.nodes.length){AGG[key]=null;box.innerHTML=`<div class="sub" style="padding:16px">${d&&d.reading?'reading the traces…':'Nothing to draw yet: the diagram appears once the annotation exists or the run records provenance.'}</div>`;return null}
  try{await dgNeedGraph()}catch(e){box.textContent=e.message;return null}
  const sig=d.mode+'#'+d.nodes.map(n=>n.id).sort().join()+'#'+d.edges.map(e=>e.id).sort().join();
- const nd=n=>({id:n.id,label:(n.artifact?'★ ':'')+n.label+(n.count?`  ×${n.count}`:'')+propLines(n,4),kind:n.kind,status:n.status||'',role:n.role||'',name:n.label,count:n.count||0,
+ const nd=n=>({id:n.id,label:(n.artifact?'★ ':'')+n.label+(n.count?`  ×${n.count}`:''),kind:n.kind,status:n.status||'',role:n.role||'',name:n.label,count:n.count||0,
    attrs:n.attrs||[],inputs:n.inputs||[],outputs:n.outputs||[]});
  const ed=e=>({id:e.id,source:e.source,target:e.target,kind:e.kind,status:e.status||'',label:e.kind==='relation'?(e.label||''):(e.count&&pro()?'×'+e.count:''),count:e.count||0});
  const st=AGG[key];
@@ -240,7 +251,7 @@ async function drawAgg(key,boxId,d,hl,onTap){const box=$('#'+boxId);if(!box)retu
    {selector:'node.focus',style:{'border-width':3.5,'border-color':'#7c3aed','border-style':'solid'}},
    {selector:'edge.focus',style:{width:3,'line-color':'#7c3aed','target-arrow-color':'#7c3aed'}},
    {selector:'node.pick',style:{'background-color':'#f59e0b','border-color':'#b45309','border-width':4,'z-index':9}}]});
- AGG[key]={cy,sig};aggHl(cy,hl);cy.on('tap','node',e=>onTap&&onTap(e.target.data()));return cy}
+ AGG[key]={cy,sig};aggHl(cy,hl);cy.on('tap','node',e=>onTap&&onTap(e.target.data()));hoverTip(cy,box);return cy}
 // highlight: {types:Set(type names), acts:Set(activity names), pick:Set(node ids)}; null: everything plain
 function aggHl(cy,hl){if(!cy)return;cy.batch(()=>{cy.elements().removeClass('dim focus pick');if(!hl)return;
  const keep=new Set(cy.nodes().filter(n=>(n.data('kind')==='type'?hl.types:hl.acts).has(n.data('name'))).map(n=>n.id()));
@@ -410,17 +421,35 @@ const INST_STYLE=dark=>[{selector:'node',style:{label:'data(label)','font-size':
 async function drawInst(box,nodes,edges,onTap){try{await dgNeedGraph()}catch(e){box.textContent=e.message;return null}
  const ids=new Set(nodes.map(n=>n.id));box.innerHTML='';
  const cy=cytoscape({container:box,wheelSensitivity:.25,minZoom:.05,maxZoom:3,
-  elements:[...nodes.map(n=>({data:{...n,id:n.id,label:(n.label||n.id)+propLines(n,3)}})),...edges.filter(e=>ids.has(e.source)&&ids.has(e.target)).map((e,i)=>({data:{id:'e'+i,source:e.source,target:e.target,kind:e.kind,rel:e.relation?1:0}}))],
+  elements:[...nodes.map(n=>({data:{...n,id:n.id,label:n.label||n.id}})),...edges.filter(e=>ids.has(e.source)&&ids.has(e.target)).map((e,i)=>({data:{id:'e'+i,source:e.source,target:e.target,kind:e.kind,rel:e.relation?1:0}}))],
   layout:{name:'dagre',rankDir:(box.clientHeight>box.clientWidth*.8?'TB':'LR'),nodeSep:10,rankSep:40,animate:false},style:INST_STYLE(themeNow()==='dark')});
- cy.on('tap','node',e=>onTap&&onTap(e.target.data()));cy.on('tap',e=>{if(e.target===cy)document.querySelectorAll('.wq-info').forEach(b=>b.hidden=true)});return cy}
-async function wqDraw(){const box=$('#wqgraph');if(!box||!WB.sel)return;Q.drawn=Date.now();const leg=$('#wqleg');
+ cy.on('tap','node',e=>onTap&&onTap(e.target.data()));cy.on('tap',e=>{if(e.target===cy)document.querySelectorAll('.wq-info').forEach(b=>b.hidden=true)});hoverTip(cy,box);return cy}
+function wqStarts(a){const g=Q.g,ns=(g&&g.nodes)||[],ids=new Set(ns.map(n=>n.id)),out=new Set;
+ const ln=(a.lineage&&a.lineage.nodes)||[];
+ (a.targets||[]).forEach(t=>{if(ids.has(t))out.add(t);else ns.filter(n=>n.kind==='entity'&&((n.uri||'').includes(t)||n.type===t)).slice(0,40).forEach(n=>out.add(n.id))});
+ if(!out.size)ln.filter(n=>n.start).forEach(n=>ids.has(n.id)&&out.add(n.id));
+ if(!out.size)ln.filter(n=>n.kind==='entity').forEach(n=>ids.has(n.id)&&out.add(n.id));
+ return out}
+// the selected query's data: from its start entities, everything upstream (lineage) and downstream (impact) through used/generated edges
+function wqScope(a){const g=Q.g;if(!g||g.truncated||!g.nodes)return null;const start=wqStarts(a);if(!start.size)return null;
+ const fwd={},back={};g.edges.forEach(e=>{if(e.relation)return;(fwd[e.source]=fwd[e.source]||[]).push(e.target);(back[e.target]=back[e.target]||[]).push(e.source)});
+ const seen=new Set(start);for(const adj of [fwd,back]){const q=[...start];while(q.length&&seen.size<1500){const x=q.shift();for(const y of adj[x]||[])if(!seen.has(y)){seen.add(y);q.push(y)}}}
+ return seen}
+async function wqDraw(){const box=$('#wqgraph');if(!box||!WB.sel)return;Q.drawn=Date.now();Q.drawnFor=Q.sel||null;const leg=$('#wqleg');
  if(Q.gmode==='agg'){Q.cy=null;if(leg)leg.innerHTML=aggLegend('runtime').replace('class="ag-leg"','class="ag-leg"')+' <span><i class="f"></i>the query’s part</span>';
-  const d=await api('api/workbench/aggregate?pipeline='+encodeURIComponent(WB.sel.id));if(!$('#wqgraph'))return;
+  let d=await api('api/workbench/aggregate?pipeline='+encodeURIComponent(WB.sel.id));if(!$('#wqgraph'))return;
   if(d&&d.mode==='diff'){d.nodes.forEach(n=>{if(n.status==='matched')n.status=''});d.edges.forEach(e=>{if(e.status==='matched')e.status=''})}
-  AGG.q=null;await drawAgg('q','wqgraph',d,null,x=>aggInfo('wqinfo',x));wqHighlight(true);return}
- if(leg)leg.innerHTML='<i class="e"></i>entity <i class="a"></i>activity <i class="f"></i>the query’s part <i class="p"></i>selected';
- const g=Q.g,a=WB.answers.find(x=>x.id===Q.sel),whole=g&&!g.truncated&&g.nodes;let nodes,edges;Q.part=!whole;
- if(whole){nodes=g.nodes;edges=g.edges}
+  const a=WB.answers.find(x=>x.id===Q.sel);
+  if(a&&d&&d.nodes){const sc=wqScope(a),hl=wqAggHl(a),types=new Set(hl.types),acts=new Set(hl.acts);   // only the types and activities of the query's data
+   if(sc)(Q.g.nodes||[]).forEach(n=>{if(sc.has(n.id))(n.kind==='entity'?types:acts).add(n.kind==='entity'?n.type:n.label)});
+   const keep=new Set(d.nodes.filter(n=>(n.kind==='type'?types:acts).has(n.label)).map(n=>n.id));
+   if(keep.size){d={...d,nodes:d.nodes.filter(n=>keep.has(n.id)),edges:d.edges.filter(e=>keep.has(e.source)&&keep.has(e.target))}}}
+  Q.filtered=!!a;AGG.q=null;await drawAgg('q','wqgraph',d,null,x=>aggInfo('wqinfo',x));wqHighlight(true);return}
+ if(leg)leg.innerHTML=Q.sel?'<i class="e"></i>entity <i class="a"></i>activity <i class="f"></i>the answer’s lineage <i class="p"></i>selected step · only this query’s data: upstream and downstream of it':'<i class="e"></i>entity <i class="a"></i>activity · the whole graph: select a query to draw only its data';
+ const g=Q.g,a=WB.answers.find(x=>x.id===Q.sel),whole=g&&!g.truncated&&g.nodes;let nodes,edges;Q.part=!whole;Q.filtered=false;
+ const sc=a&&whole?wqScope(a):null;
+ if(sc){nodes=g.nodes.filter(n=>sc.has(n.id));edges=g.edges.filter(e=>sc.has(e.source)&&sc.has(e.target));Q.filtered=true}   // the query's data only, laid out afresh
+ else if(whole){nodes=g.nodes;edges=g.edges}
  else if(a&&a.lineage&&a.lineage.nodes.length){nodes=a.lineage.nodes;edges=a.lineage.edges}
  else{Q.cy=null;box.innerHTML=`<div class="sub" style="padding:16px">${g?`The graph has ${g.counts.entities+g.counts.activities} nodes, too many to draw one by one: select a query to draw its part, or switch to Aggregated.`:'No provenance yet.'}</div>`;return}
  const adj={};edges.forEach(e=>{if(e.relation)return;if(e.kind==='used')(adj[e.target]=adj[e.target]||{gen:[],used:[]}).used.push(e.source);else(adj[e.source]=adj[e.source]||{gen:[],used:[]}).gen.push(e.target)});Q.adj=adj;
@@ -452,12 +481,13 @@ function wqAggHl(a){const ln=(a.lineage&&a.lineage.nodes)||[],types=new Set,acts
  else if(Q.pick&&Q.pick[0]==='e'){const e=(a.evidence||[])[+Q.pick.slice(1)]||{};if(e.entity)tOf(e.entity).forEach(x=>pick.add('t:'+x));if(e.activity)pick.add('a:'+e.activity)}
  return {types,acts,pick}}
 function wqHighlight(fit){const a=WB.answers.find(x=>x.id===Q.sel);
- if(Q.gmode==='agg'){const c=AGG.q&&AGG.q.cy;if(!c)return;aggHl(c,a?wqAggHl(a):null);if(fit)aggFit(c);return}
+ if((Q.drawnFor||null)!==(Q.sel||null)&&(Q.cy||AGG.q))return wqDraw();          // another query (or the whole graph): draw its data
+ if(Q.gmode==='agg'){const c=AGG.q&&AGG.q.cy;if(!c)return;aggHl(c,a?wqAggHl(a):null);if(Q.filtered)c.elements().removeClass('dim');if(fit)aggFit(c);return}
  if(Q.g&&Q.g.truncated&&a){const n0=((a.lineage||{}).nodes||[])[0];if(n0&&(!Q.cy||!Q.cy.getElementById(n0.id).length))return wqDraw()}
  const cy=Q.cy;if(!cy)return;
  cy.batch(()=>{cy.elements().removeClass('dim focus pick sens');if(!a)return;
   const {E,A}=wqFocus(a),keep=new Set([...E,...A]);
-  cy.elements().addClass('dim');cy.nodes().filter(n=>keep.has(n.id())).removeClass('dim').addClass('focus');
+  if(!Q.filtered)cy.elements().addClass('dim');cy.nodes().filter(n=>keep.has(n.id())).removeClass('dim').addClass('focus');
   cy.edges().filter(e=>keep.has(e.source().id())&&keep.has(e.target().id())).removeClass('dim').addClass('focus');
   if(a.sensitive){const s=new Set(a.sensitive.lineage||[]);cy.nodes().filter(n=>s.has(n.id())).removeClass('dim').addClass('sens')}
   let pk=[];if(Q.pick&&Q.pick[0]==='s'&&Q.pick!=='s'&&a.engine==='traceviewer'){const s=(a.steps||[])[+Q.pick.slice(1)-1];if(s)pk=(s.cites||[]).map(recId)}
