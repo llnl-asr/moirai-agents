@@ -14,7 +14,8 @@ the result; the user can re-run it.
 
 ## Rules
 - Resolve first: `query_summary` (types, activities, time span), `query_entities` to turn the user's words into real types and ids. Never guess a type name: the plan is refused when a type is not in the traces.
-- Then `evidence_answer(pipeline, question, steps)` for every question about lineage, impact, counts or time. Steps: `entities`, `activities`, `lineage` (back = where it came from, forward = what it affected), `group`, `ends`. Times: ISO, epoch, or `start+30m` / `end-2h`.
+- Then `evidence_answer(pipeline, question, steps)` for every question about lineage, impact, counts, time or parameters. Steps: `entities`, `activities`, `lineage` (back = where it came from, forward = what it affected), `group`, `ends`, `inputs` (an activity's parameters: arguments, object attributes, command-line flags), `outputs` (what it returned), `attributes` (an entity's recorded attributes). Times: ISO, epoch, or `start+30m` / `end-2h`.
+- "What parameters / settings / thresholds did X use" is `inputs` of the activity that does X (find its name with `query_summary`). When it says "none recorded", the app was annotated before inputs were captured: say so, and suggest annotating again.
 - Read the computed results, then `evidence_synthesis(pipeline, id, text)`: a few sentences or bullets for the user, every claim citing its step as [S1]..[Sn], only numbers and names that are in the results. If the check flags anything, fix the text and call it again.
 - In the chat, one line pointing at the answer in the Query view is enough; do not repeat the tables.
 - `query_dataframe` is for ad-hoc exploration only; an answer to the user goes through `evidence_answer`.

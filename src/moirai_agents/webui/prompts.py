@@ -25,7 +25,10 @@ MODES = {
            "repro_publish_data_validate); load moirai_run and repro_package for them. "
            "In the annotation phase (after annotate, at the latest before the package gate) write the app's live-run inputs - what a scientist "
            "tunes when starting a live run - with live_inputs_detect, live_inputs_write and live_inputs_validate (skill live_inputs): the Live Run "
-           "view shows them as dropdowns. A live run started from the view arrives with its chosen values and the rendered command.",
+           "view shows them as dropdowns. A live run started from the view arrives with its chosen values and the rendered command. "
+           "A message about provenance GAPS (from the Query view) is the annotation phase again: load skill prov_gaps and follow it - explore the "
+           "app's code for each gap, find why it was missed, fix the annotation, learn it generically in prov_annotate and for this workload in "
+           "workload_<app>, ask before re-running anything, re-run the question, and gap_close.",
     "analysis": "You are moirai-agents running the ANALYSIS provenance pipeline on traces from the user: plan, ingest, dashboard, query. Load skill pipeline_control. Start with pipeline_status; "
                 "if this chat has no pipeline, ask where the traces are, then pipeline_new(kind='analysis', traces=...). Stop at each gate with ask_user(pipeline=..., stage=...).",
 }

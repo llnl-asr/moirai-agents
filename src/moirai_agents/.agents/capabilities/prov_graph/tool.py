@@ -50,7 +50,7 @@ def _health(g, spec):
                         stack.append(u)
         types = {g.entities.get(r, {}).get("type", "?") for r in roots}
         lineage[eid] = {"type": e["type"], "uri": e.get("uri", ""), "ancestors": len(seen), "root_types": sorted(types)}
-        wrong = sorted(t for t in types if declared.get(t, {}).get("role") not in ROOT_ROLES)
+        wrong = sorted(t for t in types if (declared.get(t, {}).get("role") or (g.types.get(t) or {}).get("role")) not in ROOT_ROLES)   # captured inputs: role parameter, from the trace
         if wrong:
             bad_roots[eid] = wrong
     return {"records": g.counts()["records"], "activities": len(g.activities), "entities": len(g.entities), "entities_by_type": dict(by_type), "dangling": len(g.dangling()),

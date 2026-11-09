@@ -1,0 +1,20 @@
+[
+ {
+  "tool": "gap_list",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "contains": "error"
+  }
+ },
+ {
+  "tool": "gap_validate",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ }
+]

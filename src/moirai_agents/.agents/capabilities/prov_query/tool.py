@@ -98,8 +98,11 @@ def register(mcp):
         with its trail (queries, files read, cited records) for the Query view.
         steps: [{op, ...}], "from" = the 0-based index of an earlier step:
           entities {type?, uri_contains?, id?, ids?, all?, produced_since?, produced_until?} | activities {name?, pid?, since?, until?} |
-          lineage {from, direction: back|forward, max_hops?} | group {from, by: type|role|store|name|pid} | ends {from} (roots of back, leaves of forward).
+          lineage {from, direction: back|forward, max_hops?} | group {from, by: type|role|store|name|pid} | ends {from} (roots of back, leaves of forward) |
+          inputs {activity, since?, until?} (the parameters each run used: arguments, object attributes, command-line flags) | outputs {activity} (what it
+          returned) | attributes {from} (the attributes recorded for a step's entities).
           Times: ISO, epoch seconds or microseconds, or start+30m / end-2h.
+        Example, "what are the filter parameters": [{"op":"inputs","activity":"filter_msa"}].
         Example, "where did the top-5 summary come from": [{"op":"entities","type":"topk_summary","uri_contains":"top5"},{"op":"lineage","from":0,"direction":"back"},{"op":"ends","from":1}].
         Returns {id, steps: [{step, op, resolved, result, table}], result_hash, stats}. Then write the user's answer from these results ONLY and attach it
         with evidence_synthesis(pipeline, id, text), citing steps as [S1]..[Sn]."""

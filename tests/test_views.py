@@ -2,6 +2,7 @@
 and its diff against the spec (the Annotate view's check), and the endpoints the views read."""
 import gzip
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -59,7 +60,7 @@ def test_the_diff_marks_matched_conditional_and_unexpected(tmp_path):
     nodes = {n["id"]: n for n in d["nodes"]}
     assert nodes["t:thumb"]["status"] == "conditional" and nodes["t:log"]["status"] == "unexpected"
     assert nodes["a:draw"]["count"] == 2 and nodes["t:raw"]["count"] == 1
-    assert d["clean"] and d["unexpected_types"] == ["log"] and d["summary"] == {"matched": 4, "missing": 0, "conditional": 1, "unexpected": 1}
+    assert d["clean"] and d["unexpected_types"] == ["log"] and d["summary"] == {"matched": 4, "missing": 0, "conditional": 1, "unexpected": 1, "captured": 0}
     assert d["conditional"] == ["draw generated thumb"] and d["unexpected"] == ["draw generated log"]
 
 
@@ -246,3 +247,145 @@ def test_an_answer_is_computed_from_traceviewer_queries_with_its_trail(tmp_path)
     (tr / "b.pfw.gz").write_bytes(member(eh("q", "plot"), act("draw", 9, used=["c"], generated=["q"])))
     rr = E.rerun(run["id"], rec["id"])
     assert not rr["same"] and rr["headline"] == "By type: plot 2, clean 1."
+
+
+def test_the_annotation_helper_captures_inputs_outputs_and_attributes(tmp_path):
+    """The generated _moirai_prov.py records an activity's parameters (arguments with defaults, the object's attributes, command-line flags,
+    named values), its return value, and an entity's attributes, each as its own name=value entity."""
+    import importlib.util
+    import subprocess
+    import sys
+    spec = importlib.util.spec_from_file_location("prov_annotate_tool", REPO / "capabilities/prov_annotate/tool.py")
+    t = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(t)
+    (tmp_path / "fake").mkdir()
+    (tmp_path / "fake/moirai.py").write_text(t.FAKE_MOIRAI)
+    (tmp_path / "_moirai_prov.py").write_text(t.HELPER % json.dumps([["filtered_msa", "OUTPUT", "filtered"]]))
+    (tmp_path / "app.py").write_text('''
+import _moirai_prov
+from pathlib import Path
+class Task:
+    def __init__(self, run_str):
+        self.run_str, self.config = run_str, {"retries": 2}
+    @_moirai_prov.activity("filter_msa", generated=[("filtered_msa", lambda self=None, **_: "k", "LOCAL_DISK", "/o.a3m", None, {"n_lines": lambda self=None, **_: 42})],
+                           capture={"inputs": {"command": lambda self=None, **_: self.run_str}})
+    def on_finish(self, threshold=0.5):
+        return {"kept": 1200}
+    @_moirai_prov.activity("quiet", capture={"auto": False, "output": False})
+    def quiet(self, x=1):
+        return 5
+t = Task("mmseqs filtera3m in out --qid 0.0,0.2 --diff 3000 -v 1")
+t.on_finish(); t.quiet()
+_moirai_prov.stop()
+''')
+    env = {**os.environ, "MOIRAI_FAKE_OUT": str(tmp_path / "out.json"), "PYTHONPATH": f"{tmp_path / 'fake'}:{tmp_path}"}
+    subprocess.run([sys.executable, "app.py"], cwd=tmp_path, env=env, check=True)
+    out = json.loads((tmp_path / "out.json").read_text())
+    ev = {e["activity"]: e["relations"] for e in out["events"]}
+    cap = out["captured"]                                                      # the fake keeps captured values apart from the promised relations
+    assert ev["filter_msa"] == [["GENERATED", "filtered_msa", "k"]] and ev["quiet"] == []
+    assert not [c for c in cap if c.get("activity") == "quiet"]                # capture off: nothing extra
+    inputs = {c["value"] for c in cap if c.get("type") == "filter_msa.input"}
+    assert {"--qid=0.0,0.2", "--diff=3000", "-v=1", "threshold=0.5"} <= inputs and any(v.startswith("command=mmseqs") for v in inputs)
+    assert [c["value"] for c in cap if c.get("type") == "filter_msa.output"] == ["value.kept=1200"]
+    assert [c for c in cap if c.get("type") == "filtered_msa.attribute"] == [{"of": ["filtered_msa", "k"], "type": "filtered_msa.attribute", "value": "n_lines=42"}]
+    assert not [t for t in out["types"] if t.endswith((".input", ".output", ".attribute"))]
+
+
+def test_captured_inputs_outputs_and_attributes_are_queried(tmp_path):
+    from moirai_agents.core import evidence as E
+    d = tmp_path / "traces" / "raw"
+    d.mkdir(parents=True)
+    rows = [et("msa", 1), et("filtered", 3), et("filter_msa.input", 4), et("filter_msa.output", 3), et("filtered.attribute", 5), eh("m", "msa"), eh("f", "filtered"),
+            {"name": "EH", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"id": "i1", "type": "filter_msa.input", "uri": "--qid=0.0,0.2"}},
+            {"name": "EH", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"id": "i2", "type": "filter_msa.input", "uri": "threshold=0.5"}},
+            {"name": "EH", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"id": "i3", "type": "filter_msa.input", "uri": "--qid=0.4"}},
+            {"name": "EH", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"id": "o1", "type": "filter_msa.output", "uri": "value.kept=1200"}},
+            {"name": "EH", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"id": "a1", "type": "filtered.attribute", "uri": "n_lines=42"}},
+            {"name": "ER", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"subject": "a1", "object": "f", "relation": 1}},
+            act("filter_msa", 1, used=["m", "i1", "i2"], generated=["f", "o1"]), act("filter_msa", 2, used=["m", "i3", "i2"], generated=["f"])]
+    (d / "a.pfw.gz").write_bytes(member(*rows))
+    r = E.run(str(d), [{"op": "inputs", "activity": "filter_msa"}], str(tmp_path / "idx"))
+    assert r["steps"][0]["headline"] == "filter_msa ran 2 time(s); its parameters: --qid = 0.0,0.2 | 0.4; threshold = 0.5."
+    assert "| --qid | 0.0,0.2 \\| 0.4 | 2 |" in r["steps"][0]["table"]
+    assert E.run(str(d), [{"op": "outputs", "activity": "filter_msa"}], str(tmp_path / "idx"))["steps"][0]["headline"].endswith("value.kept = 1200.")
+    r = E.run(str(d), [{"op": "entities", "type": "filtered"}, {"op": "attributes", "from": 0}], str(tmp_path / "idx"))
+    assert r["steps"][1]["headline"] == "attributes of 1 entity: n_lines = 42."
+    r = E.run(str(d), [{"op": "inputs", "activity": "nope"}], str(tmp_path / "idx"))      # not a plan error: a gap the user can fix
+    assert [(g["kind"], g["subject"]) for g in r["gaps"]] == [("not_recorded", "nope")]
+
+
+def test_captured_inputs_answer_and_missing_ones_are_gaps(tmp_path, call):
+    from moirai_agents.core import evidence as E
+    run = integrated_app(tmp_path)
+    d = tmp_path / "traces" / "raw"
+    d.mkdir(parents=True)
+    rec_in = lambda i, uri: {"name": "EH", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"id": i, "type": "draw.input", "uri": uri, "store": 0}}   # noqa: E731
+    (d / "a.pfw.gz").write_bytes(member(et("raw", 1), et("clean", 3), et("plot", 2), et("draw.input", 4), eh("r", "raw"), eh("c", "clean"), eh("p", "plot"),
+                                        rec_in("i1", "--qid=0.2"), rec_in("i2", "--diff=3000"),
+                                        act("prep", 1, used=["r"], generated=["c"]), act("draw", 2, used=["c", "i1", "i2"], generated=["p"])))
+    P.record(run["id"], "baseline", outputs={"traces": str(d)})
+    rec = E.ask(run["id"], "What are the draw parameters?", [{"op": "inputs", "activity": "draw"}])
+    assert rec["result"]["headline"] == "draw ran 1 time(s); its parameters: --qid = 0.2; --diff = 3000."
+    assert "| --qid | 0.2 | 1 |" in rec["result"]["table"] and not rec["gaps"]
+    lin = E.ask(run["id"], "Where did the plot come from?", [{"op": "entities", "type": "plot"}, {"op": "lineage", "from": 0, "direction": "back"}])
+    gaps = {(g["kind"], g["subject"]) for g in lin["gaps"]}
+    assert gaps == {("no_inputs", "prep")}                      # draw recorded its inputs; prep did not; the input entities are not roots to fix
+    none = E.ask(run["id"], "What are the filter parameters?", [{"op": "inputs", "activity": "filter_msa"}])
+    assert [(g["kind"], g["subject"]) for g in none["gaps"]] == [("not_recorded", "filter_msa")] and "none recorded" in none["result"]["headline"]
+
+
+def test_a_gap_is_opened_on_the_app_and_closed_only_with_what_was_learned(tmp_path, monkeypatch):
+    from moirai_agents.core import evidence as E, gaps as G
+    run = integrated_app(tmp_path)
+    P.update(run["id"], lambda c: c.update(chat_session="app-chat"))
+    P.record(run["id"], "baseline", outputs={"traces": str(traces(tmp_path))})
+    L = P.new("live", "app-live", parent=run["id"])
+    P.record(L["id"], "live_run", outputs={"traces": P.stage(P.load(run["id"]), "baseline")["outputs"]["traces"]})
+    rec = E.ask(L["id"], "What happened in prep?", [{"op": "activities", "name": "prep"}])
+    g = rec["gaps"][0]
+    assert g["kind"] == "no_inputs" and g["subject"] == "prep"
+    o = G.open_gap(L["id"], rec["id"], g["id"])                  # asked on the live run: kept on its app, to fix in the annotation
+    assert o["app"] == run["id"] and o["chat"] == "app-chat" and o["status"] == "open"
+    assert G.open_gap(L["id"], rec["id"], g["id"])["id"] == o["id"] and len(G.listing(run["id"])) == 1       # once
+    bad = G.close(run["id"], o["id"], "guessed", {}, {"capability": "prov_query", "version": 1}, "short")
+    assert bad["status"] == "error" and any("cause" in p for p in bad["problems"])
+    bad = G.close(run["id"], o["id"], "missed_inputs", {"capability": "prov_annotate", "version": 999}, {"capability": "prov_query", "version": 1}, "x" * 40)
+    probs = " ".join(bad["problems"])
+    assert "not v999" in probs and "workload_<app>" in probs
+    wl = tmp_path / "pcaps" / "workload_app"
+    wl.mkdir(parents=True)
+    (wl / "capability.json").write_text(json.dumps({"name": "workload_app", "version": 2, "enabled": True, "tools": [], "description": "the app"}))
+    monkeypatch.setenv("MOIRAI_AGENTS_PROJECT_CAPABILITIES", str(tmp_path / "pcaps"))
+    from moirai_agents.core import capstore
+    pa = capstore.all_caps()["prov_annotate"][2]["version"]
+    how = "prep reads its options from self.config, not its arguments: captured with capture.inputs"
+    r = G.close(run["id"], o["id"], "missed_inputs", {"capability": "prov_annotate", "version": pa}, {"capability": "workload_app", "version": 2}, how)
+    assert r == {"status": "ok", "gap": o["id"], "state": "fixed_pending_run"}
+    again = E.ask(run["id"], "What happened in prep?", [{"op": "activities", "name": "prep"}])      # still the old traces: the gap is still there
+    assert G.close(run["id"], o["id"], "missed_inputs", {"capability": "prov_annotate", "version": pa}, {"capability": "workload_app", "version": 2}, how,
+                   recheck_answer=again["id"])["status"] == "error"
+
+
+
+def test_captured_values_are_properties_of_the_nodes_they_describe(tmp_path):
+    """Aggregated: an entity type lists its attribute names, an activity its input names. Instances: the actual values. No captured-value nodes."""
+    from moirai_agents.core import aggregate as G
+    from moirai_agents.webui import workbench as W
+    d = tmp_path / "raw"
+    d.mkdir()
+    cap = lambda i, t, uri: {"name": "EH", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"id": i, "type": t, "uri": uri, "store": 0}}     # noqa: E731
+    (d / "a.pfw.gz").write_bytes(member(et("msa", 1), et("filtered", 3), eh("m", "msa"), eh("f", "filtered"), cap("i1", "filter.input", "--qid=0.2"),
+                                        cap("a1", "filtered.attribute", "n_seqs=812"),
+                                        {"name": "ER", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"subject": "a1", "object": "f", "relation": 19}},
+                                        act("filter", 1, used=["m", "i1"], generated=["f"])))
+    g = T.read(str(d))
+    agg = {n["id"]: n for n in G.runtime(g)["nodes"]}
+    assert set(agg) == {"t:msa", "t:filtered", "a:filter"}
+    assert agg["t:filtered"]["attrs"] == ["n_seqs"] and agg["a:filter"]["inputs"] == ["--qid"]
+    inst = {n["id"]: n for n in W._nodes(g)["nodes"]}
+    assert set(inst) == {"m", "f", "1:1"} and inst["f"]["attrs"] == ["n_seqs=812"] and inst["1:1"]["inputs"] == ["--qid=0.2"]
+    exp = G.expected({"entity_types": [{"type": "filtered", "role": "output"}], "activities": [{"name": "filter", "generated": [{"type": "filtered", "attributes": {"n_seqs": "len(x)", "depth": "d"}}],
+                                                                                              "capture": {"inputs": {"command": "self.run_str"}}}]})
+    diff = {n["id"]: n for n in G.diff(exp, G.runtime(g))["nodes"]}
+    assert diff["t:filtered"]["attrs"] == ["depth", "n_seqs"] and diff["a:filter"]["inputs"] == ["--qid", "command"]

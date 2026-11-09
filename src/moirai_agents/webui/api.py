@@ -33,9 +33,9 @@ _LOADED: dict = {}
 
 def _fresh_wb():
     import importlib
-    from ..core import aggregate, answers, evidence, liveinputs
+    from ..core import aggregate, answers, evidence, gaps, liveinputs
     from . import workbench
-    for m in (aggregate, answers, evidence, liveinputs, workbench):
+    for m in (aggregate, answers, evidence, gaps, liveinputs, workbench):
         f = getattr(m, "__file__", "") or ""
         try:
             mt = os.path.getmtime(f)
@@ -561,6 +561,17 @@ def post_route(h, app, life, u, body):
             R.wlog("mcp-restart", server=name, ok={n: c.get("ok") for n, c in (r.get("checks") or {}).items()})
         return send_json(h, {**r, **mcp.state(user["workspace"], sum(1 for t in list(app.turns.values()) if not t.done))},
                          400 if r.get("error") else 200)
+    if u.path == "/api/workbench/gaps":           # gaps a computed answer showed: kept on the app, to be fixed in its annotation phase
+        _fresh_wb()
+        from ..core import gaps as G
+        try:
+            ids = body.get("gaps") if isinstance(body.get("gaps"), list) else [body.get("gap", "")]
+            opened = [G.open_gap(body.get("pipeline", ""), str(body.get("answer", "")), str(g)) for g in ids if g]
+            if not opened:
+                return send_json(h, {"error": "no gap given"}, 400)
+            return send_json(h, {"app": opened[0]["app"], "chat": opened[0]["chat"], "gaps": [{k: g.get(k) for k in ("id", "kind", "subject", "detail")} for g in opened]})
+        except pipeline.PipelineError as e:
+            return send_json(h, {"error": str(e)}, 400)
     if u.path in ("/api/workbench/ask", "/api/workbench/rerun"):      # computed answers: TraceViewer queries, no model
         _fresh_wb()
         from ..core import evidence as E

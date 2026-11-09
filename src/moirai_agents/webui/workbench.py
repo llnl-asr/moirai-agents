@@ -63,7 +63,8 @@ def items(ws: str, busy: Optional[set] = None) -> Dict[str, List[dict]]:
         if c["kind"] == "run":
             pk, gr = c["stages"]["package"]["outputs"], c["stages"]["graph"]["outputs"]
             row.update(published=pk.get("published_package") or "", diff=((gr.get("health") or {}).get("diff") or {}).get("summary"),
-                       can_live=c["stages"]["integrate"]["status"] == "passed", live_inputs=c.get("live_inputs"))
+                       can_live=c["stages"]["integrate"]["status"] == "passed", live_inputs=c.get("live_inputs"),
+                       gaps=[{k: g.get(k) for k in ("id", "kind", "subject", "detail", "status", "cause", "how")} for g in c.get("gaps") or []])
         elif c["kind"] == "live":
             row.update(published=c["stages"]["publish_data"]["outputs"].get("published_live") or "",
                        started=c["stages"]["live_run"].get("started"), command=c.get("command", ""), inputs=c.get("inputs") or {})
@@ -258,12 +259,18 @@ _GREAD: Dict[str, threading.Thread] = {}
 
 
 def _nodes(g: "T.Graph") -> Dict[str, Any]:
-    ents = [{"id": e["id"], "kind": "entity", "type": e.get("type", ""), "uri": e.get("uri", ""),
-             "label": ((e.get("uri") or e["id"]).rstrip("/").rsplit("/", 1)[-1] or e["id"])[:40]} for e in g.entities.values()]
-    acts = [{"id": a["id"], "kind": "activity", "label": a["name"], "pid": a.get("pid"), "ts": a.get("ts"), "dur": a.get("dur")} for a in g.activities]
+    """Entities and activities, each with its captured values as properties (an entity's attributes, an activity's inputs and outputs, as
+    name=value); the captured value entities themselves are not drawn."""
+    from ..core import aggregate as G
+    fo = G.fold(g)
+    cap = {i for i, e in g.entities.items() if G.captured_type(e.get("type", ""))}
+    ents = [{"id": e["id"], "kind": "entity", "type": e.get("type", ""), "uri": e.get("uri", ""), "attrs": fo["attrs"].get(e["id"], []),
+             "label": ((e.get("uri") or e["id"]).rstrip("/").rsplit("/", 1)[-1] or e["id"])[:40]} for e in g.entities.values() if e["id"] not in cap]
+    acts = [{"id": a["id"], "kind": "activity", "label": a["name"], "pid": a.get("pid"), "ts": a.get("ts"), "dur": a.get("dur"),
+             "inputs": fo["inputs"].get(a["id"], []), "outputs": fo["outputs"].get(a["id"], [])} for a in g.activities]
     edges = [({"source": e["entity"], "target": e["activity"]} if e["kind"] == "used" else {"source": e["activity"], "target": e["entity"]}) | {"kind": e["kind"]}
-             for e in g.edges]
-    edges += [{"source": r["subject"], "target": r["object"], "kind": r["relation"], "relation": True} for r in g.relations if r.get("object")]
+             for e in g.edges if e["entity"] not in cap]
+    edges += [{"source": r["subject"], "target": r["object"], "kind": r["relation"], "relation": True} for r in g.relations if r.get("object") and r["subject"] not in cap]
     return {"nodes": ents + acts, "edges": edges}
 
 

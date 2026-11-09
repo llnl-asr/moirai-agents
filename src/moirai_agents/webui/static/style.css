@@ -509,3 +509,16 @@ body.simple .agcard{display:block}
 .tv-t{border-collapse:collapse;font-size:11.5px;width:100%;margin:4px 0}.tv-t td,.tv-t th{border:1px solid var(--line);padding:2px 5px;text-align:left;overflow-wrap:anywhere}
 .scite{display:inline-block;font-size:10.5px;padding:0 5px;border-radius:999px;background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent);text-decoration:none;vertical-align:1px}
 .wq-sec details{margin:4px 0;font-size:12.5px}.wq-sec details summary{cursor:pointer;color:var(--muted)}
+.ag-leg i.ag-captured{border:1px dotted #64748b;background:#e2e8f0}.ag-st.captured{color:#64748b}
+
+.tv-gaps ul{margin:2px 0 6px;padding-left:16px;font-size:12.5px}.tv-gaps li{margin:4px 0}.tv-gaps .btn{margin-top:3px;padding:2px 9px;font-size:12px}
+.tv-gaps h4 .n{background:var(--warn)!important}
+.wb-gaps{margin:2px 0 6px;padding-left:16px;font-size:12.5px}.wb-gaps li.open b{color:var(--warn)}.wb-gaps li.closed b{color:var(--ok)}
+
+/* ---- the run switcher of the selected app (Live Run, Query) */
+.wb-targets{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 10px;font-size:12.5px}
+.wb-tg{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:999px;padding:3px 11px;font:inherit;font-size:12.5px;cursor:pointer}
+.wb-tg:hover{border-color:var(--accent)}.wb-tg.on{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,var(--panel))}.wb-tg.new{border-style:dashed;color:var(--accent)}
+
+.wq-props{display:flex;flex-wrap:wrap;gap:3px;margin:4px 0;max-height:160px;overflow:auto}.wq-props code{font-size:11px;background:var(--bg);border-radius:4px;padding:0 4px}
+body.views #wblist .wbi{flex-wrap:wrap;row-gap:0}body.views #wblist .wbi .s{flex-basis:100%;padding-left:17px;white-space:normal}

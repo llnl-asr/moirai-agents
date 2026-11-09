@@ -182,3 +182,25 @@ def test_workspace_renders_scoped_agents(tmp_path):
     S.disable("app_smoke")
     workspace.sync(ws)
     assert not (ws / ".claude/agents/app_smoke.md").exists()
+
+
+def test_a_lesson_only_copy_follows_the_bundled_code_and_keeps_its_lessons():
+    """A user-layer copy made to hold lessons must not hide a newer bundled capability; a copy changed on purpose is left alone."""
+    import json as _json
+    import shutil as _sh
+    user = S.layer_dir("user")
+    for name in ("prov_query", "pipeline_control"):
+        _sh.copytree(S.BUNDLED / name, user / name, ignore=_sh.ignore_patterns("__pycache__"))
+    old = user / "prov_query"
+    (old / "tool.py").write_text("def register(mcp):\n    pass\n")                       # the frozen, older code
+    (old / "LESSONS.md").write_text("# Lessons: prov_query\\n\\n- [L-1] keep me\\n")
+    mine = user / "pipeline_control"
+    m = _json.loads((mine / "capability.json").read_text())
+    m["history"].append({"version": 9, "why": "changed on purpose"})
+    (mine / "capability.json").write_text(_json.dumps(m))
+    (mine / "tool.py").write_text("def register(mcp):\n    pass\n")
+    assert S.sync_shadows() == ["prov_query"]
+    assert (old / "tool.py").read_text() == (S.BUNDLED / "prov_query/tool.py").read_text() and "keep me" in (old / "LESSONS.md").read_text()
+    assert list((old / "versions").glob("shadow-v*/tool.py"))
+    assert (mine / "tool.py").read_text() == "def register(mcp):\n    pass\n"
+    assert S.sync_shadows() == []

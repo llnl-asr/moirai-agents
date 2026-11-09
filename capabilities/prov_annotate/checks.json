@@ -2046,5 +2046,83 @@
   "expect": {
    "contains": "first error: ModuleNotFoundError: No module named 'moirai'"
   }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "class FilterTask:\n    def __init__(self):\n        self.run_str = 'mmseqs filtera3m in.a3m out.a3m --qid 0.2 --diff 3000'\n\n    def on_finish(self):\n        return None\n\n\nif __name__ == '__main__':\n    FilterTask().on_finish()\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "filtered_msa"
+    ],
+    "entity_types": [
+     {
+      "type": "filtered_msa",
+      "role": "output",
+      "description": "the filtered alignment of one sequence",
+      "id_scheme": "sequence"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "FilterTask.on_finish",
+      "name": "filter_msa",
+      "generated": [
+       {
+        "type": "filtered_msa",
+        "key": "s1",
+        "store": "memory"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "contains": "--qid=0.2"
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "class FilterTask:\n    def __init__(self):\n        self.run_str = 'mmseqs filtera3m in.a3m out.a3m --qid 0.2 --diff 3000'\n\n    def on_finish(self):\n        return None\n\n\nif __name__ == '__main__':\n    FilterTask().on_finish()\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "filtered_msa"
+    ],
+    "entity_types": [
+     {
+      "type": "filtered_msa",
+      "role": "output",
+      "description": "the filtered alignment of one sequence",
+      "id_scheme": "sequence"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "FilterTask.on_finish",
+      "name": "filter_msa",
+      "generated": [
+       {
+        "type": "filtered_msa",
+        "key": "s1",
+        "store": "memory"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "contains": "--diff=3000"
+  }
  }
 ]

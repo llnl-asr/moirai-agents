@@ -30,7 +30,7 @@ def expected(spec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     edges: Dict[str, Dict[str, Any]] = {}
 
     def tnode(t: str) -> str:
-        nodes.setdefault(f"t:{t}", {"id": f"t:{t}", "kind": "type", "label": t, "role": roles.get(t, ""), "artifact": t in arts})
+        nodes.setdefault(f"t:{t}", {"id": f"t:{t}", "kind": "type", "label": t, "role": roles.get(t, ""), "artifact": t in arts, "attrs": []})
         return f"t:{t}"
 
     for t in roles:
@@ -40,13 +40,16 @@ def expected(spec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if not name:
             continue
         aid = f"a:{name}"
-        nodes.setdefault(aid, {"id": aid, "kind": "activity", "label": name, "file": a.get("file", "")})
+        nodes.setdefault(aid, {"id": aid, "kind": "activity", "label": name, "file": a.get("file", ""), "inputs": [], "outputs": []})
+        cap = a.get("capture") if isinstance(a.get("capture"), dict) else {}
+        nodes[aid]["inputs"] = sorted(set(nodes[aid]["inputs"]) | {str(k) for k in (cap.get("inputs") or {})})
         for k in ACT_EDGES:
             for ent in a.get(k, []) or []:
                 t = (ent or {}).get("type")
                 if not t:
                     continue
                 e = _edge(k, tnode(t), aid) if k == "used" else _edge(k, aid, tnode(t))
+                nodes[f"t:{t}"]["attrs"] = sorted(set(nodes[f"t:{t}"]["attrs"]) | {str(x) for x in (ent.get("attributes") or {})})
                 cur = edges.setdefault(e["id"], {**e, "conditional": True})
                 cur["conditional"] = cur["conditional"] and bool(ent.get("when"))      # unconditional once any declaration is unconditional
         for r in a.get("relations", []) or []:
@@ -58,15 +61,49 @@ def expected(spec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return {"nodes": list(nodes.values()), "edges": list(edges.values())}
 
 
+CAPTURED = (".input", ".output", ".attribute")      # the types prov_annotate's helper records (v7): one entity per value, uri name=value
+
+
+def captured_type(t: Any) -> bool:
+    return isinstance(t, str) and t.endswith(CAPTURED)
+
+
+def fold(g: Any) -> Dict[str, Dict[str, List[str]]]:
+    """The captured values as properties of what they describe, not nodes of their own: {"attrs": {entity id: ["name=value"]} (attribute
+    entities part_of it), "inputs": {activity id: [...]} (what it used of <activity>.input), "outputs": {activity id: [...]}}."""
+    etype = {i: e.get("type", "") for i, e in g.entities.items()}
+    uri = lambda i: (g.entities.get(i) or {}).get("uri", "") or i       # noqa: E731
+    out: Dict[str, Dict[str, List[str]]] = {"attrs": {}, "inputs": {}, "outputs": {}}
+    for r in g.relations:
+        if etype.get(r["subject"], "").endswith(".attribute") and r.get("object"):
+            out["attrs"].setdefault(r["object"], []).append(uri(r["subject"]))
+    for e in g.edges:
+        t = etype.get(e["entity"], "")
+        if t.endswith(".input") and e["kind"] == "used":
+            out["inputs"].setdefault(e["activity"], []).append(uri(e["entity"]))
+        elif t.endswith(".output") and e["kind"] == "generated":
+            out["outputs"].setdefault(e["activity"], []).append(uri(e["entity"]))
+    return out
+
+
+def _names(values) -> List[str]:
+    return sorted({v.split("=", 1)[0] for vs in values for v in vs if "=" in v})
+
+
 def runtime(g: Any) -> Dict[str, Any]:
-    """The aggregated graph of what was recorded (a provtrace.Graph), with counts."""
+    """The aggregated graph of what was recorded (a provtrace.Graph), with counts. Captured values are not nodes: each entity type lists the
+    attribute names its entities carry (attrs), each activity the names of its inputs and outputs."""
     roles = {t: (d or {}).get("role", "") for t, d in g.types.items()}
-    etype = {i: e.get("type", "") or "?" for i, e in g.entities.items()}
+    etype = {i: e.get("type", "") or "?" for i, e in g.entities.items() if not captured_type(e.get("type", ""))}
     aname = {a["id"]: a["name"] for a in g.activities}
+    fo = fold(g)
     tc = Counter(etype.values())
     ac = Counter(aname.values())
-    nodes = {f"t:{t}": {"id": f"t:{t}", "kind": "type", "label": t, "role": roles.get(t, ""), "count": n} for t, n in tc.items()}
-    nodes.update({f"a:{n}": {"id": f"a:{n}", "kind": "activity", "label": n, "count": k} for n, k in ac.items()})
+    nodes = {f"t:{t}": {"id": f"t:{t}", "kind": "type", "label": t, "role": roles.get(t, ""), "count": n,
+                        "attrs": _names(v for i, v in fo["attrs"].items() if etype.get(i) == t)} for t, n in tc.items()}
+    nodes.update({f"a:{n}": {"id": f"a:{n}", "kind": "activity", "label": n, "count": k,
+                             "inputs": _names(v for i, v in fo["inputs"].items() if aname.get(i) == n),
+                             "outputs": _names(v for i, v in fo["outputs"].items() if aname.get(i) == n)} for n, k in ac.items()})
     ec: Counter = Counter()
     for e in g.edges:
         t, a = etype.get(e["entity"]), aname.get(e["activity"])
@@ -87,20 +124,29 @@ def runtime(g: Any) -> Dict[str, Any]:
     return {"nodes": list(nodes.values()), "edges": edges}
 
 
+def _captured(node_id: str) -> bool:
+    return node_id.startswith("t:") and node_id.endswith(CAPTURED)
+
+
 def diff(exp: Dict[str, Any], run: Dict[str, Any]) -> Dict[str, Any]:
-    """One graph holding both, each node and edge with a status, and a summary in words."""
+    """One graph holding both, each node and edge with a status, and a summary in words. Captured values (an activity's inputs and outputs,
+    an entity's attributes) are recorded by the annotation helper itself, not promised type by type: their status is "captured"."""
     en, rn = {n["id"]: n for n in exp["nodes"]}, {n["id"]: n for n in run["nodes"]}
     ee, re_ = {e["id"]: e for e in exp["edges"]}, {e["id"]: e for e in run["edges"]}
     nodes, edges = [], []
     for i in list(en) + [i for i in rn if i not in en]:
         n = {**en.get(i, {}), **rn.get(i, {})}
         n["count"] = rn.get(i, {}).get("count", 0)
-        n["status"] = "matched" if i in en and i in rn else "missing" if i in en else "unexpected"
+        for k in ("attrs", "inputs", "outputs"):           # the names the spec promised, and the ones recorded
+            if en.get(i, {}).get(k) or rn.get(i, {}).get(k):
+                n[k] = sorted(set(en.get(i, {}).get(k) or []) | set(rn.get(i, {}).get(k) or []))
+        n["status"] = "matched" if i in en and i in rn else "missing" if i in en else "captured" if _captured(i) else "unexpected"
         nodes.append(n)
     for i in list(ee) + [i for i in re_ if i not in ee]:
         e = {**ee.get(i, {}), **re_.get(i, {})}
         e["count"] = re_.get(i, {}).get("count", 0)
-        e["status"] = ("matched" if i in re_ else "conditional" if ee[i].get("conditional") else "missing") if i in ee else "unexpected"
+        e["status"] = ("matched" if i in re_ else "conditional" if ee[i].get("conditional") else "missing") if i in ee else \
+            "captured" if _captured(e["source"]) or _captured(e["target"]) else "unexpected"
         edges.append(e)
     # a node only reached through conditional edges is conditional too when it was never recorded
     cond_only = {n for e in edges if e["status"] == "conditional" for n in (e["source"], e["target"])} - \
@@ -115,7 +161,7 @@ def diff(exp: Dict[str, Any], run: Dict[str, Any]) -> Dict[str, Any]:
             return f"{s} {e['label'] or 'relates to'} {t}"
         return f"{t} used {s}" if e["kind"] == "used" else f"{s} {e['kind']} {t}"     # used: type -> activity
     by = Counter(e["status"] for e in edges)
-    summary = {k: by.get(k, 0) for k in ("matched", "missing", "conditional", "unexpected")}
+    summary = {k: by.get(k, 0) for k in ("matched", "missing", "conditional", "unexpected", "captured")}
     lists = {k: [words(e) for e in edges if e["status"] == k][:50] for k in ("missing", "conditional", "unexpected")}
     lists["missing_types"] = [n["label"] for n in nodes if n["status"] == "missing" and n["kind"] == "type"]
     lists["unexpected_types"] = [n["label"] for n in nodes if n["status"] == "unexpected" and n["kind"] == "type"]

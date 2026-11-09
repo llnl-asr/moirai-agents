@@ -46,7 +46,6 @@ import atexit
 import functools
 import hashlib
 import inspect
-import json
 import multiprocessing.util
 import os
 import re
@@ -58,7 +57,6 @@ TYPES = %s
 _pid = None
 _stopped = None
 _declared = set()                 # capture entity types declared in this process
-MAX_JSON = 8000
 
 
 def stop():
@@ -114,9 +112,11 @@ def _after(act, generated, invalidated, updated, relations, names):
             moirai.relate(getattr(moirai.Relation, relation), _entity(subject, names), _entity(obj, names))
 
 
-# ---- inputs, outputs and attributes: recorded as entities (a parameter entity the activity used, a value it generated, an attributes
-# entity part_of an entity), their values as compact JSON in the uri ("json:{...}"). Capturing never raises into the application.
+# ---- inputs, outputs and attributes, each one value its own small entity "name=value" (the trace keeps a uri of at most ~250 characters
+# and replaces quotes, brackets and the like): an activity used its "<activity>.input" entities (its parameters) and generated its
+# "<activity>.output" entities (what it returned); an entity's "<type>.attribute" entities are part_of it. Capturing never raises into the app.
 _FLAG = re.compile(r"(^|\\s)--?[A-Za-z]")
+MAX_VALUES = 48
 
 
 def _flags(s):
@@ -126,99 +126,98 @@ def _flags(s):
     except ValueError:
         toks = s.split()
     out, i = {}, 0
+    num = lambda t: t.lstrip("-").replace(".", "", 1).isdigit()
     while i < len(toks):
         t = toks[i]
-        if len(t) > 1 and t[0] == "-" and not t.lstrip("-").replace(".", "", 1).isdigit():
-            k, v = t.lstrip("-"), True
+        if len(t) > 1 and t[0] == "-" and not num(t):
+            k, v = t.lstrip("-"), "true"
             if "=" in k:
                 k, v = k.split("=", 1)
-            elif i + 1 < len(toks) and not (toks[i + 1][:1] == "-" and not toks[i + 1].lstrip("-").replace(".", "", 1).isdigit()):
+            elif i + 1 < len(toks) and not (toks[i + 1][:1] == "-" and not num(toks[i + 1])):
                 v, i = toks[i + 1], i + 1
-            out[k] = v
+            out[("--" if len(k) > 1 else "-") + k] = v
         i += 1
     return out
 
 
 def _summ(v, depth=0):
-    """A JSON-able summary: plain values as they are, containers shallowly, arrays by shape, objects by their own attributes (two levels)."""
-    if v is None or isinstance(v, (bool, int, float)):
+    """A plain summary: values as they are, containers shallowly, arrays by shape, objects by their own attributes (two levels)."""
+    if v is None or isinstance(v, (bool, int, float, str)):
         return v
-    if isinstance(v, str):
-        return v if len(v) <= 1000 else v[:1000] + "..."
     if isinstance(v, (bytes, bytearray)):
         return {"type": "bytes", "len": len(v)}
     if isinstance(v, os.PathLike):
         return os.fspath(v)
     if isinstance(v, (list, tuple, set, frozenset)):
         v = list(v)
-        return [_summ(x, depth + 1) for x in v] if depth < 3 and len(v) <= 32 else {"type": "list", "len": len(v)}
+        return [_summ(x, depth + 1) for x in v] if depth < 3 and len(v) <= 16 else {"len": len(v)}
     if isinstance(v, dict):
-        return {str(k): _summ(x, depth + 1) for k, x in list(v.items())[:64]} if depth < 3 else {"type": "dict", "len": len(v)}
+        return {str(k): _summ(x, depth + 1) for k, x in list(v.items())[:32]} if depth < 3 else {"len": len(v)}
     shape = getattr(v, "shape", None)
     if shape is not None and not callable(shape):
         try:
-            return {"type": type(v).__name__, "shape": [int(x) for x in shape], **({"dtype": str(v.dtype)} if hasattr(v, "dtype") else {})}
+            return {"shape": "x".join(str(int(x)) for x in shape), **({"dtype": str(v.dtype)} if hasattr(v, "dtype") else {})}
         except (TypeError, ValueError):
             return {"type": type(v).__name__}
     if depth < 2 and hasattr(v, "__dict__") and not inspect.ismodule(v) and not callable(v):
-        attrs = {}
-        for k, x in list(vars(v).items())[:64]:
-            if k.startswith("__") or callable(x) or inspect.ismodule(x):
-                continue
-            attrs[k] = _summ(x, depth + 1)
-        return {"type": type(v).__name__, "attrs": attrs}
+        return {k: _summ(x, depth + 1) for k, x in list(vars(v).items())[:48] if not k.startswith("__") and not callable(x) and not inspect.ismodule(x)}
     return {"type": type(v).__name__}
 
 
-def _flags_in(v, path, out):
-    """Every command-line string inside a summary, parsed into its flags."""
-    if isinstance(v, str):
-        if " " in v and _FLAG.search(v):
-            f = _flags(v)
-            if f:
-                out[path] = f
-    elif isinstance(v, dict):
+def _pairs(v, path, out, flags):
+    """name -> value text: scalars by their dotted path; a command line also gives its flags; lists of scalars joined with commas."""
+    if isinstance(v, dict):
         for k, x in v.items():
-            _flags_in(x, f"{path}.{k}" if path else k, out)
+            _pairs(x, f"{path}.{k}" if path else str(k), out, flags)
+    elif isinstance(v, list) and all(not isinstance(x, (dict, list)) for x in v):
+        out[path] = ",".join(str(x) for x in v)
     elif isinstance(v, list):
-        for i, x in enumerate(v[:32]):
-            _flags_in(x, f"{path}[{i}]", out)
+        for i, x in enumerate(v):
+            _pairs(x, f"{path}[{i}]", out, flags)
+    else:
+        if isinstance(v, str) and " " in v and _FLAG.search(v):
+            flags.update(_flags(v))
+        out[path] = "" if v is None else str(v)
 
 
-def _declare(etype, role, description):
+def _value_entities(etype, role, description, pairs):
+    """One entity per name=value (at most MAX_VALUES)."""
     if etype not in _declared:
         _declared.add(etype)
         moirai.entity_type(etype, getattr(moirai.Role, role), description)
+    out = []
+    for k, v in list(pairs.items())[:MAX_VALUES]:
+        text = f"{k}={v}"
+        if len(text) > 240:
+            text = text[:237] + "..."
+        out.append((etype, hashlib.sha1((etype + text).encode()).hexdigest()[:16], moirai.Store.MEMORY, text))
+    return out
 
 
-def _value_entity(etype, role, description, value):
-    _declare(etype, role, description)
-    j = json.dumps(value, default=str, sort_keys=True)
-    if len(j) > MAX_JSON:
-        j = json.dumps({"truncated": True, "head": j[:MAX_JSON]})
-    return (etype, hashlib.sha1((etype + j).encode()).hexdigest()[:16], moirai.Store.MEMORY, "json:" + j)
+def _collect(named, auto_names):
+    flags, values, args = {}, {}, {}
+    for label, v in named.items():
+        _pairs(_summ(v), label, values, flags)
+    for k, v in (auto_names or {}).items():
+        _pairs(_summ(v), k, args, flags)
+    out = dict(flags)                               # flags first: the knobs of a command line
+    out.update({k: v for k, v in values.items() if k not in out})
+    out.update({k: v for k, v in args.items() if k not in out and len(v) <= 200 and not k.endswith(".type")})
+    return out
 
 
 def _inputs(act, name, capture, names):
     try:
-        value = {}
-        if capture.get("auto", True) and names:
-            value["args"] = {k: _summ(v) for k, v in names.items()}
         named = {}
         for label, fn in (capture.get("inputs") or {}).items():
             try:
-                named[label] = _summ(fn(**names) if callable(fn) else fn)
+                named[label] = fn(**names) if callable(fn) else fn
             except Exception as e:                   # an input that cannot be read is recorded as such, never raised
-                named[label] = {"error": type(e).__name__}
-        if named:
-            value["values"] = named
-        flags = {}
-        _flags_in(value, "", flags)
-        if flags:
-            value["flags"] = flags
-        if value:
-            act.relate(moirai.Relation.USED, _value_entity(name + ".inputs", "PARAMETER", "The inputs of activity " + name + ": its arguments (with defaults), "
-                                                           "the attributes of the object it runs on, named values, and the flags of any command line among them.", value))
+                named[label] = "unreadable: " + type(e).__name__
+        pairs = _collect(named, names if capture.get("auto", True) else {})
+        for e in _value_entities(name + ".input", "PARAMETER", "A parameter of activity " + name + ": an argument (with its default), an attribute of the object "
+                                 "it runs on, a flag of a command line, or a named value; its uri is name=value.", pairs):
+            act.relate(moirai.Relation.USED, e)
     except Exception:
         pass
 
@@ -226,23 +225,27 @@ def _inputs(act, name, capture, names):
 def _output(act, name, capture, result):
     try:
         if capture.get("output", True) and result is not None:
-            act.relate(moirai.Relation.GENERATED, _value_entity(name + ".output", "INTERMEDIATE", "What activity " + name + " returned, summarized.",
-                                                                {"value": _summ(result)}))
+            pairs = {}
+            _pairs(_summ(result), "value", pairs, {})
+            for e in _value_entities(name + ".output", "INTERMEDIATE", "What activity " + name + " returned; its uri is name=value.", pairs):
+                act.relate(moirai.Relation.GENERATED, e)
     except Exception:
         pass
 
 
 def _attrs(entity, attrs, names):
-    """An entity's attributes: their own entity, part_of it."""
+    """An entity's attributes, each its own entity part_of it."""
     try:
-        value = {}
+        named = {}
         for label, fn in attrs.items():
             try:
-                value[label] = _summ(fn(**names) if callable(fn) else fn)
+                named[label] = fn(**names) if callable(fn) else fn
             except Exception as e:
-                value[label] = {"error": type(e).__name__}
-        if value:
-            a = _value_entity(entity[0] + ".attributes", "REFERENCE", "Attributes of a " + entity[0] + " entity.", {"of": entity[1], **value})
+                named[label] = "unreadable: " + type(e).__name__
+        pairs = {}
+        for label, v in named.items():
+            _pairs(_summ(v), label, pairs, {})
+        for a in _value_entities(entity[0] + ".attribute", "REFERENCE", "An attribute of a " + entity[0] + " entity; its uri is name=value.", pairs):
             moirai.relate(moirai.Relation.PART_OF, a, entity)
     except Exception:
         pass
@@ -295,7 +298,7 @@ def _yaml_step_cli(argv):
     try:
         name, rest = argv[1], argv[3:]
         rows = [rest[i:i + 5] for i in range(0, len(rest) - len(rest) % 5, 5)]
-        if not rows:
+        if not any(r[0] in ("used", "generated") for r in rows):   # parameters alone are no activity (a step that skipped its work)
             return 0
         start()
         with moirai.Activity(name) as act:
@@ -329,7 +332,8 @@ class _Names:
 
 
 Role = Store = Relation = _Names()
-events, links, types = [], [], []
+events, links, types, captured = [], [], [], []
+CAPTURED = (".input", ".output", ".attribute")
 
 
 def initialize(log_file=""):
@@ -341,6 +345,9 @@ def entity_type(name, role, description=""):
 
 
 def relate(relation, subject, obj):
+    if str(subject[0]).endswith(CAPTURED):
+        captured.append({"of": [obj[0], obj[1]], "type": subject[0], "value": subject[3] if len(subject) > 3 else ""})
+        return
     links.append([relation, subject[0], subject[1], obj[0], obj[1]])
 
 
@@ -356,12 +363,15 @@ class Activity:
         return False
 
     def relate(self, relation, entity):
+        if str(entity[0]).endswith(CAPTURED):      # what the activity was run with or returned: shown apart from the relations the spec promises
+            captured.append({"activity": self.name, "relation": relation, "type": entity[0], "value": entity[3] if len(entity) > 3 else ""})
+            return
         self.rel.append([relation, entity[0], entity[1]])
 
 
 def finalize():
     with open(os.environ["MOIRAI_FAKE_OUT"], "w") as f:
-        json.dump({"events": events, "links": links, "types": types}, f)
+        json.dump({"events": events, "links": links, "types": [t for t in types if not str(t).endswith(CAPTURED)], "captured": captured}, f)
 '''
 
 RUNNER = "import runpy, sys; sys.path[:0] = sys.argv[2:4]; runpy.run_path(sys.argv[1], run_name='__main__')"
@@ -1183,7 +1193,7 @@ def _run_steps(dst, d, names, variables, step_env):
     ws = Path(d) / "ws"
     ws.mkdir()
     vals = {"SPECROOT": str(dst), **{str(k): str(x) for k, x in variables.items()}}
-    events, links, runs = [], [], []
+    events, links, runs, captured = [], [], [], []
     for i, n in enumerate(x.strip() for x in names.split(",") if x.strip()):
         if n not in steps:
             return {"status": "error", "problems": [f"run_steps: no step {n} with a cmd (steps: {sorted(steps)})"]}
@@ -1194,9 +1204,10 @@ def _run_steps(dst, d, names, variables, step_env):
         r = subprocess.run([bash, str(script)], cwd=str(ws), capture_output=True, text=True, timeout=120, env=env)
         seen = json.loads(got.read_text()) if got.is_file() else {"events": [], "links": []}
         events += seen["events"]
+        captured += seen.get("captured", [])
         links += seen["links"]
         runs.append({"step": n, "rc": r.returncode, "stdout": r.stdout[-300:], "stderr": r.stderr[-300:]})
-    return {"step_rcs": [x["rc"] for x in runs], "step_runs": runs, "events": events, "links": links}
+    return {"step_rcs": [x["rc"] for x in runs], "step_runs": runs, "events": events, "links": links, "captured": captured}
 
 
 # ---- C and C++ ----------------------------------------------------------------------------------------------------------------------------
@@ -1348,6 +1359,19 @@ def _check_spec(spec, root):
                 bad += [f"{where}: entity {e.get('type')}: {k} is Python; a yaml_step takes key, uri and when as shell text" for k in ("key_expr", "uri_expr") if e.get(k)]
                 if not e.get("key") and (e.get("key_expr")):
                     pass
+        cap = a.get("capture")
+        if cap not in (None, False, True) and not isinstance(cap, dict):
+            bad.append(f"{where}: capture is false, or {{auto, output, inputs: {{label: expression}}}}")
+        elif isinstance(cap, dict):
+            if set(cap) - {"auto", "output", "inputs"}:
+                bad.append(f"{where}: capture takes auto, output and inputs, not {sorted(set(cap) - {'auto', 'output', 'inputs'})}")
+            if cap.get("inputs") is not None and not isinstance(cap["inputs"], dict):
+                bad.append(f"{where}: capture.inputs is {{label: expression}}")
+            if cap.get("inputs") and not (py or mode == "yaml_step"):
+                bad.append(f"{where}: capture.inputs works on Python and Maestro YAML; for C and C++ record what matters as entities")
+        for kind, e in ents:
+            if e.get("attributes") is not None and (not isinstance(e["attributes"], dict) or not py):
+                bad.append(f"{where}: {kind} {e.get('type')}: attributes is {{label: Python expression}}, on Python activities only")
         for r in a.get("relations", []):
             if r.get("relation") not in ENTITY_RELATIONS:
                 bad.append(f"{where}: relation must be one of {sorted(ENTITY_RELATIONS)}, not {r.get('relation')}")
@@ -1702,7 +1726,7 @@ def register(mcp):
                 env = {"PATH": os.environ.get("PATH", ""), "HOME": d, "MOIRAI_FAKE_OUT": str(got)}
                 r = subprocess.run([sys.executable, "-I", "-c", RUNNER, str(dst / run), str(dst), str(fake)], cwd=str(dst), capture_output=True, text=True, timeout=60, env=env)
                 seen = json.loads(got.read_text()) if got.is_file() else {"events": [], "links": []}
-                out.update({"rc": r.returncode, "stderr": r.stderr[-600:], "events": seen["events"], "links": seen["links"]})
+                out.update({"rc": r.returncode, "stderr": r.stderr[-600:], "events": seen["events"], "links": seen["links"], "captured": seen.get("captured", [])})
             if run_steps:
                 ran = _run_steps(dst, d, run_steps, variables, step_env)
                 if ran.get("status") == "error":

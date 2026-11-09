@@ -1,6 +1,6 @@
 ---
 name: prov_annotate
-description: Add moirai provenance to an application - find data accesses, agree entity types and activities with the user, insert them into a copy (decorate a function, patch or subclass a method, annotate a statement, record a shell step of a Maestro YAML, invalidate, conditional edges), validate, and show the user an entity-type relationship diagram of what was annotated at the gate. Load for the annotate stage, or when a spec needs an inherited method, an inline subprocess step, a delete, a key from a local variable or an optional input, when the work is a shell command in a Maestro YAML `cmd:` step (AlphaFold 3, Rosetta FlexPepDock, BioTox, yaml_step), or when the annotate verdict is inconclusive about PYTHONPATH, moirai_env.sh or maestro_dry.
+description: Add moirai provenance to an application - find data accesses, agree entity types and activities with the user, insert them into a copy (decorate a function, patch or subclass a method, annotate a statement, record a shell step of a Maestro YAML, invalidate, conditional edges), validate, and show the user an entity-type relationship diagram of what was annotated at the gate. Load for the annotate stage, or when a spec needs an inherited method, an inline subprocess step, a delete, a key from a local variable or an optional input, when the work is a shell command in a Maestro YAML `cmd:` step (AlphaFold 3, Rosetta FlexPepDock, BioTox, yaml_step), when a question about the parameters or flags of a step finds none recorded (a no-argument on_finish/run/__call__ hook whose command line was built in the constructor), or when the annotate verdict is inconclusive about PYTHONPATH, moirai_env.sh or maestro_dry.
 ---
 Cross-references: [[moirai_integrate]] [[workload_elmerfold]] [[workload_biotox]] [[dftracer-provenance]] [[dftracer-annotate-general]]
 
@@ -41,6 +41,23 @@ moirai itself has all of these (moirai/include/moirai/provenance.h): activity re
 - Refused with a reason: a step with its own `trap ... EXIT`, one that uses `exec`, a `shell:` other than bash or sh, a `cmd` that is not a `|` block, an entity text with a double quote, backtick or `$(command)`, and `invalidated`, `updated`, `relations` (Python only).
 - A scientific artifact may be generated only by `yaml_step` activities; `annotate_spec` counts them.
 - Try it before annotate_spec: `annotate_preview` with the YAML as text and `run_steps` runs the wrapped steps with bash against a fake moirai (`variables` for the Maestro names, `step_env` to break moirai on purpose).
+
+## Capture the context (inputs, outputs, attributes)
+- Every activity records what it was run with and what it returned, by default, one small entity per value with uri `name=value`: `<activity>.input` (role parameter, used) for its arguments with their defaults, the attributes of the object a method runs on (`self`), and the flags of every command line among them (flags first); `<activity>.output` (generated) for its return value. A Maestro step records the `$(VAR)` study variables its command uses. One entity per value because a trace keeps about 250 characters of a uri and rewrites quotes and brackets: never put JSON in a uri.
+- Where the parameters are not in the arguments - a method that reads `self.config`, a command built inside the function, a value read from a file or the environment - name them: `capture: {inputs: {label: expression}}` (expressions of the arguments; for a statement, of its locals; for a Maestro step, shell text such as `${PEP_NSTRUCT}`).
+- No-argument hook whose command or parameters were built in the constructor (structure: a callback/hook method such as `on_finish`, `on_done`, `run`, `__call__` taking only `self`, of an object whose `__init__` or base class built the command line or parameter set and stored it on `self`): its arguments are empty, so default capture has nothing to record and a question about its flags finds no input entity (missed_inputs / special_structure). Name the stored field: `capture: {inputs: {"command": "self.run_str"}}` (use the real attribute; one label per field). The flags are then recorded as `<activity>.input` entities, flags first. Explore for it: for each wrapped method with no arguments besides `self`, read the class constructor and its base classes (`__init__`, `super().__init__`, a `build_*`/`make_*` command helper) for the attribute that holds the command string, argv list or parameter dict (look for assignments to `self.<x>` of a joined command, `shlex.join`, `" ".join`, or `subprocess` arguments), and check that the value is final when the hook runs. Also look at the other wrapped hooks of the same class family: they share the base class field.
+- Check that a hook is captured: `annotate_preview` with a two-class file (a base class whose `__init__` stores `self.run_str = "tool --qid 0.2 --diff 3000"`, a subclass with `def on_finish(self): pass`, a driver that instantiates and calls it), the spec wrapping `Sub.on_finish` first WITHOUT `capture` (the fake moirai shows no input entity carrying `--qid`/`--diff`), then WITH `capture: {inputs: {"command": "self.run_str"}}` (the input entity carries both flags). Add the pair as a check when this rule is changed.
+- Entities may carry attributes worth asking about (sequence count, resolution, score): `attributes: {label: expression}` on the used or generated entry; they become `<type>.attribute` entities (`name=value`), part_of the entity.
+- `capture: false` only for a hot activity where the cost matters; say why in the spec.
+- Every entity type's description is extended with its attributes and the activities expected to produce and use it: write the description itself as what the entity is.
+
+## Inputs, outputs and attributes (captured by default)
+- Every Python activity (wrap, patch, subclass) records, per call: its arguments with their defaults, the attributes of the object it runs on (`self`, two levels), the flags of any command line among them (`--qid 0.2`), as `<activity>.input` entities (`name=value`, role parameter, used); and its return value as `<activity>.output` entities (generated). Nothing to write in the spec; `capture: false` turns it off for a hot function.
+- Parameters that live elsewhere - a config object, an environment variable, a command string built in another function - are named in the spec: `capture: {inputs: {"filter command": "self.run_str", "threshold": "cfg.qid"}}` (expressions over the call's arguments; for a statement, over its locals).
+- A Maestro step (`yaml_step`) records the `$(VAR)` study parameters its command uses; `capture: {inputs: {NAME: "$VAR"}}` adds shell variables.
+- An entity's attributes: `attributes: {"n_sequences": "len(result)", "size": "os.path.getsize(path)"}` on the entity in an activity; they become `<type>.attribute` entities `part_of` it. Give each entity type a description; the generated description adds its attributes and the activities that produce and use it.
+- When exploring an app, find each step's real knobs (thresholds, filters, models, seeds) and make sure they are captured: arguments are automatic, anything else goes in `capture.inputs`. Ask the user which parameters matter when it is not clear.
+- Values are cut at ~240 characters, and the trace replaces quotes and brackets: record a long or structured value by its parts (named inputs), not as one string.
 
 ## Constraints
 - The application source is read-only; `annotate_apply` always works on the provenance copy, `<session>/provenance/source`.
@@ -99,6 +116,7 @@ The original tool is `annotate_apply`, driven by the spec: correct the spec, re-
 | `bash_syntax` | a key, uri or when breaks the shell: change that text in the spec, re-run `annotate_apply` |
 | `maestro_dry` fails | the wrapper broke the YAML (it passes on the source): re-run `annotate_apply`; if it persists `capability_update` with a check. Inconclusive: pass `maestro=` and `maestro_args=` |
 | a code pattern generated wrongly | `capability_update` with a check of that pattern (use `annotate_preview`) |
+| a gap says an activity has no parameters/flags recorded (no `.input` entity with the flags) | the wrapped method takes no arguments and its command was built elsewhere: add `capture.inputs` naming the field on `self` (see Capture the context), `annotate_apply`, validate |
 | the diagram is wrong or unreadable | it is drawn from the applied spec: fix the spec and re-apply; for a layout or size problem `capability_update` with a check using `annotate_diagram_preview` |
 
 ## Self-heal
@@ -107,9 +125,11 @@ The original tool is `annotate_apply`, driven by the spec: correct the spec, re-
 - Generated code wrong for a pattern: `capability_update` with an `annotate_preview` check for that pattern.
 - A verdict inconclusive for a check that a later stage owns: that is a tool-design fault, not something to wait out. Move the check to the later stage's validator and list it under `deferred` here (as `helper_on_pythonpath` was).
 - A yaml_step records nothing at run time: set `MOIRAI_YAML_STEP_LOG=<file>` for the step and read it; check `MOIRAI_PYTHON` / `MOIRAI_SERVICE` reach the step's environment (flux and maestro pass only what the launcher forwards).
+- A parameters question finds no input entity for an annotated step: check whether the wrapped method has arguments; if only `self`, find the constructor field that holds the command and add it to `capture.inputs`. The fix is verified by `annotate_validate` plus the next traced run; until a run, the gap stays pending.
 
 ## Self-learn
 - Anything new explored here (workload, software, tool, system) becomes a capability: `capability_builder`, Rules.
 - A choice of entity or key the user corrected: `pipeline_feedback(kind=remember)`.
 - A code pattern the tool mishandled: `pipeline_feedback(kind=process)`, then update this capability.
 - What the user said they need to decide at the gate (for example, the diagram of what was covered): `pipeline_feedback(kind=process)`, then update this capability with a check.
+- A gap closed by a missing `capture` on a no-argument hook (G-082a03t0): when more such structures are met (parameters kept in a config file, environment or a sibling object), extend the capture rule with that structure.

@@ -30,37 +30,63 @@ const _showTab0=showTab;
 showTab=function(t){_showTab0(t);const on=t==='wb';document.body.classList.toggle('views',on);
  if(on){$('#chatview').hidden=false;$('#tabwb').classList.remove('on')}
  for(const k of Object.keys(VIEW_L))$('#tv'+k).classList.toggle('on',on&&WB.view===k)};
+// One app is selected on the left and stays selected across the three views: Annotate shows the app, Live Run its live runs, Query its
+// baseline or one of its runs (switchers in the view's header). A dataset is selected the same way and answers in Query.
+try{WB.app=localStorage.getItem('moirai_app')||null;WB.pick=JSON.parse(localStorage.getItem('moirai_pick')||'null')||{live:{},query:{}}}catch(_){WB.pick={live:{},query:{}}}
+const savePick=()=>{try{localStorage.setItem('moirai_app',WB.app||'');localStorage.setItem('moirai_pick',JSON.stringify(WB.pick))}catch(_){}};
 function wbShow(v){v=VIEW_L[v]?v:'ann';WB.view=v;try{localStorage.setItem('moirai_view',v)}catch(_){}
  try{history.replaceState(null,'','#'+{ann:'annotate',live:'live',query:'query'}[v])}catch(_){}
- const keep=WB.sel&&wbPoolOf(v).some(x=>x.id===WB.sel.id)?WB.sel.id:null;   // the same run in another view
- WB.sel=null;clearInterval(WB.timer);showTab('wb');wbLoad(!keep).then(()=>{if(keep)wbOpen(keep)})}
+ WB.sel=null;clearInterval(WB.timer);showTab('wb');wbLoad().then(wbOpenView)}
 for(const k of Object.keys(VIEW_L)){const b=$('#tv'+k);if(b)b.onclick=()=>wbShow(k)}
+function appOf(id){const x=wbItem(id);return x?(x.kind==='live'?x.parent:x.id):null}
+function livesOf(app){return WB.items.lives.filter(l=>l.parent===app).sort((a,b)=>(b.created||0)-(a.created||0))}
+// go to a view on a given target (an app, a live run or a dataset): its app becomes the selected one, the target that view's pick
+function goView(view,target){const app=appOf(target);if(app){WB.app=app;if(view!=='ann'&&target)WB.pick[view][app]=target;savePick()}wbShow(view)}
+function targetFor(v){const it=WB.app&&wbItem(WB.app);if(!it)return null;
+ if(it.kind==='analysis')return v==='query'?it.id:null;
+ if(v==='ann')return it.id;
+ const lv=livesOf(it.id),p=WB.pick[v][it.id];
+ if(v==='live')return p&&lv.some(x=>x.id===p)?p:(lv[0]||{}).id||null;
+ return p&&(p===it.id||lv.some(x=>x.id===p))?p:(lv[0]||{}).id||it.id}
+async function wbOpenView(){if(!document.body.classList.contains('views'))return;
+ document.querySelectorAll('#wblist .wbi').forEach(e=>e.classList.toggle('on',e.dataset.id===WB.app));
+ const it=WB.app&&wbItem(WB.app);
+ if(!it)return wbHome();
+ const t=targetFor(WB.view);
+ if(!t)return wbHome(it.kind==='analysis'?'dataset':'live');
+ return wbOpen(t)}
+// the switcher in a view's header: which run of the selected app
+function targetBar(){const it=WB.app&&wbItem(WB.app);if(!it||it.kind==='analysis'||WB.view==='ann')return '';
+ const lv=livesOf(it.id),cur=WB.sel&&WB.sel.id,chip=(x,label)=>{const [cls,word]=WB_STATE[x.state]||['',x.state];
+  return `<button class="wb-tg${cur===x.id?' on':''}" data-target="${esc(x.id)}"><span class="wbd ${cls}"></span>${esc(label||x.name)} <span class="sub">${esc(word)}</span></button>`};
+ const chips=(WB.view==='query'?chip(it,'baseline'):'')+lv.map(x=>chip(x)).join('')+(WB.view==='live'?'<button class="wb-tg new" data-newlive="1">+ new live run</button>':'');
+ return `<div class="wb-targets"><span class="sub">${WB.view==='live'?'Live runs of':'Ask about'} <b>${esc(it.name)}</b>:</span>${chips}</div>`}
+$('#wbview').addEventListener('click',e=>{const t=e.target.closest('[data-target]');if(t){e.preventDefault();const app=appOf(t.dataset.target);if(app){WB.pick[WB.view][app]=t.dataset.target;savePick()}wbOpen(t.dataset.target);return}
+ if(e.target.closest('[data-newlive]')){e.preventDefault();wbHome('live')}});
 
-// ---- the list on the left: what this view is about
-async function wbLoad(draw){if(!me)return;const d=await api('api/workbench');if(!d||d.error)return;WB.items=d;
+// ---- the list on the left: the apps (and datasets); the selected one stays selected across the views
+async function wbLoad(){if(!me)return;const d=await api('api/workbench');if(!d||d.error)return;WB.items=d;
  if(!document.body.classList.contains('views'))return;
- const sel=WB.sel&&WB.sel.id,row=(x,sub)=>{const [cls,word]=WB_STATE[x.state]||['',x.state];
-  return `<div class="wbi ${sel===x.id?'on':''}${sub?' sub2':''}" data-id="${esc(x.id)}" title="${esc(x.id)}"><span class="wbd ${cls}"></span><span class="t">${esc(x.name)}</span><span class="s">${esc(word)}${x.jobs_running?` · ${x.jobs_running} job${x.jobs_running>1?'s':''}`:''}</span></div>`};
- let h='';
- if(WB.view==='ann')h=`<div class="shead">Apps<a data-new="app">+ annotate an app</a></div>${d.apps.map(x=>row(x)).join('')||'<div class="wbe">none yet</div>'}`;
- else if(WB.view==='live')h=`<div class="shead">Live runs<a data-new="live">+ new live run</a></div>`+(d.apps.filter(a=>a.can_live||d.lives.some(l=>l.parent===a.id)).map(a=>
-   `<div class="wbg">${esc(a.name)}</div>${d.lives.filter(l=>l.parent===a.id).map(x=>row(x,1)).join('')||'<div class="wbe sub2">no run yet</div>'}`).join('')||'<div class="wbe">Annotate an app first: a live run uses its annotation.</div>');
- else h=`<div class="shead">Live runs</div>${d.lives.map(x=>row(x)).join('')||'<div class="wbe">none yet</div>'}
-   <div class="shead">Apps <span class="sub">baseline</span></div>${wbPoolOf('query').filter(x=>x.kind==='run').map(x=>row(x)).join('')||'<div class="wbe">none yet</div>'}
-   <div class="shead">Datasets<a data-new="data">+ open data</a></div>${d.datasets.map(x=>row(x)).join('')||'<div class="wbe">none yet</div>'}`;
- $('#wblist').innerHTML=h;
- $('#wblist').querySelectorAll('.wbi').forEach(e=>e.onclick=()=>wbOpen(e.dataset.id));
- $('#wblist').querySelectorAll('[data-new]').forEach(a=>a.onclick=e=>{e.preventDefault();wbHome(a.dataset.new)});
- if(WB.sel){const it=wbItem(WB.sel.id);if(it)WB.sel.item=it}
- if(!WB.sel&&session){const it=wbPoolOf(WB.view).find(x=>x.chat===session||x.query_chat===session);if(it){await wbOpen(it.id);return}}
- if(!WB.sel&&(draw||!$('#wbview').dataset.home))wbHome()}
-function wbPoolOf(v){const d=WB.items;return v==='ann'?d.apps:v==='live'?d.lives:[...d.lives,...d.apps.filter(a=>a.diff||a.state==='done'||(a.steps||[]).some(s=>s.name==='baseline'&&s.status==='passed')),...d.datasets]}
+ if(!WB.app&&session){const it=[...d.apps,...d.lives,...d.datasets].find(x=>x.chat===session||x.query_chat===session);if(it){WB.app=appOf(it.id);savePick()}}
+ if(WB.app&&!wbItem(WB.app)){WB.app=null;savePick()}
+ const row=x=>{const [cls,word]=WB_STATE[x.state]||['',x.state],lv=livesOf(x.id),run=lv.filter(l=>l.state==='running').length,og=(x.gaps||[]).filter(g=>g.status==='open').length;
+  return `<div class="wbi ${WB.app===x.id?'on':''}" data-id="${esc(x.id)}" title="${esc(x.id)}"><span class="wbd ${cls}"></span><span class="t">${esc(x.name)}</span><span class="s">${esc(word)}${lv.length?` · ${lv.length} run${lv.length>1?'s':''}${run?` (${run} live)`:''}`:''}${og?` · ${og} gap${og>1?'s':''}`:''}</span></div>`};
+ $('#wblist').innerHTML=`<div class="shead">Apps<a data-new="app">+ annotate an app</a></div>${d.apps.map(row).join('')||'<div class="wbe">none yet</div>'}
+  <div class="shead">Datasets<a data-new="data">+ open data</a></div>${d.datasets.map(row).join('')||'<div class="wbe">none yet</div>'}`;
+ $('#wblist').querySelectorAll('.wbi').forEach(e=>e.onclick=()=>{WB.app=e.dataset.id;savePick();const it=wbItem(WB.app);if(it&&it.kind==='analysis'&&WB.view!=='query')return wbShow('query');wbOpenView()});
+ $('#wblist').querySelectorAll('[data-new]').forEach(a=>a.onclick=e=>{e.preventDefault();WB.app=null;savePick();WB.sel=null;
+  document.querySelectorAll('#wblist .wbi').forEach(x=>x.classList.remove('on'));if(a.dataset.new==='data'&&WB.view!=='query'){WB.view='query';showTab('wb')}wbHome(a.dataset.new)});
+ if(WB.sel){const it=wbItem(WB.sel.id);if(it)WB.sel.item=it}}
+function wbPoolOf(v){const d=WB.items;return v==='query'?[...d.apps,...d.datasets]:d.apps}
 function wbItem(id){const d=WB.items;return [...d.apps,...d.lives,...d.datasets].find(x=>x.id===id)}
 
 // ---- the home of each view: what it is for, and how to start
 function wbHome(what){WB.sel=null;clearInterval(WB.timer);const v=$('#wbview');v.dataset.home='1';delete v.dataset.h;
- document.querySelectorAll('#wblist .wbi').forEach(e=>e.classList.remove('on'));
- const d=WB.items,apps=d.apps.filter(a=>a.can_live);
+ const d=WB.items,sel=WB.app&&wbItem(WB.app),apps=d.apps.filter(a=>a.can_live&&(!sel||sel.kind!=='run'||a.id===sel.id));
+ if(what==='dataset'){v.innerHTML=`<div class="wb-home"><h2>${esc(sel?sel.name:'Dataset')}</h2><p class="sub">This is a dataset: provenance someone else recorded. It has no annotation and no live runs of its own; ask about it in the Query view.</p><button class="btn primary" id="wbtoq">Query it</button></div>`;
+  $('#wbtoq').onclick=()=>wbShow('query');return}
+ if(sel&&sel.kind==='run'&&WB.view==='live'&&!sel.can_live){v.innerHTML=`<div class="wb-home"><h2>${esc(sel.name)}</h2><p class="sub">A live run uses the app's annotation: finish annotating it first (its integrate stage).</p><button class="btn primary" id="wbtoa">Annotate it</button></div>`;
+  $('#wbtoa').onclick=()=>wbShow('ann');return}
  const forms={
   ann:`<form class="wb-start" id="wbapp"><h3>✎ Annotate an app</h3><p class="sub">The agent explores the app, proposes what to record, annotates it, runs a baseline and shows you what the annotation promised next to what was recorded. Then it publishes the code.</p>
     <label>Application<input name="src" placeholder="app directory or git URL" required></label>
@@ -81,10 +107,10 @@ function wbHome(what){WB.sel=null;clearInterval(WB.timer);const v=$('#wbview');v
   live:['Live Run','Run an annotated app for hours and watch its provenance graph form. When the run ends, its data is published.','live'],
   query:['Query','Ask about the provenance of a live run (while it runs, or after), an app’s baseline or any dataset: where something came from, what it affected, and the evidence for it. Pick one on the left.','data']}[WB.view];
  const pool=wbPoolOf(WB.view).slice().sort((a,b)=>(b.updated||0)-(a.updated||0)).slice(0,6);
- v.innerHTML=`<div class="wb-home"><h2>${intro[0]}</h2><p class="sub">${intro[1]}</p><div class="wb-starts">${forms[what==='data'?'data':what==='live'?'live':what==='app'?'ann':intro[2]]}</div>
+ v.innerHTML=`${what==='live'&&sel?targetBar():''}<div class="wb-home"><h2>${what==='live'&&sel?esc(sel.name)+': a new live run':intro[0]}</h2><p class="sub">${intro[1]}</p><div class="wb-starts">${forms[what==='data'?'data':what==='live'?'live':what==='app'?'ann':intro[2]]}</div>
   ${pool.length?`<h3 style="margin-top:22px">Recent</h3><div class="wb-recent">${pool.map(x=>{const [cls,word]=WB_STATE[x.state]||['',x.state];
    return `<div class="wb-rc" data-id="${esc(x.id)}"><span class="wbd ${cls}"></span><b>${esc(x.name)}</b><span class="sub">${esc(x.app?x.app+' · ':'')}${esc(word)} · ${ago(x.updated)}</span></div>`}).join('')}</div>`:''}</div>`;
- v.querySelectorAll('.wb-rc').forEach(e=>e.onclick=()=>wbOpen(e.dataset.id));
+ v.querySelectorAll('.wb-rc').forEach(e=>e.onclick=()=>{WB.app=appOf(e.dataset.id);savePick();wbLoad().then(wbOpenView)});
  const fa=$('#wbapp');if(fa)fa.onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target),name=(f.get('name')||'').trim();
   const msg=`Annotate an app${name?` named ${name}`:''} for provenance.\nApplication: ${f.get('src')}\nSmall test command: ${f.get('cmd')}\n`+
    'Run the Run pipeline: explore, smoke, discover, annotate, integrate, moirai_smoke, baseline, then the graph stage (show me the diff of what the annotation promised against what the baseline recorded), then package (publish the code).';
@@ -92,14 +118,14 @@ function wbHome(what){WB.sel=null;clearInterval(WB.timer);const v=$('#wbview');v
  const fl=$('#wblive');if(fl&&fl.querySelector('select'))fl.onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target),m=$('#wblerr');m.textContent='creating…';
   const app=WB.items.apps.find(a=>a.id===f.get('parent')),vals=liValues(fl);
   const r=await api('api/workbench/live',{parent:f.get('parent'),name:(f.get('name')||'').trim(),...(app&&app.live_inputs?{values:vals}:{command:(f.get('cmd')||'').trim()})});if(!r||r.error){m.textContent=(r&&r.error)||'could not create';return}
-  m.textContent='';await wbLoad();await wbOpen(r.pipeline);
+  m.textContent='';WB.app=f.get('parent');WB.pick.live[WB.app]=r.pipeline;savePick();await wbLoad();await wbOpen(r.pipeline);
   const hrs=+f.get('hours')||12,q=(f.get('queue')||'').trim(),chosen=Object.entries(r.inputs||{}).map(([k,v])=>`- ${k}: ${v}`).join('\n');
   sendText(`Start live run ${r.pipeline} (a live pipeline of app ${f.get('parent')}).\n${chosen?`Chosen inputs:\n${chosen}\n`:''}Run command: ${r.command||'the app\'s run command'}\nTime limit: ${hrs} h${q?`, queue ${q}`:''}.\n`+
    'Show me the exact command, limit and queue and ask me before starting it with moirai_live_run. When it ends, validate it and publish its data (publish_data).',false,[])};
  if(fl&&fl.querySelector('select')){const ps=fl.querySelector('select[name=parent]');ps.onchange=()=>liForm(fl);liForm(fl)}
  const fd=$('#wbdata');if(fd)fd.onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target),m=$('#wbderr');m.textContent='opening… (reading the traces once)';
   const r=await api('api/workbench/dataset',{path:f.get('path'),name:f.get('name')});if(!r||r.error){m.textContent=(r&&r.error)||'could not open';return}
-  m.textContent='';await wbLoad();wbOpen(r.pipeline)};
+  m.textContent='';WB.app=r.pipeline;savePick();await wbLoad();goView('query',r.pipeline)};
  const fi=v.querySelector('form input,form select');if(fi&&what)fi.focus()}
 
 // ---- a live run's inputs, as the annotation phase described them: dropdowns and fields, and the command they make
@@ -124,7 +150,8 @@ async function liPreview(fl,app){const r=await api(`api/workbench/render?pipelin
 async function wbOpen(id){const it=wbItem(id);if(!it)return;
  WB.sel={id,item:it,view:WB.view};WB.stage=null;delete $('#wbview').dataset.home;delete $('#wbview').dataset.h;clearInterval(WB.timer);
  WB.answers=[];WB.pins=[];WB.card=null;AGG.ann=AGG.live=AGG.q=null;Object.assign(Q,{sel:null,pick:null,g:null,cy:null,sig:'',seen:null,drawn:0});
- document.querySelectorAll('#wblist .wbi').forEach(e=>e.classList.toggle('on',e.dataset.id===id));
+ {const app=appOf(id);if(app){WB.app=app;if(WB.view!=='ann')WB.pick[WB.view][app]=id;savePick()}}
+ document.querySelectorAll('#wblist .wbi').forEach(e=>e.classList.toggle('on',e.dataset.id===WB.app));
  $('#wbview').innerHTML='<div class="sub" style="padding:20px">loading…</div>';
  let chat=it.chat;
  if(WB.view==='query'){const r=await api('api/workbench/querychat',{pipeline:id});chat=r&&r.session;if(chat&&it.kind!=='analysis')it.query_chat=chat}
@@ -133,7 +160,7 @@ async function wbOpen(id){const it=wbItem(id);if(!it)return;
  await wbTick(true);WB.timer=setInterval(()=>{if(document.visibilityState==='visible'&&WB.sel)wbTick(false)},5000);
  if(WB.view==='query'&&Q.ask){const q=Q.ask;Q.ask=null;setTimeout(()=>sendText(q,running,[]),700)}}
 async function wbTick(first){if(!WB.sel||!document.body.classList.contains('views'))return;
- if(WB.sel.view!==WB.view){WB.sel=null;return wbHome()}
+ if(WB.sel.view!==WB.view){WB.sel=null;return wbOpenView()}
  if(!first)await wbLoadQuiet();
  if(WB.view==='ann')return wbAnnotate(first);if(WB.view==='live')return wbLive(first);return wbQuery(!first)}
 let WB_LAST=0;async function wbLoadQuiet(){if(Date.now()-WB_LAST<8000)return;WB_LAST=Date.now();await wbLoad()}
@@ -145,7 +172,7 @@ function headOf(it,extra){const st=it.state==='needs_you'&&agentBusy(it)?'workin
   <span class="wb-acts"><label title="Answer recommended options by itself (Settings → Auto-accept)"><input type="checkbox" class="wbauto" ${auto?'checked':''}> autopilot</label></span></div>`}
 function wireHead(v){v.querySelectorAll('.wbauto').forEach(a=>a.onchange=()=>setAuto(a.checked));
  v.querySelectorAll('.wbstep[data-st]').forEach(s=>s.onclick=()=>{WB.stage=WB.stage===s.dataset.st?null:s.dataset.st;delete v.dataset.h;wbTick(true)});
- v.querySelectorAll('[data-goto]').forEach(b=>b.onclick=()=>{const id=b.dataset.id;WB.view=b.dataset.goto;WB.sel={id};wbShow(b.dataset.goto)})}
+ v.querySelectorAll('[data-goto]').forEach(b=>b.onclick=()=>goView(b.dataset.goto,b.dataset.id))}
 // waiting for the user only while the agent is not working in that chat (the open one is known at once, others from the server)
 const agentBusy=it=>it.busy||(it.chat&&it.chat===session&&running);
 const needYou=it=>it.state==='needs_you'&&!agentBusy(it)?'<div class="wb-need">⏸ Waiting for your answer in the chat on the left.</div>':'';
@@ -161,10 +188,17 @@ async function stageDetail(){const box=$('#wbstage');if(!box||!WB.sel)return;con
   ${(s.history||[]).slice(-4).reverse().map(h=>`<div class="sub">${h.ts?new Date(h.ts*1000).toLocaleTimeString():''} ${esc(h.note||h.status||'')}</div>`).join('')}`;
  if(box.dataset.h!==html){box.dataset.h=html;box.innerHTML=html}}
 
+// what a node carries: an entity type's attribute names / an entity's attribute values; an activity's input (and output) names or values
+const clip=(x,n)=>x.length>n?x.slice(0,n-1)+'…':x;
+function propsOf(n){return n.kind==='activity'?[...(n.inputs||[]),...(n.outputs||[]).map(x=>'→ '+x)]:(n.attrs||[])}
+function propLines(n,max){const p=propsOf(n);if(!p.length)return '';const head=n.kind==='activity'&&!String(p[0]).includes('=')?'in: ':'';
+ return '\n'+head+p.slice(0,max).map(x=>clip(String(x),30)).join(n.kind==='type'||!String(p[0]).includes('=')?', ':'\n')+(p.length>max?` (+${p.length-max})`:'')}
+function propList(d){const p=propsOf(d);return p.length?`<div class="wq-props">${p.slice(0,60).map(x=>`<code>${esc(x)}</code>`).join(' ')}${p.length>60?` <span class="sub">+${p.length-60} more</span>`:''}</div>`:''}
+
 // ---- the aggregated view: entity types and activity kinds, how they relate, with counts; in the Annotate view the diff
 // of what the annotation promised against what was recorded. Kept across refreshes: counts and statuses update in place.
 const AGG={};
-const AGG_LEG=[['matched','recorded as promised'],['missing','promised, never recorded'],['conditional','promised if a condition holds, not recorded'],['unexpected','recorded, not in the annotation']];
+const AGG_LEG=[['matched','recorded as promised'],['missing','promised, never recorded'],['conditional','promised if a condition holds, not recorded'],['unexpected','recorded, not in the annotation'],['captured','captured value: inputs, outputs, attributes']];
 // the legend: what the shapes and edge colours mean, and on a diff what each status looks like
 function aggLegend(mode){
  const parts=`<span class="ag-lg"><span><i class="ag-type"></i>entity type</span><span><i class="ag-in"></i>input type</span><span><i class="ag-act"></i>activity</span><span>★ scientific artifact</span><span>×n recorded</span></span>
@@ -176,7 +210,8 @@ async function drawAgg(key,boxId,d,hl,onTap){const box=$('#'+boxId);if(!box)retu
  if(!d||!d.nodes||!d.nodes.length){AGG[key]=null;box.innerHTML=`<div class="sub" style="padding:16px">${d&&d.reading?'reading the traces…':'Nothing to draw yet: the diagram appears once the annotation exists or the run records provenance.'}</div>`;return null}
  try{await dgNeedGraph()}catch(e){box.textContent=e.message;return null}
  const sig=d.mode+'#'+d.nodes.map(n=>n.id).sort().join()+'#'+d.edges.map(e=>e.id).sort().join();
- const nd=n=>({id:n.id,label:(n.artifact?'★ ':'')+n.label+(n.count?`  ×${n.count}`:''),kind:n.kind,status:n.status||'',role:n.role||'',name:n.label,count:n.count||0});
+ const nd=n=>({id:n.id,label:(n.artifact?'★ ':'')+n.label+(n.count?`  ×${n.count}`:'')+propLines(n,4),kind:n.kind,status:n.status||'',role:n.role||'',name:n.label,count:n.count||0,
+   attrs:n.attrs||[],inputs:n.inputs||[],outputs:n.outputs||[]});
  const ed=e=>({id:e.id,source:e.source,target:e.target,kind:e.kind,status:e.status||'',label:e.kind==='relation'?(e.label||''):(e.count&&pro()?'×'+e.count:''),count:e.count||0});
  const st=AGG[key];
  if(st&&st.sig===sig&&st.cy.container()===box){st.cy.batch(()=>{d.nodes.forEach(n=>st.cy.getElementById(n.id).data(nd(n)));d.edges.forEach(e=>st.cy.getElementById(e.id).data(ed(e)))});aggHl(st.cy,hl);return st.cy}
@@ -199,6 +234,8 @@ async function drawAgg(key,boxId,d,hl,onTap){const box=$('#'+boxId);if(!box)retu
    {selector:'edge[status="missing"]',style:{'line-color':'#dc2626','target-arrow-color':'#dc2626','line-style':'dashed',width:2.4}},
    {selector:'edge[status="conditional"]',style:{'line-color':'#d97706','target-arrow-color':'#d97706','line-style':'dashed',width:2}},
    {selector:'edge[status="unexpected"]',style:{'line-color':'#2563eb','target-arrow-color':'#2563eb',width:2.8}},
+   {selector:'node[status="captured"]',style:{width:16,height:12,'background-color':'#e2e8f0','border-color':'#64748b','border-width':1,'font-size':8,color:'#64748b'}},
+   {selector:'edge[status="captured"]',style:{'line-color':'#cbd5e1','target-arrow-color':'#cbd5e1',width:1,'line-style':'dotted'}},
    {selector:'.dim',style:{opacity:.13}},
    {selector:'node.focus',style:{'border-width':3.5,'border-color':'#7c3aed','border-style':'solid'}},
    {selector:'edge.focus',style:{width:3,'line-color':'#7c3aed','target-arrow-color':'#7c3aed'}},
@@ -213,6 +250,7 @@ function aggHl(cy,hl){if(!cy)return;cy.batch(()=>{cy.elements().removeClass('dim
 function aggFit(cy){if(!cy)return;const s=cy.$('.pick').length?cy.$('.pick'):cy.$('.focus');cy.fit(s.length?s:cy.elements(),s.length&&s.length<4?70:24);if(cy.zoom()>1.4){cy.zoom(1.4);cy.center(s.length?s:undefined)}}
 function aggInfo(boxId,d){const b=$('#'+boxId);if(!b)return;b.hidden=false;
  b.innerHTML=`<b>${d.kind==='type'?'entity type':'activity'}</b> ${esc(d.name)}${d.role?` <span class="sub">(${esc(d.role)})</span>`:''}${d.count?` · <b>${d.count}</b> recorded`:''}${d.status&&d.status!=='expected'?` · <span class="ag-st ${esc(d.status)}">${esc(d.status)}</span>`:''}
+  ${propsOf(d).length?`<div class="sub">${d.kind==='type'?'attributes':'inputs and outputs'}:</div>${propList(d)}`:''}
   <div class="wq-ia"><button data-q="Where do the ${esc(d.name)} ${d.kind==='type'?'entities':'activities'} come from, and what did they affect?">ask about it</button><button data-x>✕</button></div>`;
  b.querySelectorAll('[data-q]').forEach(x=>x.onclick=()=>{if(WB.view==='query')sendText(x.dataset.q,running,[]);else{$('#input').value=x.dataset.q;$('#input').focus()}});b.querySelector('[data-x]').onclick=()=>b.hidden=true}
 
@@ -234,11 +272,13 @@ async function wbAnnotate(first){if(!WB.sel||!WB.sel.item)return;const it=WB.sel
    <button class="btn" data-goto="query" data-id="${esc(pid)}" style="margin-top:8px">⌕ Query the baseline</button></div>
   <div class="wb-card"><div class="wb-sec">Live run inputs</div>${it.live_inputs?`<ul class="wb-li-list">${it.live_inputs.inputs.map(i=>`<li><b>${esc(i.label||i.name)}</b> ${i.kind==='choice'?`<span class="sub">${(i.options||[]).length} choices</span>`:''} <span class="sub">default ${esc(i.default??'-')}</span></li>`).join('')}</ul>${pro()?`<code class="wb-cmd">${esc(it.live_inputs.command)}</code>`:''}`:
    `<div class="sub">What a scientist can tune when starting a live run. The agent writes them once it has explored and annotated the app.</div><button class="btn" id="wbdetect" style="margin-top:6px">Detect them now</button>`}</div>
-  ${pro()||WB.stage?'<div class="wb-card" id="wbstage"></div>':''}`;
+  ${gapsCard(it)}${pro()||WB.stage?'<div class="wb-card" id="wbstage"></div>':''}`;
  const html=headOf(it)+`<div class="wb-strip"><span class="sub">annotate</span>${strip(it,setup)}<span class="sub" style="margin-left:12px">check &amp; publish</span>${strip(it,['graph','package'])}</div>${needYou(it)}
   <div class="vw-grid"><div class="vw-main"><div class="wq-tools"><b class="vw-t">${title}</b>${aggLegend(mode)}<span class="wq-btns"><button id="agfit">fit</button></span></div>
    <div id="aggann" class="vw-graph"></div><div id="agginfo" class="wq-info" hidden></div></div><div class="vw-side">${side}</div></div>`;
  if(v.dataset.h!==html){v.dataset.h=html;const keepG=AGG.ann&&$('#aggann');const old=keepG?$('#aggann'):null;v.innerHTML=html;if(old)$('#aggann').replaceWith(old);wireHead(v);$('#agfit').onclick=()=>aggFit(AGG.ann&&AGG.ann.cy);
+  const gg=$('#wbgapgo');if(gg)gg.onclick=()=>{const open=(it.gaps||[]).filter(g=>g.status==='open');
+   sendText('Improve the provenance coverage for the open gaps of this app ('+open.map(g=>g.id).join(', ')+'): gap_list, then follow skill prov_gaps for each.',running,[])};
   const dt=$('#wbdetect');if(dt)dt.onclick=()=>sendText('Describe this app\'s live-run inputs (what a scientist tunes when starting a long run): live_inputs_detect, curate them with what you know of the app, live_inputs_write and live_inputs_validate, then show them to me.',running,[])}
  await drawAgg('ann','aggann',d,null,x=>aggInfo('agginfo',x));if(first&&AGG.ann)aggFit(AGG.ann.cy);stageDetail()}
 
@@ -249,7 +289,7 @@ async function wbLive(first){if(!WB.sel||!WB.sel.item)return;const it=WB.sel.ite
  const n=(L&&L.counts)||{},r=(L&&L.rate)||{},lr=(it.steps||[]).find(s=>s.name==='live_run')||{},pd=(it.steps||[]).find(s=>s.name==='publish_data')||{};
  const el=it.started?dur(Math.max(0,Date.now()/1000-it.started)):'';
  const kpi=(k,val,sub)=>`<div class="wb-kpi"><div class="v">${esc(val??'-')}</div><div class="k">${k}${sub?`<span>${esc(sub)}</span>`:''}</div></div>`;
- const head=headOf(it,`${el&&lr.status==='running'?`<span class="sub">running for ${el}</span>`:''}<span class="sub">${L&&L.reading?'reading the traces…':L&&L.quiet_s!=null?'last provenance '+dur(L.quiet_s)+' ago':''}</span><button class="btn" data-goto="query" data-id="${esc(pid)}">⌕ Query this run</button>`)+
+ const head=targetBar()+headOf(it,`${el&&lr.status==='running'?`<span class="sub">running for ${el}</span>`:''}<span class="sub">${L&&L.reading?'reading the traces…':L&&L.quiet_s!=null?'last provenance '+dur(L.quiet_s)+' ago':''}</span><button class="btn" data-goto="query" data-id="${esc(pid)}">⌕ Query this run</button>`)+
   `<div class="wb-strip">${strip(it)}</div>${needYou(it)}${L&&L.stalled?`<div class="wb-need bad">⚠ No new provenance for ${dur(L.quiet_s)} while the run is going. Ask the chat to check the job.</div>`:''}`;
  const kpis=`<div class="wb-kpis">${kpi('entities',n.entities,r.entities_per_h!=null?`+${r.entities_per_h}/h`:'')}${kpi('activities',n.activities,r.activities_per_h!=null?`+${r.activities_per_h}/h`:'')}${kpi('links',n.edges)}${pro()?kpi('types',n.types)+kpi('records read',n.records):''}</div>`;
  const seg=`<div class="seg" id="lgseg">${[['agg','Aggregated'],['inst','Instances'],['temp','Temporal']].map(([k,l])=>`<button data-g="${k}" class="${WB.lgmode===k?'on':''}">${l}</button>`).join('')}</div>`;
@@ -288,11 +328,11 @@ const EV_I={event:'◷',artifact:'▣',source:'⛁',query:'⌕'};
 const WQ_ASK={live:['What has the run produced in the last hour?','Where did the newest artifact come from? Show its lineage.','Which inputs fed the most artifacts?','What is downstream of the input data: what would a bad input affect?','What is sensitive for publishing? Mark everything derived from sensitive inputs.'],
  run:['Where did the final outputs of the baseline come from?','Which inputs fed the most artifacts?','What is downstream of each input?'],
  analysis:['Where did the final outputs come from?','Which inputs fed the most artifacts?','What is sensitive for publishing? Mark everything derived from sensitive inputs.']};
-function wbShowAnswer(id){Q.want=id;if(WB.view!=='query'||!WB.sel){if(WB.sel){const s=WB.sel.id;WB.sel={id:s}}wbShow('query');return}Q.sel=id;Q.pick=null;wbQStrip();wbQPanel();wqHighlight(true)}
+function wbShowAnswer(id){Q.want=id;if(WB.view!=='query'||!WB.sel){if(WB.sel)goView('query',WB.sel.id);else wbShow('query');return}Q.sel=id;Q.pick=null;wbQStrip();wbQPanel();wqHighlight(true)}
 
 async function wbQuery(quiet){if(!WB.sel||!WB.sel.item)return;const it=WB.sel.item,pid=it.id,v=$('#wbview');
  if(!quiet||!$('#wqgraph')){Q.cy=null;Q.drawn=0;Q.sig='';Q.seen=null;AGG.q=null;
-  v.innerHTML=`<div class="wb-head"><h2>${esc(it.name)}</h2><span class="sub">${{live:'live run',run:'baseline of the app',analysis:'dataset'}[it.kind]||''}${it.app?' of '+esc(it.app):''}</span>
+  v.innerHTML=targetBar()+`<div class="wb-head"><h2>${esc(it.name)}</h2><span class="sub">${{live:'live run',run:'baseline of the app',analysis:'dataset'}[it.kind]||''}${it.app?' of '+esc(it.app):''}</span>
     <div class="seg" id="wqseg"><button data-g="inst" class="${Q.gmode==='inst'?'on':''}">Instances</button><button data-g="agg" class="${Q.gmode==='agg'?'on':''}">Aggregated</button></div>
     <span class="sub" id="wqstat"></span><span class="wb-acts"><a href="#" id="wbreport">report of pinned answers</a></span></div>
    <div class="wq-strip" id="wqstrip"></div>
@@ -341,13 +381,15 @@ function wbQPanel(){const p=$('#wqpanel');if(!p||!WB.sel||!WB.sel.item)return;co
  p.innerHTML=`<div class="wq-q"><span class="ac-badge ${a.verified?'ok':'bad'}">${a.verified?'✓ verified against the traces':'⚠ unverified'}</span><b>${esc(a.question||'')}</b><span class="sub">${a.ts?new Date(a.ts*1000).toLocaleString():''} · ${a.direction==='forward'?'downstream impact':a.direction==='both'?'lineage both ways':'lineage'}</span></div>
   <section class="wq-sec"><h4 class="wq-pk${on('t')}" data-pk="t"><span class="n">1</span>Query plan <span class="sub">targets</span></h4><div class="ap-plan">${plan}</div></section>
   <section class="wq-sec"><h4><span class="n">2</span>Evidence <span class="sub">select one to see it</span></h4><ul class="ap-ev">${ev||'<li class="sub">none</li>'}</ul>
-   ${(a.gaps||[]).length?`<div class="ap-gaps"><b>Gaps</b><ul>${a.gaps.map(g=>`<li>${esc(g)}</li>`).join('')}</ul></div>`:''}
+   ${(a.gaps||[]).length?`<div class="ap-gaps tv-gaps"><b>Gaps</b><ul>${a.gaps.map((g,i)=>`<li>${esc(typeof g==='string'?g:(g.detail||g.subject||''))}${it.kind!=='analysis'?`<div><button class="btn" data-ogap="${i}" title="Open the app's Annotate chat: explore the code for this gap, fix the annotation, learn it in the capabilities">Improve coverage</button></div>`:''}</li>`).join('')}</ul>
+    ${it.kind!=='analysis'&&a.gaps.length>1?`<button class="btn primary" data-ogap="*">Improve coverage of all ${a.gaps.length} gaps</button>`:''}</div>`:''}
    <div class="ap-conf"><span>confidence</span><i style="--w:${conf}%"></i><b>${conf}%</b></div></section>
   <section class="wq-sec"><h4 class="wq-pk${Q.pick?'':' on'}" data-pk=""><span class="n">3</span>Answer <span class="sub">its whole part</span></h4>${body}
    ${a.sensitive?`<div class="ap-sens wq-pk${on('s')}" data-pk="s">⛔ <b>${a.sensitive.count}</b> entities derive from sensitive inputs: restrict or review before sharing. <span class="sub">show them</span></div>`:''}
    <div class="ap-stats"><span><b>${st.sources??'-'}</b> sources</span><span><b>${st.artifacts??'-'}</b> artifacts</span>${pro()?`<span><b>${st.records??'-'}</b> records read</span>`:''}</div></section>
   <div class="ac-del"><button id="wqpin" class="${pinned?'on':''}">${pinned?'📌 pinned':'📌 pin to report'}</button><button id="wqcite">⧉ copy citations</button>${pro()?'<button id="wqaudit">audit trail</button>':''}<button id="wqwrong" class="warn">this looks wrong</button></div>
   ${pro()?`<pre class="ac-audit" id="wqaud" hidden>${esc(JSON.stringify({id:a.id,question:a.question,targets:a.targets,direction:a.direction,problems:a.problems,records_read:st.records,plan:a.plan,evidence:a.evidence},null,1))}</pre>`:''}`;
+ p.querySelectorAll('[data-ogap]').forEach(b=>b.onclick=()=>improveGaps(a,b.dataset.ogap==='*'?a.gaps.map((_,k)=>'t'+k):['t'+b.dataset.ogap],b));
  p.querySelectorAll('[data-pk]').forEach(x=>x.onclick=()=>{Q.pick=x.dataset.pk||null;wbQPanel();wqHighlight(true)});
  $('#wqpin').onclick=async()=>{const r=await api('api/workbench/pin',{pipeline:WB.sel.id,id:a.id,on:!pinned});if(r&&!r.error){WB.pins=r.pins;wbQStrip();wbQPanel()}};
  $('#wqcite').onclick=()=>{const t=`${a.question}\n`+(a.evidence||[]).map((e,i)=>`[${i+1}] ${e.text||''}${e.entity?' entity='+e.entity:''}${e.activity?' activity='+e.activity:''}`).join('\n')+`\nmoirai answer ${a.id}, pipeline ${a.pipeline}`;
@@ -357,7 +399,7 @@ function wbQPanel(){const p=$('#wqpanel');if(!p||!WB.sel||!WB.sel.item)return;co
   await sendText(`[Feedback on answer ${a.id}] This answer looks wrong: ${why}. Check it against the traces, publish a corrected answer, and record the lesson.`,running,[])}}
 
 // the graph: instances (when small enough, else the selected query's lineage) or the aggregated view
-const INST_STYLE=dark=>[{selector:'node',style:{label:'data(label)','font-size':8,'text-valign':'bottom','text-margin-y':2,color:dark?'#cbd5e1':'#334155',width:12,height:12,'min-zoomed-font-size':7}},
+const INST_STYLE=dark=>[{selector:'node',style:{label:'data(label)','font-size':8,'text-valign':'bottom','text-margin-y':2,color:dark?'#cbd5e1':'#334155',width:12,height:12,'min-zoomed-font-size':7,'text-wrap':'wrap','text-max-width':170}},
  {selector:'node[kind="entity"]',style:{shape:'round-rectangle','background-color':'#bfdbfe','border-width':1,'border-color':'#1d4ed8'}},
  {selector:'node[kind="activity"]',style:{shape:'ellipse','background-color':'#fed7aa','border-width':1,'border-color':'#c2410c'}},
  {selector:'edge',style:{width:1,'curve-style':'bezier','target-arrow-shape':'triangle','arrow-scale':.6,'line-color':'#94a3b8','target-arrow-color':'#94a3b8'}},
@@ -368,7 +410,7 @@ const INST_STYLE=dark=>[{selector:'node',style:{label:'data(label)','font-size':
 async function drawInst(box,nodes,edges,onTap){try{await dgNeedGraph()}catch(e){box.textContent=e.message;return null}
  const ids=new Set(nodes.map(n=>n.id));box.innerHTML='';
  const cy=cytoscape({container:box,wheelSensitivity:.25,minZoom:.05,maxZoom:3,
-  elements:[...nodes.map(n=>({data:{...n,id:n.id,label:n.label||n.id}})),...edges.filter(e=>ids.has(e.source)&&ids.has(e.target)).map((e,i)=>({data:{id:'e'+i,source:e.source,target:e.target,kind:e.kind,rel:e.relation?1:0}}))],
+  elements:[...nodes.map(n=>({data:{...n,id:n.id,label:(n.label||n.id)+propLines(n,3)}})),...edges.filter(e=>ids.has(e.source)&&ids.has(e.target)).map((e,i)=>({data:{id:'e'+i,source:e.source,target:e.target,kind:e.kind,rel:e.relation?1:0}}))],
   layout:{name:'dagre',rankDir:(box.clientHeight>box.clientWidth*.8?'TB':'LR'),nodeSep:10,rankSep:40,animate:false},style:INST_STYLE(themeNow()==='dark')});
  cy.on('tap','node',e=>onTap&&onTap(e.target.data()));cy.on('tap',e=>{if(e.target===cy)document.querySelectorAll('.wq-info').forEach(b=>b.hidden=true)});return cy}
 async function wqDraw(){const box=$('#wqgraph');if(!box||!WB.sel)return;Q.drawn=Date.now();const leg=$('#wqleg');
@@ -426,9 +468,9 @@ function wqHighlight(fit){const a=WB.answers.find(x=>x.id===Q.sel);
  if(!fit)return;const sel=cy.$('.pick').length?cy.$('.pick'):cy.$('.focus');
  cy.stop();cy.fit(sel.length?sel:cy.elements(),sel.length&&sel.length<4?60:24);if(cy.zoom()>1.3){cy.zoom({level:1.3,renderedPosition:{x:cy.width()/2,y:cy.height()/2}});cy.center(sel.length?sel:undefined)}}
 function wqInfoAt(boxId,d){const b=$('#'+boxId);if(!b)return;const ref=d.uri||d.label;b.hidden=false;
- b.innerHTML=`<b>${esc(d.kind)}</b> ${esc(d.label)}${d.type?` <span class="sub">(${esc(d.type)})</span>`:''}${d.uri?`<div class="sub" title="${esc(d.uri)}">${esc(d.uri)}</div>`:''}${d.kind==='activity'&&d.dur!=null?`<div class="sub">pid ${esc(d.pid)} · ${dur((d.dur||0)/1e6)}</div>`:''}
+ b.innerHTML=`<b>${esc(d.kind)}</b> ${esc(String(d.label).split('\n')[0])}${d.type?` <span class="sub">(${esc(d.type)})</span>`:''}${d.uri?`<div class="sub" title="${esc(d.uri)}">${esc(d.uri)}</div>`:''}${propList(d)}${d.kind==='activity'&&d.dur!=null?`<div class="sub">pid ${esc(d.pid)} · ${dur((d.dur||0)/1e6)}</div>`:''}
   <div class="wq-ia">${d.kind==='entity'?`<button data-dir="back" title="Computed now with TraceViewer queries: no agent">where did it come from?</button><button data-dir="forward" title="Computed now with TraceViewer queries: no agent">what did it affect?</button>`:''}<button data-x>✕</button></div>`;
- b.querySelectorAll('[data-dir]').forEach(x=>x.onclick=()=>{const back=x.dataset.dir==='back',nm=d.label||d.id;
+ b.querySelectorAll('[data-dir]').forEach(x=>x.onclick=()=>{const back=x.dataset.dir==='back',nm=String(d.label||d.id).split('\n')[0];
   askPlan(back?`Where did ${nm} come from?`:`What did ${nm} affect downstream?`,back?[{op:'entities',id:d.id},{op:'lineage',from:0,direction:'back'},{op:'ends',from:1}]:
    [{op:'entities',id:d.id},{op:'lineage',from:0,direction:'forward'},{op:'group',from:1,by:'type'}])});b.querySelector('[data-x]').onclick=()=>b.hidden=true}
 
@@ -476,14 +518,14 @@ renderEmpty=function(){if(!document.body.classList.contains('views'))return _ren
 // ---- a computed answer (core.evidence): the plan, the result computed from TraceViewer queries, the write-up that cites it, and the trail
 const recId=c=>c.id||`${c.pid}:${c.ts}`;
 const isoUs=us=>us?new Date(us/1000).toLocaleString():'-';
-const OPWORD={entities:'entities',activities:'activities',lineage:'lineage',group:'count',ends:'ends'};
+const OPWORD={entities:'entities',activities:'activities',lineage:'lineage',group:'count',ends:'ends',inputs:'parameters',outputs:'outputs',attributes:'attributes'};
 function stepArgs(s){const a=s.args||{},r=s.resolved||{},bits=[];
  if(a.all)bits.push('all');if(a.type)bits.push(`type ${a.type}`);if(a.uri_contains)bits.push(`uri contains “${a.uri_contains}”`);if(a.id)bits.push(`id ${a.id}`);if(a.ids)bits.push(`${a.ids.length} ids`);
- if(a.name)bits.push(a.name);if(a.pid!=null)bits.push(`pid ${a.pid}`);if(a.from!=null)bits.push(`from [S${a.from+1}]`);if(a.direction)bits.push(a.direction==='back'?'backward (where it came from)':'forward (what it affected)');if(a.by)bits.push(`by ${a.by}`);
+ if(a.name)bits.push(a.name);if(a.activity)bits.push(`of ${a.activity}`);if(a.pid!=null)bits.push(`pid ${a.pid}`);if(a.from!=null)bits.push(`from [S${a.from+1}]`);if(a.direction)bits.push(a.direction==='back'?'backward (where it came from)':'forward (what it affected)');if(a.by)bits.push(`by ${a.by}`);
  const tm=r.time||r.produced;if(tm)bits.push(`time ${tm[0]} → ${tm[1]}${a.since||a.until||a.produced_since||a.produced_until?` (from “${[a.since||a.produced_since,a.until||a.produced_until].filter(Boolean).join(' / ')}”)`:''}`);
  return bits.join(' · ')}
 function synthHtml(t){return md(t||'').replace(/\[S(\d+)\]/g,(m,n)=>`<a href="#" class="scite" data-pk="s${n}">S${n}</a>`)}
-function wbQPanelTV(p,a){const on=k=>Q.pick===k?' on':'',st=a.stats||{},sc=a.synthesis_check||{},pinned=WB.pins.includes(a.id),steps=a.steps||[];
+function wbQPanelTV(p,a){const on=k=>Q.pick===k?' on':'',st=a.stats||{},sc=a.synthesis_check||{},pinned=WB.pins.includes(a.id),steps=a.steps||[],fixable=WB.sel.item.kind!=='analysis';
  const plan=steps.map(s=>`<li class="wq-pk${on('s'+s.step)}" data-pk="s${s.step}"><b>S${s.step}</b> ${esc(OPWORD[s.op]||s.op)} <span class="sub">${esc(stepArgs(s))}</span><div class="tv-hl">${esc(s.headline)}</div>
    <div class="sub">${s.queries?`TraceViewer ${s.queries.map(n=>'Q'+n).join(', ')}`:`computed from [S${(s.computed_from??0)+1}]`} · ${s.cited} record${s.cited===1?'':'s'} cited</div></li>`).join('');
  const res=a.result||{};
@@ -497,6 +539,11 @@ function wbQPanelTV(p,a){const on=k=>Q.pick===k?' on':'',st=a.stats||{},sc=a.syn
   <section class="wq-sec"><h4><span class="n">1</span>Plan <span class="sub">select a step to see its records on the graph</span></h4><ol class="tv-plan">${plan}</ol></section>
   <section class="wq-sec"><h4 class="wq-pk${Q.pick?'':' on'}" data-pk=""><span class="n">2</span>Result <span class="sub">computed, its whole part</span></h4><div class="tv-hl big">${esc(res.headline||'')}</div>${res.table?`<div class="ap-ans">${md(res.table)}</div>`:''}</section>
   <section class="wq-sec"><h4><span class="n">3</span>Answer <span class="sub">${a.synthesis?'written by the agent from the result; [S] cites a step':''}</span></h4>${syn}</section>
+  ${(a.gaps||[]).length?`<section class="wq-sec tv-gaps"><h4><span class="n">!</span>Gaps <span class="sub">what the provenance could not show</span></h4>
+   <ul>${a.gaps.map(g=>`<li><b>${esc(GAP_L[g.kind]||g.kind)}</b> <code>${esc(g.subject)}</code> <a href="#" class="scite" data-pk="s${g.step}">S${g.step}</a><div class="sub">${esc(g.detail)}</div>
+    ${fixable?`<button class="btn" data-gap="${esc(g.id)}" title="Open the app's Annotate chat: explore the code for this gap, fix the annotation, learn it in the capabilities">Improve coverage</button>`:''}</li>`).join('')}</ul>
+   ${fixable&&a.gaps.length>1?`<button class="btn primary" data-gap="*">Improve coverage of all ${a.gaps.length} gaps</button>`:''}
+   ${fixable?'':'<div class="sub">A dataset has no annotation here: improve it on the app that produced it.</div>'}</section>`:''}
   <section class="wq-sec"><h4><span class="n">4</span>Evidence</h4>
    <div class="ap-stats"><span><b>${st.queries??'-'}</b> TraceViewer queries</span><span><b>${st.rows_read??'-'}</b> records read</span><span><b>${st.cited??'-'}</b> cited</span><span>result <code>${esc(a.result_hash||'')}</code></span></div>
    <details ${pro()?'open':''}><summary>Files read (${(a.reads||[]).length})</summary><table class="tv-t"><tr><th>file</th><th>size</th><th>sha256 of its ends</th><th>modified</th></tr>${reads}</table></details>
@@ -504,6 +551,7 @@ function wbQPanelTV(p,a){const on=k=>Q.pick===k?' on':'',st=a.stats||{},sc=a.syn
    <details><summary>Cited records</summary>${cites}</details></section>
   <div class="ac-del"><button id="wqrerun" title="Run the same plan on the traces as they are now and compare">↻ re-run</button><button id="wqpin" class="${pinned?'on':''}">${pinned?'📌 pinned':'📌 pin to report'}</button><button id="wqcite">⧉ copy citations</button><button id="wqwrong" class="warn">this looks wrong</button></div><div id="wqrr" class="sub"></div>`;
  p.querySelectorAll('[data-pk]').forEach(x=>x.onclick=e=>{e.preventDefault();Q.pick=x.dataset.pk||null;wbQPanel();wqHighlight(true)});
+ p.querySelectorAll('[data-gap]').forEach(b=>b.onclick=()=>improveGaps(a,b.dataset.gap==='*'?a.gaps.map(g=>g.id):[b.dataset.gap],b));
  $('#wqrerun').onclick=async()=>{const b=$('#wqrerun'),m=$('#wqrr');b.disabled=true;m.textContent='running the plan again…';
   const r=await api('api/workbench/rerun',{pipeline:WB.sel.id,id:a.id});b.disabled=false;
   m.innerHTML=!r||r.error?esc((r&&r.error)||'failed'):r.same?`✓ same result (${esc(r.result_hash)}), ${r.secs}s`:`⚠ the result changed: ${esc(r.was)} → ${esc(r.result_hash)}${r.files_changed.length?` · files changed: ${esc(r.files_changed.join(', '))}`:''} · now: ${esc(r.headline)}`};
@@ -516,4 +564,29 @@ function wbQPanelTV(p,a){const on=k=>Q.pick===k?' on':'',st=a.stats||{},sc=a.syn
 // one-click questions from the graph: the page builds the plan itself, the server runs it - no agent, no model
 async function askPlan(question,steps){if(!WB.sel)return;const m=document.querySelector('.wq-info');if(m)m.insertAdjacentHTML('beforeend','<div class="sub">running TraceViewer queries…</div>');
  const r=await api('api/workbench/ask',{pipeline:WB.sel.id,question,steps,session});if(!r||r.error){alert((r&&r.error)||'the query failed');return}
- Q.want=r.id;if(WB.view!=='query'){const id=WB.sel.id;WB.sel={id};wbShow('query')}else wbQuery(true)}
+ Q.want=r.id;if(WB.view!=='query')goView('query',WB.sel.id);else wbQuery(true)}
+
+// ---- gaps: improve the annotation's coverage of exactly what a query could not show, in the app's annotation phase
+const GAP_L={reported:'reported by the answer',undeclared_entity:'entity referenced, never declared',missing_producer:'nothing recorded producing it',no_inputs:'inputs not recorded',no_outputs:'output not recorded',
+ no_attributes:'attributes not recorded',not_recorded:'not recorded at all'};
+async function improveGaps(a,ids,btn){if(btn)btn.disabled=true;
+ const r=await api('api/workbench/gaps',{pipeline:WB.sel.id,answer:a.id,gaps:ids});if(btn)btn.disabled=false;if(!r||r.error){alert((r&&r.error)||'could not open the gap');return}
+ const lines=r.gaps.map(g=>`- ${g.id} (${g.kind}) ${g.subject}: ${g.detail}`).join('\n');
+ const msg=`Improve the provenance coverage for ${r.gaps.length===1?'this gap':'these gaps'}, which a query exposed (question: “${a.question}”, answer ${a.id} on pipeline ${a.pipeline}):\n${lines}\n\n`+
+  'Load skill prov_gaps and follow it: explore the app\'s code for each, find why it was missed and name the cause, fix the annotation (capture inputs, outputs, '+
+  'variables or attributes, or annotate the missed function or entity), learn it generically in prov_annotate and for this workload in its workload capability, '+
+  'ask me before re-running the smoke or baseline, then re-run the question and gap_close.';
+ const querySession=session,sleep=ms=>new Promise(z=>setTimeout(z,ms));
+ goView('ann',r.app);
+ const go=async()=>{for(let i=0;i<30&&!(WB.sel&&WB.sel.item&&WB.sel.id===r.app);i++)await sleep(300);
+  if(!WB.sel||WB.sel.id!==r.app){alert('Could not open the app in the Annotate view.');return}
+  // the request goes to the app's own chat (its annotation phase), never to the query chat it came from
+  if(r.chat){if(session!==r.chat)await openSession(r.chat);for(let i=0;i<25&&session!==r.chat;i++)await sleep(200)}
+  else if(session===querySession){$('#newbtn').onclick();setMode('run')}
+  if(r.chat?session!==r.chat:session===querySession&&querySession){alert('Could not open the app\'s chat: the request is in the box.');$('#input').value=msg;return}
+  if(running){alert('The app\'s chat is busy: your gap request is in the box; send it when the agent is done.');$('#input').value=msg;return}
+  setMode('run');sendText(msg,false,[])};go()}
+function gapsCard(it){const gs=it.gaps||[];if(!gs.length)return '';const open=gs.filter(g=>g.status==='open');
+ return `<div class="wb-card"><div class="wb-sec">Provenance gaps <span class="sub">${open.length} open · ${gs.length-open.length} fixed</span></div><ul class="wb-gaps">${gs.slice().reverse().slice(0,pro()?30:8).map(g=>
+  `<li class="${esc(g.status)}"><b>${esc(g.status==='open'?'open':g.status==='closed'?'✓ closed':'fixed, run pending')}</b> ${esc(GAP_L[g.kind]||g.kind)} <code>${esc(g.subject)}</code>${g.cause?` <span class="sub">· ${esc(g.cause.replace(/_/g,' '))}</span>`:''}${pro()&&g.how?`<div class="sub">${esc(g.how)}</div>`:''}</li>`).join('')}</ul>
+  ${open.length?`<button class="btn" id="wbgapgo">Work on the ${open.length} open gap${open.length>1?'s':''}</button>`:''}</div>`}

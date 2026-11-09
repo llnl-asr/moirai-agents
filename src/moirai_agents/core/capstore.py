@@ -526,6 +526,40 @@ def shadow(name: str) -> Path:
     return dest
 
 
+CODE_FILES = ("tool.py", "SKILL.md", "agent.json", "checks.json", "capability.json")
+
+
+def sync_shadows() -> List[str]:
+    """A user-layer copy made only to hold lessons (``shadow``) must not freeze the bundled capability it copied: when its history has nothing
+    of its own (every entry is also in the bundled history), its code follows the bundled one - files replaced, its LESSONS.md kept, what it
+    replaced kept under versions/. A copy changed on purpose (capability_update: an entry the bundled history lacks) is never touched.
+    Returns the names synced."""
+    out = []
+    user = layer_dir("user")
+    for d in sorted(user.glob("*/capability.json")) if user.exists() else []:
+        name, src = d.parent.name, BUNDLED / d.parent.name
+        if not (src / "capability.json").is_file():
+            continue
+        try:
+            um, bm = json.loads(d.read_text()), json.loads((src / "capability.json").read_text())
+        except ValueError:
+            continue
+        key = lambda h: (h.get("version"), (h.get("why") or "")[:200])     # noqa: E731
+        if {key(h) for h in um.get("history", [])} - {key(h) for h in bm.get("history", [])}:
+            continue                                                     # changed on purpose: the user layer is the truth
+        differ = [f for f in CODE_FILES if (src / f).is_file() and (not (d.parent / f).is_file() or (src / f).read_bytes() != (d.parent / f).read_bytes())]
+        if not differ:
+            continue
+        keep = d.parent / "versions" / f"shadow-v{um.get('version', 0)}-{int(time.time())}"
+        keep.mkdir(parents=True, exist_ok=True)
+        for f in differ:
+            if (d.parent / f).is_file():
+                shutil.copy2(d.parent / f, keep / f)
+            shutil.copy2(src / f, d.parent / f)
+        out.append(name)
+    return out
+
+
 def _set_enabled(name: str, on: bool) -> dict:
     ex = all_caps().get(name)
     if not ex:
@@ -629,6 +663,10 @@ def _fingerprint() -> str:
 def refresh(tools: Dict[str, dict], force: bool = False) -> dict:
     """Make the tool table match the store. A capability that does not load keeps its last working tools, and the
     error is shown in the Capabilities panel: a broken edit never takes the server down."""
+    try:
+        sync_shadows()                     # lesson-only copies follow the bundled code (they would hide its upgrades)
+    except OSError:
+        pass
     fp = _fingerprint()
     if fp == _State.fingerprint and not force:
         return {"changed": False}

@@ -8,10 +8,10 @@ claim citing the queries and records it rests on.
                  lineage     {from: step, direction: back|forward, max_hops?}
                  group       {from: step, by: type|role|store|name|pid}
                  ends        {from: step}                         roots of a backward lineage, leaves of a forward one
-                 inputs      {activity, since?, until?}           the parameters each run of an activity used (arguments, object attributes,
-                                                                  command-line flags, named values: its "<activity>.inputs" entities)
-                 outputs     {activity, since?, until?}           what each run returned ("<activity>.output")
-                 attributes  {from: step}                         the recorded attributes of a step's entities ("<type>.attributes", part_of)
+                 inputs      {activity, since?, until?}           the parameters each run of an activity used: its "<activity>.input" entities
+                                                                  (arguments, object attributes, command-line flags, named values; name=value)
+                 outputs     {activity, since?, until?}           what each run returned: "<activity>.output" entities
+                 attributes  {from: step}                         the recorded attributes of a step's entities: "<type>.attribute", part_of
                times: ISO date-time, epoch seconds or microseconds, or relative to the run: "start+30m", "end-2h".
                "from" is the 0-based index of an earlier step.
     resolve    each step's selectors are made concrete before any query: entity type names checked against the types the
@@ -128,9 +128,12 @@ def _act(r: Dict[str, Any]) -> Dict[str, Any]:
 
 # ------------------------------------------------------------------ the catalog: entity types and entities (metadata records)
 def _catalog(v: Viewer) -> Dict[str, Any]:
-    rows = v.q("catalog: the entity types and entities the traces declare", '.filter(col("name").is_in(["ET", "EH"]))',
-               lambda tv, col, cols: tv.filter(col("name").is_in(["ET", "EH"])))
-    types, ents = {}, {}
+    rows = v.q("catalog: the entity types, entities and entity relations the traces declare", '.filter(col("name").is_in(["ET", "EH", "ER"]))',
+               lambda tv, col, cols: tv.filter(col("name").is_in(["ET", "EH", "ER"])))
+    types, ents, parts = {}, {}, {}
+    for r in rows:
+        if r.get("name") == "ER" and r.get("args.subject") and r.get("args.object"):
+            parts.setdefault(str(r["args.object"]), []).append(str(r["args.subject"]))
     for r in rows:
         if r.get("name") == "ET" and r.get("args.type"):
             role = r.get("args.role", 0)
@@ -140,7 +143,7 @@ def _catalog(v: Viewer) -> Dict[str, Any]:
             st = r.get("args.store", 8)
             ents.setdefault(str(r["args.id"]), {"id": str(r["args.id"]), "type": r.get("args.type", ""), "uri": r.get("args.uri", ""),
                                                "store": T.STORES[st] if isinstance(st, int) and 0 <= st < len(T.STORES) else str(st), "ref": _ref(r)})
-    return {"types": types, "entities": ents}
+    return {"types": types, "entities": ents, "parts": parts}
 
 
 # ------------------------------------------------------------------ resolving times
@@ -315,43 +318,23 @@ def _ends(s, k, v, cat, outs, ctx):
             "cites": [cat["entities"][i]["ref"] for i in src["ends"] if i in cat["entities"]][:MAX_CITE]}
 
 
-# ---- captured inputs, outputs and attributes (entities whose uri is "json:{...}")
-def value_of(uri: str) -> Any:
-    if isinstance(uri, str) and uri.startswith("json:"):
-        try:
-            return json.loads(uri[5:])
-        except ValueError:
-            return {"unreadable": uri[:200]}
-    return None
+# ---- captured inputs, outputs and attributes (prov_annotate v7): one small entity per value, "<activity>.input" (used), "<activity>.output"
+# (generated), "<type>.attribute" (part_of the entity), each uri "name=value" (a trace keeps ~250 characters of a uri and rewrites quotes and
+# brackets, so values are not JSON)
+CAPTURED = (".input", ".output", ".attribute")
+SUFFIX = {"input": "input", "output": "output", "attribute": "attribute"}
 
 
-def _flat(v: Any, path: str, out: Dict[str, Any], depth: int = 0) -> None:
-    """Parameters as name -> value: flags first, then named values, then scalar arguments and object attributes."""
-    if isinstance(v, dict) and depth < 4:
-        for k, x in v.items():
-            _flat(x, f"{path}.{k}" if path else str(k), out, depth + 1)
-    elif isinstance(v, list) and len(v) <= 8 and all(not isinstance(x, (dict, list)) for x in v):
-        out[path] = ",".join(str(x) for x in v)
-    elif not isinstance(v, (dict, list)):
-        out[path] = v
+def kv(uri: str) -> List[tuple]:
+    """[(name, value)] of a captured entity's uri ("name=value"); empty when it is not one."""
+    if isinstance(uri, str) and "=" in uri:
+        k, v = uri.split("=", 1)
+        return [(k, v)]
+    return []
 
 
-def params_of(value: Dict[str, Any]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
-    for src, v in (value or {}).get("flags", {}).items():
-        for k, x in v.items():
-            out[f"--{k}" if len(k) > 1 else f"-{k}"] = x
-    _flat((value or {}).get("values", {}), "", out)
-    args = (value or {}).get("args", {})
-    flat: Dict[str, Any] = {}
-    _flat(args, "", flat)
-    for k, x in flat.items():
-        k2 = k.replace(".attrs.", ".")
-        if isinstance(x, str) and len(x) > 200:
-            continue                                  # a long string (a command line) is shown by its flags
-        if not k2.endswith(".type") and k2 not in out:
-            out[k2] = x
-    return out
+def is_captured(etype: str) -> bool:
+    return isinstance(etype, str) and etype.endswith(CAPTURED)
 
 
 def _captured(s, k, v, cat, outs, ctx, suffix, relation):
@@ -360,26 +343,23 @@ def _captured(s, k, v, cat, outs, ctx, suffix, relation):
         raise PlanError(f"step {k + 1} ({s['op']}): give activity, the activity's name")
     sub = _activities({"op": "activities", "name": name, "since": s.get("since"), "until": s.get("until")}, k, v, cat, outs, ctx)
     acts = [ctx["acts"][i] for i in sub["ids"]]
-    if not acts:
-        raise PlanError(f"step {k + 1}: no activity named {name!r} in these traces")
+    if not acts:                       # nothing recorded under that name: a gap to show, not a plan error
+        return {"kind": suffix, "activity": name, "runs": [], "ids": [], "missing": True, "resolved": {"activity": name, "time": sub["resolved"]["time"]}, "cites": []}
     ids = sorted({x for a in acts for x in a[relation]})
-    et = f"{name}.{suffix}"
+    et = f"{name}.{SUFFIX[suffix]}"
 
     def build(tv, col, cols):
         return tv.filter((col("name") == "EH") & (col("args.type") == et) & col("args.id").is_in(ids)) if ids else None
-    rows = v.q(f"step {k + 1}: the {suffix} entities of those {len(acts)} {name} runs",
+    rows = v.q(f"step {k + 1}: the {suffix} values of those {len(acts)} {name} run(s)",
                f'.filter(col("name") == "EH" & col("args.type") == {et!r} & col("args.id").is_in(<{len(ids)} ids>))', build)
-    vals = {str(r["args.id"]): value_of(r.get("args.uri", "")) for r in rows if r.get("args.id")}
-    runs = []
-    for a in acts:
-        got = [vals[x] for x in a[relation] if x in vals]
-        runs.append({"activity": a["id"], "pid": a["pid"], "ts": a["ts"], "value": got[0] if got else None, "ref": a["ref"]})
+    vals = {str(r["args.id"]): kv(r.get("args.uri", "")) for r in rows if r.get("args.id")}
+    runs = [{"activity": a["id"], "pid": a["pid"], "ts": a["ts"], "pairs": [p for x in a[relation] for p in vals.get(x, [])], "ref": a["ref"]} for a in acts]
     return {"kind": suffix, "activity": name, "runs": runs, "ids": sorted(vals),
             "resolved": {"activity": name, "time": sub["resolved"]["time"]}, "cites": ([a["ref"] for a in acts] + [_ref(r) for r in rows])[:MAX_CITE]}
 
 
 def _inputs(s, k, v, cat, outs, ctx):
-    return _captured(s, k, v, cat, outs, ctx, "inputs", "used")
+    return _captured(s, k, v, cat, outs, ctx, "input", "used")
 
 
 def _outputs(s, k, v, cat, outs, ctx):
@@ -389,14 +369,18 @@ def _outputs(s, k, v, cat, outs, ctx):
 def _attributes(s, k, v, cat, outs, ctx):
     src = _from(s, k, outs, ("entities", "lineage"))
     ids = src["ids"] if src["kind"] == "entities" else src["entities"]
-    rel = v.q(f"step {k + 1}: the attributes entities part_of those {len(ids)} entities", '.filter(col("name") == "ER" & col("args.object").is_in(<ids>))',
+    rel = v.q(f"step {k + 1}: the attribute entities part_of those {len(ids)} entities", '.filter(col("name") == "ER" & col("args.object").is_in(<ids>))',
               lambda tv, col, cols: tv.filter((col("name") == "ER") & col("args.object").is_in(ids)) if ids else None)
     subj = sorted({str(r["args.subject"]) for r in rel if r.get("args.subject")})
-    rows = v.q(f"step {k + 1}: those attributes entities", '.filter(col("name") == "EH" & col("args.id").is_in(<ids>))',
+    rows = v.q(f"step {k + 1}: those attribute entities", '.filter(col("name") == "EH" & col("args.id").is_in(<ids>))',
                lambda tv, col, cols: tv.filter((col("name") == "EH") & col("args.id").is_in(subj)) if subj else None)
     of = {str(r["args.subject"]): str(r.get("args.object")) for r in rel}
-    runs = [{"entity": of.get(str(r["args.id"])), "value": value_of(r.get("args.uri", "")), "ref": _ref(r)} for r in rows if str(r.get("args.type", "")).endswith(".attributes")]
-    return {"kind": "attributes", "runs": runs, "ids": [x["entity"] for x in runs], "cites": ([_ref(r) for r in rel] + [x["ref"] for x in runs])[:MAX_CITE]}
+    by: Dict[str, List] = {}
+    for r in rows:
+        if str(r.get("args.type", "")).endswith(".attribute") and kv(r.get("args.uri", "")):
+            by.setdefault(of.get(str(r["args.id"]), "?"), []).extend(kv(r["args.uri"]))
+    runs = [{"entity": e, "pairs": p} for e, p in by.items()]
+    return {"kind": "attribute", "runs": runs, "ids": sorted(by), "cites": ([_ref(r) for r in rel] + [_ref(r) for r in rows])[:MAX_CITE]}
 
 
 STEPS = {"entities": _entities, "activities": _activities, "lineage": _lineage, "group": _group, "ends": _ends,
@@ -413,17 +397,13 @@ def check_plan(steps: Any) -> List[str]:
 
 # ------------------------------------------------------------------ the computed result, by template
 def _shown(uri: str) -> str:
-    v = value_of(uri)
-    if v is None:
-        return uri or "-"
-    p = params_of(v) if isinstance(v, dict) and ("args" in v or "flags" in v or "values" in v) else None
-    return ", ".join(f"{k}={x}" for k, x in list(p.items())[:6]) if p else json.dumps(v, default=str)[:160]
+    return uri or "-"
 
 
 def _label(cat, i):
     e = cat["entities"].get(i)
-    if e and (e.get("uri") or "").startswith("json:"):
-        return f"{e['type']} ({_shown(e['uri'])[:60]})"
+    if e and is_captured(e.get("type", "")):
+        return f"{e['type']} {(e.get('uri') or '')[:60]}"
     return f"{e['type']} {os.path.basename((e['uri'] or i).rstrip('/')) or i}" if e else f"undeclared {i}"
 
 
@@ -464,10 +444,10 @@ def headline(o, cat, ctx) -> str:
         return s
     if k == "group":
         return f"By {o['by']}: " + ", ".join(f"{g} {n}" for g, n in o["counts"].items()) + "."
-    if k in ("inputs", "output", "attributes"):
+    if k in ("input", "output", "attribute"):
         merged = _merged(o)
-        what = {"inputs": f"{o.get('activity')} ran {len(o['runs'])} time(s); its inputs", "output": f"{o.get('activity')} ran {len(o['runs'])} time(s); what it returned",
-                "attributes": f"{len(o['runs'])} attribute record(s)"}[k]
+        what = {"input": f"{o.get('activity')} ran {len(o['runs'])} time(s); its parameters", "output": f"{o.get('activity')} ran {len(o['runs'])} time(s); what it returned",
+                "attribute": f"attributes of {len(o['runs'])} entit{'y' if len(o['runs']) == 1 else 'ies'}"}[k]
         if not merged:
             return what + ": none recorded (the annotation does not capture them: annotate again with capture on)."
         shown = "; ".join(f"{p} = {' | '.join(map(str, vs[:4]))}{' …' if len(vs) > 4 else ''}" for p, (vs, n) in list(merged.items())[:12])
@@ -476,15 +456,11 @@ def headline(o, cat, ctx) -> str:
 
 
 def _merged(o) -> Dict[str, Any]:
-    """parameter -> (distinct values, runs that had it), over every run of the step."""
+    """name -> (distinct values, how many runs had it), over every run (or entity) of the step."""
     seen: Dict[str, Any] = {}
     for r in o["runs"]:
-        val = r.get("value")
-        flat = params_of(val) if o["kind"] == "inputs" else ({} if val is None else {})
-        if o["kind"] != "inputs" and val is not None:
-            _flat(val, "", flat)
-        for p, x in flat.items():
-            vs, n = seen.setdefault(p, ([], 0))
+        for p, x in r["pairs"]:
+            vs, n = seen.get(p, ([], 0))
             if x not in vs:
                 vs.append(x)
             seen[p] = (vs, n + 1)
@@ -504,8 +480,8 @@ def table(o, cat, ctx) -> str:
                        for x in o["hops"]])
     if k == "group":
         return _table([o["by"], "count"], [[g, n] for g, n in o["counts"].items()])
-    if k in ("inputs", "output", "attributes"):
-        return _table(["name", "value(s)", "runs"], [[p, " | ".join(map(str, vs[:8])) + (" …" if len(vs) > 8 else ""), n] for p, (vs, n) in _merged(o).items()])
+    if k in ("input", "output", "attribute"):
+        return _table(["name", "value(s)", "runs" if k != "attribute" else "entities"], [[p, " | ".join(map(str, vs[:8])) + (" …" if len(vs) > 8 else ""), n] for p, (vs, n) in _merged(o).items()])
     return ""
 
 
@@ -532,6 +508,58 @@ def check_synthesis(text: str, n_steps: int, computed: str) -> Dict[str, Any]:
     return {"ok": not problems, "problems": problems[:12], "citations": cited}
 
 
+# ------------------------------------------------------------------ gaps: what the provenance cannot show, found while answering
+ROOT_ROLES = {"input", "parameter", "reference"}
+GAP_KINDS = {"undeclared_entity": "an entity referenced but never declared", "missing_producer": "an entity nothing recorded producing",
+             "no_inputs": "an activity that records no inputs", "no_outputs": "an activity that records no output", "no_attributes": "entities without attributes",
+             "not_recorded": "something the question names that is not recorded"}
+
+
+def detect_gaps(steps: List[Dict[str, Any]], outs: List[Dict[str, Any]], cat: Dict[str, Any], ctx: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Deterministic: each gap names its kind, its subject (an entity id, a type or an activity name), what is missing, and the step that showed it."""
+    gaps: Dict[str, Dict[str, Any]] = {}
+    acts = ctx.get("acts", {})
+
+    def add(kind, subject, detail, k):
+        gid = hashlib.sha1(f"{kind}|{subject}".encode()).hexdigest()[:8]
+        gaps.setdefault(gid, {"id": gid, "kind": kind, "subject": str(subject), "detail": detail, "step": k + 1})
+
+    def has_inputs(a):
+        return any(str((cat["entities"].get(x) or {}).get("type", "")).endswith(".input") for x in a["used"])
+
+    def no_inputs(ids, k):
+        by = Counter(acts[i]["name"] for i in ids if i in acts and not has_inputs(acts[i]))
+        for n, c in by.items():
+            add("no_inputs", n, f"activity {n} records no inputs ({c} run(s) here): what it was run with - its parameters, options, the command it ran - is not in the provenance", k)
+    for k, (s, o) in enumerate(zip(steps, outs)):
+        if o["kind"] == "lineage":
+            for i in o["dangling"][:8]:
+                add("undeclared_entity", i, f"entity {i} is referenced by an activity but never declared (no entity record): its type and location are unknown, so the lineage stops there", k)
+            for i in o["ends"]:
+                e = cat["entities"].get(i)
+                if not e or is_captured(e["type"]):
+                    continue
+                role = (cat["types"].get(e["type"]) or {}).get("role")
+                if role not in ROOT_ROLES:
+                    add("missing_producer", e["type"], f"nothing in the traces produced {e['type']} ({os.path.basename((e['uri'] or i).rstrip('/'))}), a {role or 'role-less'} entity: "
+                        "the code that writes it is not annotated, or runs where the annotation does not reach (a subprocess, a callback, a generated script)", k)
+            no_inputs(o["activities"], k)
+        elif o["kind"] == "activities":
+            no_inputs(o["ids"], k)
+        elif o["kind"] in ("input", "output", "attribute") and not any(r["pairs"] for r in o["runs"]):
+            subject = o.get("activity") or "entities"
+            if o.get("missing"):
+                add("not_recorded", subject, f"no activity named {subject} is recorded: the function is not annotated, or the annotation names it differently", k)
+            else:
+                add({"input": "no_inputs", "output": "no_outputs", "attribute": "no_attributes"}[o["kind"]], subject,
+                    {"input": f"activity {subject} records no inputs: its parameters are not in the provenance",
+                     "output": f"activity {subject} records no output value", "attribute": "these entities carry no attributes"}[o["kind"]], k)
+        elif o["kind"] == "entities" and not o["ids"] and (s.get("type") or s.get("match") or s.get("uri_contains")):
+            what = s.get("type") or s.get("match") or s.get("uri_contains")
+            add("not_recorded", what, f"nothing matching {what!r} is recorded: the annotation may not cover it", k)
+    return list(gaps.values())
+
+
 # ------------------------------------------------------------------ the whole thing
 def run(traces: str, steps: List[Dict[str, Any]], index_dir: str) -> Dict[str, Any]:
     bad = check_plan(steps)
@@ -550,7 +578,7 @@ def run(traces: str, steps: List[Dict[str, Any]], index_dir: str) -> Dict[str, A
                     "queries": [q["n"] for q in v.queries[before:]] or None, "computed_from": None if v.queries[before:] else s.get("from"),
                     "headline": headline(o, cat, ctx), "table": table(o, cat, ctx), "cites": o["cites"], "cited": len(o["cites"])})
     lin = next((o for o in reversed(outs) if o["kind"] == "lineage"), None)
-    return {"steps": res, "queries": v.queries, "reads": v.reads(), "outs": outs, "result_hash": _hash(outs), "secs": round(time.time() - t0, 3),
+    return {"gaps": detect_gaps(steps, outs, cat, ctx), "steps": res, "queries": v.queries, "reads": v.reads(), "outs": outs, "result_hash": _hash(outs), "secs": round(time.time() - t0, 3),
             "engine": {"name": "dftracer-utils TraceViewer", "version": getattr(v.U, "__version__", "?")},
             "computed": "\n".join(r["headline"] + "\n" + r["table"] for r in res),
             "graph": _graph(lin, cat, ctx) if lin else None, "types": cat["types"],
@@ -559,14 +587,19 @@ def run(traces: str, steps: List[Dict[str, Any]], index_dir: str) -> Dict[str, A
 
 
 def _graph(o, cat, ctx, cap: int = 150) -> Dict[str, Any]:
+    """The lineage as nodes and edges (real ids: entity ids, activity pid:ts). Captured values are properties, not nodes: an entity's attributes
+    (its part_of attribute entities) and an activity's inputs and outputs, as name=value."""
     acts = ctx.get("acts", {})
-    ents, aids = o["entities"][:cap], o["activities"][:cap]
+    is_cap = lambda i: is_captured((cat["entities"].get(i) or {}).get("type", ""))        # noqa: E731
+    val = lambda i: (cat["entities"].get(i) or {}).get("uri", "") or i                    # noqa: E731
+    ents, aids = [i for i in o["entities"] if not is_cap(i)][:cap], o["activities"][:cap]
     keep = set(ents) | set(aids)
-    nodes = [{"id": i, "kind": "entity", "type": (cat["entities"].get(i) or {}).get("type", ""), "uri": (cat["entities"].get(i) or {}).get("uri", "")[:400],
-              "label": (_label(cat, i) if ((cat["entities"].get(i) or {}).get("uri") or "").startswith("json:") else os.path.basename(((cat["entities"].get(i) or {}).get("uri") or i).rstrip("/")) or i)[:40],
-              "start": i in o["start"],
-              "end": i in o["ends"]} for i in ents]
-    nodes += [{"id": a, "kind": "activity", "label": acts[a]["name"], "pid": acts[a]["pid"], "ts": acts[a]["ts"], "dur": acts[a]["dur"]} for a in aids if a in acts]
+    nodes = [{"id": i, "kind": "entity", "type": (cat["entities"].get(i) or {}).get("type", ""), "uri": (cat["entities"].get(i) or {}).get("uri", ""),
+              "label": (os.path.basename(((cat["entities"].get(i) or {}).get("uri") or i).rstrip("/")) or i)[:40], "start": i in o["start"], "end": i in o["ends"],
+              "attrs": [val(s) for s in cat.get("parts", {}).get(i, []) if str((cat["entities"].get(s) or {}).get("type", "")).endswith(".attribute")]} for i in ents]
+    nodes += [{"id": a, "kind": "activity", "label": acts[a]["name"], "pid": acts[a]["pid"], "ts": acts[a]["ts"], "dur": acts[a]["dur"],
+               "inputs": [val(x) for x in acts[a]["used"] if str((cat["entities"].get(x) or {}).get("type", "")).endswith(".input")],
+               "outputs": [val(x) for x in acts[a]["generated"] if str((cat["entities"].get(x) or {}).get("type", "")).endswith(".output")]} for a in aids if a in acts]
     edges = []
     for a in aids:
         if a in acts:
@@ -596,7 +629,7 @@ def ask(pipeline: str, question: str, steps: List[Dict[str, Any]], synthesis: st
            "result": {"headline": last["headline"], "table": last["table"]}, "synthesis": synthesis, "synthesis_check": syn,
            "result_hash": r["result_hash"], "secs": r["secs"], "lineage": r["graph"], "stats": r["stats"],
            "direction": next((s.get("direction") for s in steps if s.get("op") == "lineage"), None),
-           "verified": True, "problems": syn["problems"], "answer": synthesis or last["headline"], "targets": (r["outs"][0].get("ids") or [])[:20]}
+           "gaps": r["gaps"], "verified": True, "problems": syn["problems"], "answer": synthesis or last["headline"], "targets": (r["outs"][0].get("ids") or [])[:20]}
     with A._LOCK:
         with open(P.pdir(pipeline) / "answers.jsonl", "a") as fh:
             fh.write(json.dumps(rec, default=str) + "\n")
