@@ -1,0 +1,27 @@
+{
+ "name": "explain_evidence",
+ "description": "Explain the evidence of a computed answer - engine, files, queries, records read and cited, result hash - as a plain summary and folded tables of files, queries and cited records. Used by query_explain for the Query view.",
+ "version": 1,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "explain_evidence",
+  "explain_evidence_check"
+ ],
+ "pvc": {
+  "predictor": [
+   "explain_evidence"
+  ],
+  "validator": [
+   "explain_evidence_check"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1794241935.4,
+   "why": "Query view: the evidence part told high level first, details folded and formatted"
+  }
+ ]
+}
