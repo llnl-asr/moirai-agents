@@ -1,7 +1,7 @@
 {
  "name": "moirai_run",
- "description": "Run the annotated application under moirai-service, a smoke run then the baseline, with live provenance on the Dashboard; also apps launched by a generated `flux batch` run.sh (Elmerfold): the app job runs a generated per-chunk submit wrapper (submit_moirai.sh, passed to run.sh as --submit-script) that starts moirai-service in its own shell; dry-run first. Load for the moirai_smoke, baseline and live_run stages, for 'flux batch', 'run.sh', 'submit-script', 'bulksubmit', 'drain', 'dftracer_service not found', 'spill-only', 'exclusive'.",
- "version": 10,
+ "description": "Run the annotated application under moirai-service, a smoke run then the baseline, with live provenance on the Dashboard; also apps launched by a generated `flux batch` run.sh (Elmerfold): the app job runs a generated per-chunk submit wrapper (submit_moirai.sh, given to run.sh as --submit-script, written beforehand by moirai_wrapper_write) that starts moirai-service inside the job's own shell; dry-run first; the batch is submitted DETACHED and its state is read from flux (a web server restart never cancels it); and a finished flux batch submitted by hand (BioTox launch.sh) attached with moirai_run_attach. Load for the moirai_smoke, baseline and live_run stages, for 'flux batch', 'run.sh', 'launch.sh', 'submit-script', 'Submit script ... does not exist', 'wrapper_write', 'bulksubmit', 'drain', 'exclusive', 'dftracer_service not found', 'no dftracer_service found', 'exited with exit code', 'failed' in run.out, 'false pass', 'spill-only', 'No running server found', 'the run has not started', 'attach', 'moirai_run_attach', 'submitted by hand', 'server restart', 'cancelled while queued', 'lost', 'flux_job_id', 'moirai_run_stop', 'live run'.",
+ "version": 11,
  "enabled": true,
  "stages": [
   "moirai_smoke",
@@ -27,11 +27,11 @@
    "moirai_wrapper_write",
    "moirai_smoke_run",
    "moirai_baseline_run",
+   "moirai_live_run",
    "moirai_run_attach",
    "moirai_batch_plan",
    "moirai_batch_render",
-   "moirai_service_resolve",
-   "moirai_live_run"
+   "moirai_service_resolve"
   ],
   "validator": [
    "moirai_validate",
@@ -41,24 +41,36 @@
  "review": [
   "imports shutil: copies/removes files",
   "imports subprocess: runs commands",
-  "line 233: writes or deletes files (write_text)",
-  "line 400: writes or deletes files (unlink)",
-  "line 543: writes or deletes files (write_text)",
-  "line 544: writes or deletes files (write_text)",
-  "line 545: writes or deletes files (write_text)",
-  "line 551: writes or deletes files (write_text)",
-  "line 645: writes or deletes files (write_text)",
-  "line 649: writes or deletes files (write_text)",
-  "line 651: writes or deletes files (write_text)",
-  "line 655: writes or deletes files (write_text)",
-  "line 669: writes or deletes files (write_text)",
-  "line 671: writes or deletes files (write_text)",
-  "line 672: writes or deletes files (write_text)",
-  "line 673: writes or deletes files (write_text)",
-  "line 686: writes or deletes files (write_bytes)",
-  "line 754: writes or deletes files (write_text)",
-  "line 772: writes or deletes files (write_text)",
-  "line 776: writes or deletes files (write_text)"
+  "line 1028: writes or deletes files (write_text)",
+  "line 1033: writes or deletes files (unlink)",
+  "line 1038: writes or deletes files (write_text)",
+  "line 240: writes or deletes files (write_text)",
+  "line 396: writes or deletes files (write_text)",
+  "line 403: writes or deletes files (write_text)",
+  "line 456: writes or deletes files (write_text)",
+  "line 472: writes or deletes files (write_text)",
+  "line 497: writes or deletes files (write_text)",
+  "line 580: writes or deletes files (unlink)",
+  "line 581: writes or deletes files (unlink)",
+  "line 732: writes or deletes files (write_text)",
+  "line 733: writes or deletes files (write_text)",
+  "line 734: writes or deletes files (write_text)",
+  "line 740: writes or deletes files (write_text)",
+  "line 842: writes or deletes files (write_text)",
+  "line 844: writes or deletes files (write_text)",
+  "line 847: writes or deletes files (write_text)",
+  "line 849: writes or deletes files (write_text)",
+  "line 853: writes or deletes files (write_text)",
+  "line 857: writes or deletes files (write_text)",
+  "line 858: writes or deletes files (write_text)",
+  "line 872: writes or deletes files (write_text)",
+  "line 874: writes or deletes files (write_text)",
+  "line 875: writes or deletes files (write_text)",
+  "line 876: writes or deletes files (write_text)",
+  "line 889: writes or deletes files (write_bytes)",
+  "line 957: writes or deletes files (write_text)",
+  "line 975: writes or deletes files (write_text)",
+  "line 979: writes or deletes files (write_text)"
  ],
  "history": [
   {
@@ -126,6 +138,13 @@
    "ts": 1794189191.6,
    "by": "haridev",
    "why": "Live Run view: the live_run stage of a live pipeline (a multi-hour run of an annotated app, many per app). moirai_live_run starts it on the parent run pipeline's annotated tree and env (P.origin), default limit 12 h; validate judges spec coverage as an assumption for a live run."
+  },
+  {
+   "version": 11,
+   "ts": 1794269485.0636075,
+   "by": "haridev",
+   "proposal": "e1d213379f6b",
+   "why": "Batch f3j9BPvr1Agw (12 h, 32 nodes Elmerfold live run) was cancelled while queued, 76 min after submit, at 15:26:27 exactly when the web UI server restarted: the batch wrapper ran as a child of the server, held `flux watch` and a cancel trap on TERM/INT. Fix: detached submit (own session, nohup, clean env, stdin /dev/null), no cancel trap, flux job id recorded in the job record, status/validate derive state from flux and perform the post-run evaluation from flux + run.out."
   }
  ]
 }

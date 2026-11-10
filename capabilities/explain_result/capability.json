@@ -1,7 +1,7 @@
 {
  "name": "explain_result",
  "description": "Explain the result of a computed answer - how much was found and what differs between runs - as a plain summary and the result as a formatted table (values as chips, numbers and times formatted). Used by query_explain for the Query view.",
- "version": 2,
+ "version": 3,
  "enabled": true,
  "stages": [],
  "tools": [
@@ -29,6 +29,12 @@
    "by": "haridev",
    "proposal": "cd43fa9ec7ee",
    "why": "Consolidation: shared rules now live in query_explain; keep only what is specific to the result part."
+  },
+  {
+   "version": 3,
+   "ts": 1794270403.8281024,
+   "by": "haridev",
+   "why": "Restore the code, checks and agent of the current version: approving the consolidation proposal (made before the trace validators) had put back the older code. The consolidated SKILL.md stays."
   }
  ]
 }

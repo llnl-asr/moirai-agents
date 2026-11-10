@@ -7,38 +7,31 @@ Cross-references: [[query_explain]] [[prov_query]]
 
 # The answer part of an answer's explanation
 
-`explain_answer(answer)` turns a computed answer (an answers.jsonl record) into `{part, title, summary, facts, details}`; the Query view shows the
-summary and the facts, and folds the details. Blocks and their shapes: `core/explain.py`.
+`explain_answer(answer)` turns a computed answer (an answers.jsonl record) into `{part, title, summary, facts, details}`. The shared rules, constraints, corner cases and corrector table are in [[query_explain]]; this skill holds only the answer part.
 
 ## Rules
-- Always a narrative that answers the question: the direct answer first, then what differs and what stays the same, then how it was found. Never point at the result instead of answering.
+- Always a narrative that answers the question: the direct answer first, then what differs and what stays the same, then how it was found. Never point at the result instead of answering ("No write-up: the computed result is the answer" is refused by the validator).
+- The first sentence answers in the question's own words: "What is the quality of the MSAs?" opens "The quality of the MSAs is mixed: ...". A how-good question with a known measure of quality (QUALITY in tool.py: HHsearch probability, E-value, pLDDT, coverage, identity) gets a verdict - good, mixed or poor by how many items reach the measure's level - and the level is said, so the reader can disagree. Otherwise the lead measure's median and range.
+- Numbers come from every item, not the distinct values: each measure's median, min and max (the step table's columns) and each item's own values (the step's `per` table). Then a table of each item's values, best first, joined across steps by folder when an item's records share one (an MSA and its template search).
+- Lead with the measure the question names; else the known quality measures in QUALITY's order; then the rest (at most 4 in the text, 6 in the table).
 - Link every claim to where it can be checked: [R n] is row n of the result table, [S n] is step n. Quote values in backticks: the validator looks each one up in the row or step it links.
-- High level first: the summary says in one or two plain sentences what this part is: the write-up's first sentence; tables and bullets of the write-up as blocks; the synthesis check; the gaps as a table.
-- Details carry everything else, typed: a table is a `table` block (never markdown in text), a query is a `query` block, several values are a list (chips), name -> value is `kv`.
-- Format values with `core.explain`: `fmt_num` / `fmt_value` (thousands separators, epoch seconds and microseconds as UTC times), `split_values` for "a | b" and "a,b".
-- Deterministic: no model, every word from the answer record.
+- The summary is the narrative's first sentence; an LLM write-up, when there is one, goes in the details with its tables and bullets as blocks; then the synthesis check and the gaps as a table.
+- Everything else (typed blocks, formatting, deterministic): see [[query_explain]].
 
 ## Constraints
-- The validator `explain_answer_check` checks against the traces when given the pipeline: the plan runs again with TraceViewer and every claim is looked up in what it computes. The Query view runs it on every answer.
-- Every number in the summary and facts is in the answer or a count of it (`explain.check`).
-- Summary under 320 characters; at most 4 facts.
+- As in [[query_explain]] (numbers from the answer, summary under 320 characters, at most 4 facts).
 
 ## Corner cases
-- An older answer (no engine, text gaps, no steps): say so in the summary, keep details empty rather than inventing.
-- Long cells: keep them; the view clips and expands them.
+- As in [[query_explain]] (older answers, long cells).
+- An answer computed before steps had medians and `per` tables: told the old way (what differs, what is the same); ask again for the direct answer.
+- A probability recorded as 0-1: the level is scaled from 0-100.
 
 ## Corrector
-Validator `explain_answer_check`.
-
-| Failed check | Correct |
-|---|---|
-| summary too long or has a table | move it to details as a block |
-| a number not in the answer | state counts of what the answer holds, or drop the number |
-| unknown block / bad table row | use the block shapes in `core/explain.py` |
+Validator `explain_answer_check`; failures follow the table in [[query_explain]].
 
 ## Self-heal
 - A tool failed: follow `capability_builder`'s Self-heal.
 
 ## Self-learn
-- Anything new explored here (workload, software, tool, system) becomes a capability: `capability_builder`, Rules.
+- Anything new explored here becomes a capability: `capability_builder`, Rules.
 - An answer the user found hard to read: record a lesson here with the answer id and what was unclear.

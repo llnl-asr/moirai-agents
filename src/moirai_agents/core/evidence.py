@@ -483,8 +483,59 @@ def table(o, cat, ctx) -> str:
     if k == "group":
         return _table([o["by"], "count"], [[g, n] for g, n in o["counts"].items()])
     if k in ("input", "output", "attribute"):
-        return _table(["name", "value(s)", "runs" if k != "attribute" else "entities"], [[p, " | ".join(map(str, vs[:8])) + (" …" if len(vs) > 8 else ""), n] for p, (vs, n) in _merged(o).items()])
+        rows = []
+        for p, (vs, n) in _merged(o).items():
+            st = _stats([x for r in o["runs"] for q, x in r["pairs"] if q == p])
+            rows.append([p, " | ".join(map(str, vs[:8])) + (" …" if len(vs) > 8 else ""), n] + ([st["min"], st["median"], st["max"]] if st else ["", "", ""]))
+        return _table(["name", "value(s)", "runs" if k != "attribute" else "entities", "min", "median", "max"], rows)
     return ""
+
+
+def _float(x):
+    try:
+        return float(str(x).strip())
+    except ValueError:
+        return None
+
+
+def _g(f: float) -> str:
+    return str(int(f)) if f == int(f) and abs(f) < 1e15 else f"{f:.4g}"
+
+
+def _stats(vals) -> Optional[Dict[str, str]]:
+    """min, median, max of a value over every run or entity (not only the distinct ones), when every value is a number; the min and max as
+    recorded, the median computed."""
+    nums = [(_float(x), x) for x in vals]
+    if not nums or any(f is None for f, _ in nums):
+        return None
+    srt = sorted(nums, key=lambda t: t[0])
+    m = len(srt) // 2
+    med = srt[m][0] if len(srt) % 2 else (srt[m - 1][0] + srt[m][0]) / 2
+    return {"min": str(srt[0][1]), "median": _g(med), "max": str(srt[-1][1]), "n": len(srt)}
+
+
+def _row_label(o, r, cat) -> str:
+    """A run or entity as a short row label: an entity's file and folder (names repeat across folders), a run's start."""
+    if o["kind"] == "attribute":
+        e = cat["entities"].get(r["entity"]) or {}
+        u = (e.get("uri") or r["entity"]).rstrip("/")
+        return "/".join(u.rsplit("/", 2)[-2:]) if "/" in u else u
+    return f"{_iso(r['ts'])} pid {r['pid']}" if r.get("ts") else str(r.get("activity", "?"))
+
+
+def per(o, cat) -> str:
+    """Each run's or entity's own values, one row each: what a distribution or a per-item question needs (the value(s) column holds only the
+    distinct ones)."""
+    if o["kind"] not in ("input", "output", "attribute") or not o.get("runs"):
+        return ""
+    names = list(_merged(o))[:12]
+    rows = []
+    for r in o["runs"]:
+        d: Dict[str, List[str]] = {}
+        for p, x in r["pairs"]:
+            d.setdefault(p, []).append(str(x))
+        rows.append([_row_label(o, r, cat)] + [" | ".join(d.get(p, [])) for p in names])
+    return _table(["entity" if o["kind"] == "attribute" else "run"] + names, rows)
 
 
 def _hash(outs) -> str:
@@ -495,6 +546,16 @@ def _hash(outs) -> str:
 _CIT = re.compile(r"\[S(\d+)\]")
 
 
+def _answer_first(text: str) -> List[str]:
+    """The write-up opens with the direct answer: the first non-empty line is a sentence of prose, not a table, heading, list item, code or data."""
+    first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    if first[:1] in ("|", "#", "-", "*", ">", "`") or first[:2] in ("1.", "1)"):
+        return ["the write-up opens with a table, heading, list or code: the first sentence must answer the question directly, then the evidence"]
+    if len(re.findall(r"[A-Za-z]{2,}", first)) < 4:
+        return ["the first line is not an answer: open with one or two sentences that directly say what was asked (the name, the number, yes or no, or that the traces cannot answer)"]
+    return []
+
+
 def check_synthesis(text: str, n_steps: int, computed: str) -> Dict[str, Any]:
     """Every [Sk] names a step; every number in the text appears in the computed result (headlines, tables, counts)."""
     if not text:
@@ -503,6 +564,7 @@ def check_synthesis(text: str, n_steps: int, computed: str) -> Dict[str, Any]:
     problems = [f"[S{c}] is not a step (1..{n_steps})" for c in cited if not 1 <= c <= n_steps]
     if not cited:
         problems.append("no citation: every claim cites the step it comes from, as [S1]..[Sn]")
+    problems += _answer_first(text)
     known = set(re.findall(r"\d+(?:\.\d+)?", computed))
     for num in re.findall(r"(?<![\w.])\d+(?:\.\d+)?(?![\w.])", _CIT.sub("", text)):
         if num not in known:
@@ -578,7 +640,7 @@ def run(traces: str, steps: List[Dict[str, Any]], index_dir: str) -> Dict[str, A
         outs.append(o)
         res.append({"step": k + 1, "op": s["op"], "args": {a: x for a, x in s.items() if a != "op"}, "resolved": o.get("resolved"),
                     "queries": [q["n"] for q in v.queries[before:]] or None, "computed_from": None if v.queries[before:] else s.get("from"),
-                    "headline": headline(o, cat, ctx), "table": table(o, cat, ctx), "cites": o["cites"], "cited": len(o["cites"])})
+                    "headline": headline(o, cat, ctx), "table": table(o, cat, ctx), "per": per(o, cat) or None, "cites": o["cites"], "cited": len(o["cites"])})
     lin = next((o for o in reversed(outs) if o["kind"] == "lineage"), None) or _touched(outs, ctx)
     return {"gaps": detect_gaps(steps, outs, cat, ctx), "steps": res, "queries": v.queries, "reads": v.reads(), "outs": outs, "result_hash": _hash(outs), "secs": round(time.time() - t0, 3),
             "engine": {"name": "dftracer-utils TraceViewer", "version": getattr(v.U, "__version__", "?")},

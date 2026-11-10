@@ -204,3 +204,31 @@ def test_a_lesson_only_copy_follows_the_bundled_code_and_keeps_its_lessons():
     assert list((old / "versions").glob("shadow-v*/tool.py"))
     assert (mine / "tool.py").read_text() == "def register(mcp):\n    pass\n"
     assert S.sync_shadows() == []
+
+
+NEWER = TOOL.replace("return {\"y\": x + 1}", "return {\"y\": x + 1}  # newer")
+
+
+def _bump_code(code):
+    """The capability's code changes after a proposal was made (another approval, or a bundled update)."""
+    d = S.all_caps()["demo_cap"][1]
+    (d / "tool.py").write_text(code)
+
+
+def test_approving_an_old_skill_proposal_keeps_the_newer_code():
+    S.apply(new()["id"], True)
+    r = S.revise("demo_cap", SKILL.replace("r\n", "shared rules moved\n", 1), note="consolidation")
+    _bump_code(NEWER)
+    a = S.apply(r["id"], True)
+    assert a["status"] == "ok" and a["kept_newer"] == ["tool.py"]
+    d = S.all_caps()["demo_cap"][1]
+    assert "# newer" in (d / "tool.py").read_text() and "shared rules moved" in (d / "SKILL.md").read_text()
+
+
+def test_approving_an_old_code_proposal_over_newer_code_is_refused():
+    S.apply(new()["id"], True)
+    r = S.revise("demo_cap", tool_code=TOOL.replace("x + 1", "1 + x"), note="reorder")
+    _bump_code(NEWER)
+    a = S.apply(r["id"], True)
+    assert a["status"] == "error" and a["conflicts"] == ["tool.py"]
+    assert "# newer" in (S.all_caps()["demo_cap"][1] / "tool.py").read_text()

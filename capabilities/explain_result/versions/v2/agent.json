@@ -1,0 +1,13 @@
+{
+ "description": "Explains the result part of a computed answer.",
+ "level": "level_1",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "explain_result"
+ ],
+ "permission_mode": "plan",
+ "background": true,
+ "instructions": "explain_result on the answer, then explain_result_check. Return the explanation and the verdict."
+}

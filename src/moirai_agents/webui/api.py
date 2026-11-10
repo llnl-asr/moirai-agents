@@ -8,6 +8,7 @@ import json
 import os
 import secrets
 import tempfile
+import threading
 import time
 import uuid
 from http import cookies
@@ -530,6 +531,16 @@ def post_route(h, app, life, u, body):
         if body.get("approve"):
             return send_json(h, capstore.apply(body.get("id", ""), True, user["name"]))
         return send_json(h, capstore.reject(body.get("id", ""), body.get("note", ""), user["name"]))
+    if u.path == "/api/consolidation/answer":
+        ch = body.get("choice")
+        r = consolidate.answer(body.get("id", ""), None if ch in (None, "") else int(ch), body.get("note", ""), user["name"])
+        bg = getattr(app, "background", None)
+        if r.get("status") == "for_agent" and bg is not None:        # your own words: the agent acts on them now
+            s = bg.consolidate_once(consolidate.report(), force="lessons").get("lessons")
+            r["agent"] = s if isinstance(s, str) else (s or {}).get("status") or (s or {}).get("error")
+        if r.get("status") != "error":
+            threading.Thread(target=lambda: setattr(app, "consolidation", consolidate.report()), daemon=True).start()
+        return send_json(h, r)
     if u.path == "/api/lesson/revise":
         return send_json(h, learning.revise(body.get("id", ""), body.get("text", ""), body.get("capability", ""), body.get("note", ""), bool(body.get("approve")), user["name"]))
     if u.path == "/api/capability/refine":
@@ -629,16 +640,25 @@ def post_route(h, app, life, u, body):
             return send_json(h, {"session": sid, "pipeline": c["id"]})
         except pipeline.PipelineError as e:
             return send_json(h, {"error": str(e)}, 400)
-    if u.path == "/api/workbench/dataset":
+    if u.path in ("/api/workbench/dataset", "/api/workbench/published"):
         W = _fresh_wb()
         sid = W.new_chat_id()
         try:
-            c = W.open_dataset(user["workspace"], body.get("path", ""), body.get("name", ""), sid)
+            if u.path == "/api/workbench/published":      # one published run of an app (a version's baseline or verification), asked like a dataset
+                c = W.open_published(user["workspace"], body.get("app", ""), body.get("path", ""), sid)
+                if c.get("chat_session") != sid and st.get(c.get("chat_session") or ""):
+                    return send_json(h, {"session": c["chat_session"], "pipeline": c["id"]})
+            else:
+                c = W.open_dataset(user["workspace"], body.get("path", ""), body.get("name", ""), sid)
         except pipeline.PipelineError as e:
             return send_json(h, {"error": str(e)}, 400)
+        if c.get("chat_session") != sid:                    # an older dataset whose chat is gone: give it a new one
+            pipeline.update(c["id"], lambda x: x.update(chat_session=sid))
         allowed = user.get("models") or R.provider_models(user.get("provider", "livai"))
-        st.put({"id": sid, "created": R._now(), "updated": R._now(), "turns": [], "user": user["name"], "title": c["name"],
-                "mode": "analysis", "pipeline": c["id"], "app_dir": None, "folder": "datasets",
+        pub = c.get("published") or {}
+        st.put({"id": sid, "created": R._now(), "updated": R._now(), "turns": [], "user": user["name"],
+                "title": f"Query: {pub['name']} {pub['kind']} {pub['ts']}" if pub else c["name"],
+                "mode": "analysis", "pipeline": c["id"], "app_dir": None, "folder": "queries" if pub else "datasets",
                 "model": os.environ.get("MOIRAI_AGENTS_MODEL", allowed[0]) if os.environ.get("MOIRAI_AGENTS_MODEL") in allowed else allowed[0]})
         return send_json(h, {"session": sid, "pipeline": c["id"], "card": W.card(user["workspace"], c["id"])})
     if u.path == "/api/rename":

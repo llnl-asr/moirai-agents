@@ -114,7 +114,8 @@ def _after(act, generated, invalidated, updated, relations, names):
 
 # ---- inputs, outputs and attributes, each one value its own small entity "name=value" (the trace keeps a uri of at most ~250 characters
 # and replaces quotes, brackets and the like): an activity used its "<activity>.input" entities (its parameters) and generated its
-# "<activity>.output" entities (what it returned); an entity's "<type>.attribute" entities are part_of it. Capturing never raises into the app.
+# "<activity>.output" entities (what it returned, and the values named by capture.outputs); an entity's "<type>.attribute" entities are part_of it.
+# Capturing never raises into the app.
 _FLAG = re.compile(r"(^|\\s)--?[A-Za-z]")
 MAX_VALUES = 48
 
@@ -222,13 +223,35 @@ def _inputs(act, name, capture, names):
         pass
 
 
+def _emit_outputs(act, name, pairs):
+    """The activity generated one "<activity>.output" entity per name=value."""
+    for e in _value_entities(name + ".output", "INTERMEDIATE", "What activity " + name + " returned, or recorded as named outputs (capture.outputs): "
+                             "a result a hook keeps on self; its uri is name=value.", pairs):
+        act.relate(moirai.Relation.GENERATED, e)
+
+
 def _output(act, name, capture, result):
     try:
         if capture.get("output", True) and result is not None:
             pairs = {}
             _pairs(_summ(result), "value", pairs, {})
-            for e in _value_entities(name + ".output", "INTERMEDIATE", "What activity " + name + " returned; its uri is name=value.", pairs):
-                act.relate(moirai.Relation.GENERATED, e)
+            _emit_outputs(act, name, pairs)
+    except Exception:
+        pass
+
+
+def _outputs(act, name, capture, names):
+    """capture.outputs {label: expression}: evaluated AFTER the call over `names` (the call's arguments, self, result; for a statement its locals), for a
+    hook that returns None and keeps its result on self. One output entity per label, in addition to the return value; a label that raises is skipped."""
+    try:
+        pairs = {}
+        for label, fn in (capture.get("outputs") or {}).items():
+            try:
+                _pairs(_summ(fn(**names) if callable(fn) else fn), label, pairs, {})
+            except Exception:                        # an output that cannot be read is left out, never raised
+                continue
+        if pairs:
+            _emit_outputs(act, name, pairs)
     except Exception:
         pass
 
@@ -254,7 +277,8 @@ def _attrs(entity, attrs, names):
 def activity(name, used=(), generated=(), invalidated=(), updated=(), relations=(), signature=None, capture=None):
     """One moirai activity around each call; entity keys may read the call's arguments, and `result`. signature: the function whose
     parameters name the arguments, for a wrapper that takes *args. capture: {auto: record every argument (default on), output: record
-    the return value (default on), inputs: {label: expression of the arguments}}."""
+    the return value (default on), inputs: {label: expression of the arguments}, outputs: {label: expression of the arguments, self and result,
+    evaluated after the call}}."""
     capture = {} if capture is None else capture
     def wrap(fn):
         sig = inspect.signature(signature or fn)
@@ -272,20 +296,24 @@ def activity(name, used=(), generated=(), invalidated=(), updated=(), relations=
                 _bind(act, moirai.Relation.USED, used, names)
                 _inputs(act, name, capture, names)
                 result = fn(*a, **k)
-                _after(act, generated, invalidated, updated, relations, {**names, "result": result})
+                done = {**names, "result": result}
+                _after(act, generated, invalidated, updated, relations, done)
                 _output(act, name, capture, result)
+                _outputs(act, name, capture, done)
                 return result
         return call
     return wrap
 
 
 def event(name, used=(), generated=(), invalidated=(), updated=(), relations=(), capture=None):
-    """A one-shot activity at a statement; its keys are closures over the surrounding locals. It has no duration. capture: {inputs: {label: closure}}."""
+    """A one-shot activity at a statement; its keys are closures over the surrounding locals. It has no duration. capture: {inputs: {label: closure},
+    outputs: {label: closure}}."""
     start()
     with moirai.Activity(name) as act:
         _bind(act, moirai.Relation.USED, used, {})
         _inputs(act, name, {"auto": False, **(capture or {})}, {})
         _after(act, generated, invalidated, updated, relations, {})
+        _outputs(act, name, capture or {}, {})
 '''
 
 # Appended to the helper only when a spec has a yaml_step activity (so other specs generate byte-identical helpers). Not %-formatted.
@@ -463,6 +491,8 @@ def _kw(a, params, result=True):
         parts = [f"{k!r}: {bool(cap[k])}" for k in ("auto", "output") if k in cap]
         if cap.get("inputs"):              # {label: expression of the arguments (or, for a statement, of its locals)}
             parts.append("'inputs': {" + ", ".join(f"{str(k)!r}: {_py_lambda(str(x), params, False)}" for k, x in cap["inputs"].items()) + "}")
+        if cap.get("outputs"):             # {label: expression of the arguments, self and result, run after the call (a statement: of its locals)}
+            parts.append("'outputs': {" + ", ".join(f"{str(k)!r}: {_py_lambda(str(x), params, result)}" for k, x in cap["outputs"].items()) + "}")
         out += ", capture={" + ", ".join(parts) + "}"
     return out
 
@@ -483,8 +513,11 @@ def _exprs(a):
                 rows.append((kind == "used", f"{kind} {e.get('type')} {f}", e[f]))
         for label, x in (e.get("attributes") or {}).items():
             rows.append((kind == "used", f"{kind} {e.get('type')} attribute {label}", str(x)))
-    for label, x in ((a.get("capture") or {}).get("inputs") or {}).items() if isinstance(a.get("capture"), dict) else []:
+    cap = a.get("capture") if isinstance(a.get("capture"), dict) else {}
+    for label, x in (cap.get("inputs") or {}).items() if isinstance(cap.get("inputs"), dict) else []:
         rows.append((True, f"capture input {label}", str(x)))
+    for label, x in (cap.get("outputs") or {}).items() if isinstance(cap.get("outputs"), dict) else []:   # run after the call: result is in scope
+        rows.append((False, f"capture output {label}", str(x)))
     for r in a.get("relations", []):
         if r.get("when"):
             rows.append((False, f"relation {r.get('relation')} when", r["when"]))
@@ -1361,14 +1394,18 @@ def _check_spec(spec, root):
                     pass
         cap = a.get("capture")
         if cap not in (None, False, True) and not isinstance(cap, dict):
-            bad.append(f"{where}: capture is false, or {{auto, output, inputs: {{label: expression}}}}")
+            bad.append(f"{where}: capture is false, or {{auto, output, inputs: {{label: expression}}, outputs: {{label: expression}}}}")
         elif isinstance(cap, dict):
-            if set(cap) - {"auto", "output", "inputs"}:
-                bad.append(f"{where}: capture takes auto, output and inputs, not {sorted(set(cap) - {'auto', 'output', 'inputs'})}")
+            if set(cap) - {"auto", "output", "inputs", "outputs"}:
+                bad.append(f"{where}: capture takes auto, output, inputs and outputs, not {sorted(set(cap) - {'auto', 'output', 'inputs', 'outputs'})}")
             if cap.get("inputs") is not None and not isinstance(cap["inputs"], dict):
                 bad.append(f"{where}: capture.inputs is {{label: expression}}")
             if cap.get("inputs") and not (py or mode == "yaml_step"):
                 bad.append(f"{where}: capture.inputs works on Python and Maestro YAML; for C and C++ record what matters as entities")
+            if cap.get("outputs") is not None and not isinstance(cap["outputs"], dict):
+                bad.append(f"{where}: capture.outputs is {{label: expression}}, run after the call over its arguments, self and result")
+            if cap.get("outputs") and not py:
+                bad.append(f"{where}: capture.outputs works on Python activities only; for a Maestro step or C and C++ record what matters as entities")
         for kind, e in ents:
             if e.get("attributes") is not None and (not isinstance(e["attributes"], dict) or not py):
                 bad.append(f"{where}: {kind} {e.get('type')}: attributes is {{label: Python expression}}, on Python activities only")
@@ -1645,9 +1682,12 @@ def register(mcp):
     def annotate_spec(pipeline: str, spec: dict) -> dict:
         """Check and save the provenance spec. Use after agreeing it with the user. spec: {scientific_artifacts: [types the user agreed], entity_types: [{type, role, description, id_scheme}],
         activities: [...], entry: file with main (C/C++)}. role: input|output|intermediate|parameter|reference. store: local_disk|parallel_fs|memory|network|...
-        An activity: {file, name, mode, <where>, used|generated|invalidated|updated: [entity], relations: [edge]}. An entity: {type, key|key_expr, store, uri|uri_expr, when}; key_expr is
+        An activity: {file, name, mode, <where>, used|generated|invalidated|updated: [entity], relations: [edge], capture?}. An entity: {type, key|key_expr, store, uri|uri_expr, when, attributes?}; key_expr is
         code over the function's parameters (Python: also `result`, except in used and statement); when is code, the edge exists only if it is true. invalidated is moirai's relation
-        for a delete, updated for an in-place change. mode and <where>: wrap (default) {function: "Class.method"}; patch {target: "ServerTask.start", params?: [names]} reassigns the
+        for a delete, updated for an in-place change. capture (Python): false, or {auto?, output?, inputs?: {label: expression of the arguments, or of the locals for a statement},
+        outputs?: {label: expression}}; outputs is for a hook that returns None and keeps its result on self: each expression is evaluated AFTER the call over the arguments, `self` and `result`
+        (a statement: its locals), guarded, and becomes one <activity>.output entity name=value (in addition to the return value), which is what an outputs query reads; example
+        capture: {outputs: {"final": "int(self.stdout.split(':')[-1])"}}. mode and <where>: wrap (default) {function: "Class.method"}; patch {target: "ServerTask.start", params?: [names]} reassigns the
         method wrapped, also an inherited one; subclass {base, method, class_name?, rebind?, params?} inserts a subclass whose method wraps super(); statement {anchor: text in one statement,
         at?: before|after, occurrence?: 1, in?: function} adds a one-shot activity whose keys read the surrounding locals. yaml_step {file: "biotox.yaml", step: "af3_infer", params?: [Maestro
         names a parameter generator makes], shell_vars?: [shell names set outside the cmd], record_on_failure?: false} records used and generated when a shell step of a Maestro YAML ENDS (a
@@ -1698,7 +1738,7 @@ def register(mcp):
         directory against the fake moirai (the wrapper really runs: its exit code, early exits and skipped records can be read). variables: {Maestro name: value} substituted into those steps,
         for example {"SEQ": "t1", "af3_msa.workspace": "."}. step_env: extra environment for them, for example {"MOIRAI_PYTHON": "/bin/false"} to see that a broken moirai changes nothing.
         Returns {status, files: annotated text, missing, unresolved, events: [{activity, relations: [[REL, type, key]]}],
-        links: [[REL, subject type, key, object type, key]], rc, stderr, step_rcs, step_runs} or {status: error, problems}."""
+        links: [[REL, subject type, key, object type, key]], captured: [{activity, relation, type, value}] (the .input, .output and .attribute entities, as name=value), rc, stderr, step_rcs, step_runs} or {status: error, problems}."""
         spec = json.loads(spec) if isinstance(spec, str) else spec
         files = json.loads(files) if isinstance(files, str) else files
         variables = json.loads(variables) if isinstance(variables, str) else (variables or {})

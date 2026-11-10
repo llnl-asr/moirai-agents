@@ -38,7 +38,7 @@ function wbShow(v){v=VIEW_L[v]?v:'ann';WB.view=v;try{localStorage.setItem('moira
  try{history.replaceState(null,'','#'+{ann:'annotate',live:'live',query:'query'}[v])}catch(_){}
  WB.sel=null;clearInterval(WB.timer);showTab('wb');wbLoad().then(wbOpenView)}
 for(const k of Object.keys(VIEW_L)){const b=$('#tv'+k);if(b)b.onclick=()=>wbShow(k)}
-function appOf(id){const x=wbItem(id);return x?(x.kind==='live'?x.parent:x.id):null}
+function appOf(id){const x=wbItem(id);return x?(x.kind==='live'||x.published_run?x.parent:x.id):null}
 function livesOf(app){return WB.items.lives.filter(l=>l.parent===app).sort((a,b)=>(b.created||0)-(a.created||0))}
 // go to a view on a given target (an app, a live run or a dataset): its app becomes the selected one, the target that view's pick
 function goView(view,target){const app=appOf(target);if(app){WB.app=app;if(view!=='ann'&&target)WB.pick[view][app]=target;savePick()}wbShow(view)}
@@ -47,7 +47,7 @@ function targetFor(v){const it=WB.app&&wbItem(WB.app);if(!it)return null;
  if(v==='ann')return it.id;
  const lv=livesOf(it.id),p=WB.pick[v][it.id];
  if(v==='live')return p&&lv.some(x=>x.id===p)?p:(lv[0]||{}).id||null;
- return p&&(p===it.id||lv.some(x=>x.id===p))?p:(lv[0]||{}).id||it.id}
+ return p&&(p===it.id||lv.some(x=>x.id===p)||(WB.items.published||[]).some(x=>x.id===p&&x.parent===it.id))?p:(lv[0]||{}).id||it.id}
 async function wbOpenView(){if(!document.body.classList.contains('views'))return;
  document.querySelectorAll('#wblist .wbi').forEach(e=>e.classList.toggle('on',e.dataset.id===WB.app));
  const it=WB.app&&wbItem(WB.app);
@@ -59,15 +59,27 @@ async function wbOpenView(){if(!document.body.classList.contains('views'))return
 function targetBar(){const it=WB.app&&wbItem(WB.app);if(!it||it.kind==='analysis'||WB.view==='ann')return '';
  const lv=livesOf(it.id),cur=WB.sel&&WB.sel.id,chip=(x,label)=>{const [cls,word]=WB_STATE[x.state]||['',x.state];
   return `<button class="wb-tg${cur===x.id?' on':''}" data-target="${esc(x.id)}"><span class="wbd ${cls}"></span>${esc(label||x.name)} <span class="sub">${esc(word)}</span></button>`};
- const chips=(WB.view==='query'?chip(it,'baseline'):'')+lv.map(x=>chip(x)).join('')+(WB.view==='live'?'<button class="wb-tg new" data-newlive="1">+ new live run</button>':'');
- return `<div class="wb-targets"><span class="sub">${WB.view==='live'?'Live runs of':'Ask about'} <b>${esc(it.name)}</b>:</span>${chips}</div>`}
-$('#wbview').addEventListener('click',e=>{const t=e.target.closest('[data-target]');if(t){e.preventDefault();const app=appOf(t.dataset.target);if(app){WB.pick[WB.view][app]=t.dataset.target;savePick()}wbOpen(t.dataset.target);return}
+ const chips=(WB.view==='query'?chip(it,'current baseline'):'')+lv.map(x=>chip(x)).join('')+(WB.view==='live'?'<button class="wb-tg new" data-newlive="1">+ new live run</button>':'');
+ const vs=WB.view==='query'?(it.versions||[]):[];
+ const pub=vs.map(r=>{const day=r.ts?r.ts.replace(/^(\d{4})(\d\d)(\d\d)_(\d\d)(\d\d).*/,'$1-$2-$3 $4:$5'):'';
+  const tip=[`${r.name}: ${r.kind}`,day&&'published run of '+day,r.scale&&'scale '+r.scale,r.input&&'input '+r.input,r.commit&&'app commit '+r.commit,r.same_as&&`the same run as ${r.same_as}, published again`,r.note].filter(Boolean).join('\n');
+  if(!r.path)return `<button class="wb-tg pub off" disabled title="${esc(tip)}">${esc(r.label)} <span class="sub">${esc(r.note||'')}</span></button>`;
+  const on=r.pipeline&&cur===r.pipeline;
+  return `<button class="wb-tg pub${on?' on':''}" ${r.pipeline?`data-target="${esc(r.pipeline)}"`:`data-pub="${esc(r.path)}" data-app="${esc(it.id)}"`} title="${esc(tip)}">${esc(r.label)} <span class="sub">${r.same_as?'= '+esc(r.same_as)+' ':''}${esc(day.slice(5,10))}</span></button>`}).join('');
+ return `<div class="wb-targets"><span class="sub">${WB.view==='live'?'Live runs of':'Ask about'} <b>${esc(it.name)}</b>:</span>${chips}</div>`+
+  (pub?`<div class="wb-targets wb-pubs"><span class="sub">Published baselines:</span>${pub}</div>`:'')}
+$('#wbview').addEventListener('click',async e=>{const pb=e.target.closest('[data-pub]');
+ if(pb){e.preventDefault();pb.disabled=true;pb.querySelector('.sub').textContent='opening…';
+  const r=await api('api/workbench/published',{app:pb.dataset.app,path:pb.dataset.pub});
+  if(!r||r.error){pb.disabled=false;pb.querySelector('.sub').textContent='';alert((r&&r.error)||'could not open it');return}
+  await wbLoad();WB.pick.query[pb.dataset.app]=r.pipeline;savePick();wbOpen(r.pipeline);return}
+ const t=e.target.closest('[data-target]');if(t){e.preventDefault();const app=appOf(t.dataset.target);if(app){WB.pick[WB.view][app]=t.dataset.target;savePick()}wbOpen(t.dataset.target);return}
  if(e.target.closest('[data-newlive]')){e.preventDefault();wbHome('live')}});
 
 // ---- the list on the left: the apps (and datasets); the selected one stays selected across the views
 async function wbLoad(){if(!me)return;const d=await api('api/workbench');if(!d||d.error)return;WB.items=d;renderNow(d);
  if(!document.body.classList.contains('views'))return;
- if(!WB.app&&session){const it=[...d.apps,...d.lives,...d.datasets].find(x=>x.chat===session||x.query_chat===session);if(it){WB.app=appOf(it.id);savePick()}}
+ if(!WB.app&&session){const it=[...d.apps,...d.lives,...d.datasets,...(d.published||[])].find(x=>x.chat===session||x.query_chat===session);if(it){WB.app=appOf(it.id);savePick()}}
  if(WB.app&&!wbItem(WB.app)){WB.app=null;savePick()}
  const row=x=>{const [cls,word]=WB_STATE[x.state]||['',x.state],lv=livesOf(x.id),run=lv.filter(l=>l.state==='running').length,og=(x.gaps||[]).filter(g=>g.status==='open').length;
   return `<div class="wbi ${WB.app===x.id?'on':''}" data-id="${esc(x.id)}" title="${esc(x.id)}"><span class="wbd ${cls}"></span><span class="t">${esc(x.name)}</span><span class="s">${esc(word)}${lv.length?` · ${lv.length} run${lv.length>1?'s':''}${run?` (${run} live)`:''}`:''}${og?` · ${og} gap${og>1?'s':''}`:''}</span></div>`};
@@ -78,7 +90,7 @@ async function wbLoad(){if(!me)return;const d=await api('api/workbench');if(!d||
   document.querySelectorAll('#wblist .wbi').forEach(x=>x.classList.remove('on'));if(a.dataset.new==='data'&&WB.view!=='query'){WB.view='query';showTab('wb')}wbHome(a.dataset.new)});
  if(WB.sel){const it=wbItem(WB.sel.id);if(it)WB.sel.item=it}}
 function wbPoolOf(v){const d=WB.items;return v==='query'?[...d.apps,...d.datasets]:d.apps}
-function wbItem(id){const d=WB.items;return [...d.apps,...d.lives,...d.datasets].find(x=>x.id===id)}
+function wbItem(id){const d=WB.items;return [...d.apps,...d.lives,...d.datasets,...(d.published||[])].find(x=>x.id===id)}
 
 // ---- the home of each view: what it is for, and how to start
 function wbHome(what){WB.sel=null;clearInterval(WB.timer);const v=$('#wbview');v.dataset.home='1';delete v.dataset.h;
@@ -343,7 +355,7 @@ function wbShowAnswer(id){Q.want=id;if(WB.view!=='query'||!WB.sel){if(WB.sel)goV
 
 async function wbQuery(quiet){if(!WB.sel||!WB.sel.item)return;const it=WB.sel.item,pid=it.id,v=$('#wbview');
  if(!quiet||!$('#wqgraph')){Q.cy=null;Q.drawn=0;Q.sig='';Q.seen=null;AGG.q=null;
-  v.innerHTML=targetBar()+`<div class="wb-head"><h2>${esc(it.name)}</h2><span class="sub">${{live:'live run',run:'baseline of the app',analysis:'dataset'}[it.kind]||''}${it.app?' of '+esc(it.app):''}</span>
+  v.innerHTML=targetBar()+`<div class="wb-head"><h2>${esc(it.published_run?`${it.published_run.name} · ${it.published_run.kind}`:it.name)}</h2><span class="sub">${it.published_run?`${esc(it.published_run.label)} of ${esc(it.published_run.name)}, published run of ${esc(it.published_run.ts)}`+(it.published_run.scale?` (scale ${esc(it.published_run.scale)})`:''):({live:'live run',run:'current baseline of the app',analysis:'dataset'}[it.kind]||'')+(it.app?' of '+esc(it.app):'')}</span>
     <div class="seg" id="wqseg"><button data-g="inst" class="${Q.gmode==='inst'?'on':''}">Instances</button><button data-g="agg" class="${Q.gmode==='agg'?'on':''}">Aggregated</button></div>
     <span class="sub" id="wqstat"></span><span class="wb-acts"><a href="#" id="wbreport">report of pinned answers</a></span></div>
    <div class="wq-strip" id="wqstrip"></div>

@@ -7,8 +7,9 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from . import capstore, learning
 
@@ -150,13 +151,129 @@ def capabilities() -> List[Dict[str, Any]]:
 
 
 def report() -> Dict[str, Any]:
-    """What needs consolidating now."""
-    kept = _kept()
-    fresh = lambda groups: [g for g in groups if _key(g["ids"]) not in kept]  # noqa: E731
-    return {"lessons": fresh(lessons()), "capabilities": fresh(capabilities()), "checked": round(time.time(), 1)}
+    """What needs consolidating now: groups nobody decided on and nobody was asked about yet, and the open questions."""
+    return unkept({"lessons": lessons(), "capabilities": capabilities(), "checked": round(time.time(), 1)})
 
 
 def unkept(rep: Dict[str, Any]) -> Dict[str, Any]:
-    """A report from a while ago without the groups someone has since kept, so the page does not show a decided group until the next check."""
-    kept = _kept()
-    return {**rep, **{k: [g for g in rep.get(k, []) if _key(g["ids"]) not in kept] for k in ("lessons", "capabilities")}}
+    """A report without the groups someone has since kept, asked about or resolved (a lesson of it is no longer in force), so the page does
+    not show a decided group until the next check; with the questions waiting for the user."""
+    kept, asked, live = _kept(), {_key(q["ids"]) for q in questions()}, _in_force()
+    merging = {i for r in learning.all_lessons().values() if r.get("status") == "pending" and r.get("supersedes")       # a proposed merge waits in the panel
+               for i in ([r["supersedes"]] if isinstance(r["supersedes"], str) else r["supersedes"])}
+    lg = [g for g in rep.get("lessons", []) if _key(g["ids"]) not in kept | asked and sum(i in live and i not in merging for i in g["ids"]) >= 2]
+    cg = [g for g in rep.get("capabilities", []) if _key(g["ids"]) not in kept]
+    return {**rep, "lessons": lg, "capabilities": cg, "questions": questions()}
+
+
+# ---------------------------------------------------------------- questions: a conflict the agent cannot settle, for the user to answer
+ACTIONS = ("keep", "supersede", "merge", "drop")
+
+
+def _in_force() -> Set[str]:
+    return {i for i, r in learning.all_lessons().items() if r.get("status") in ("applied", "pending")}
+
+
+def _qfile() -> Path:
+    return capstore._learning_dir() / "consolidation_questions.json"
+
+
+def _qall() -> List[Dict[str, Any]]:
+    try:
+        return json.loads(_qfile().read_text())
+    except (OSError, ValueError):
+        return []
+
+
+def _qsave(qs: List[Dict[str, Any]]) -> None:
+    _qfile().write_text(json.dumps(qs, indent=1))
+
+
+def questions(status: str = "open") -> List[Dict[str, Any]]:
+    """Questions with that status; an open one whose lessons were resolved meanwhile is no longer asked."""
+    live = _in_force()
+    return [q for q in _qall() if q.get("status") == status and (status != "open" or sum(i in live for i in q["ids"]) >= 2)]
+
+
+def _check_option(o: Dict[str, Any], ids: List[str]) -> str:
+    do = o.get("do")
+    if do not in ACTIONS:
+        return f"option {o.get('label')!r}: do is one of {', '.join(ACTIONS)}"
+    if not (o.get("label") or "").strip():
+        return "every option needs a label: what it means, in a few words"
+    if do == "supersede" and o.get("winner") not in ids:
+        return f"option {o['label']!r}: supersede needs winner, one of {ids}"
+    if do == "merge" and (not (o.get("text") or "").strip() or o.get("capability") not in capstore.all_caps()):
+        return f"option {o['label']!r}: merge needs the whole merged text and a known capability"
+    if do == "drop" and (not o.get("drop") or not set(o["drop"]) <= set(ids)):
+        return f"option {o['label']!r}: drop needs drop, the lessons of this group that are wrong"
+    return ""
+
+
+def ask(ids: List[str], question: str, options: List[Dict[str, Any]], recommended: int, why: str) -> Dict[str, Any]:
+    """Ask the user to settle a group: 2-4 options, each a concrete action, one recommended with the reason."""
+    rows = learning.all_lessons()
+    ids = sorted(set(ids))
+    bad = [i for i in ids if i not in rows]
+    if len(ids) < 2 or bad:
+        return {"status": "error", "error": f"name at least two known lessons; unknown: {bad}"}
+    if not (question or "").strip() or not (why or "").strip():
+        return {"status": "error", "error": "a question needs its text and why the recommended option holds"}
+    if not 2 <= len(options or []) <= 4:
+        return {"status": "error", "error": "give 2 to 4 options"}
+    errs = [e for e in (_check_option(o, ids) for o in options) if e]
+    if errs:
+        return {"status": "error", "error": "; ".join(errs)}
+    if not 0 <= int(recommended) < len(options):
+        return {"status": "error", "error": "recommended is the index of one of the options"}
+    qs = [q for q in _qall() if not (q.get("status") == "open" and _key(q["ids"]) == _key(ids))]     # a new question on a group replaces the old
+    q = {"id": "Q-" + uuid.uuid4().hex[:8], "ids": ids, "question": question.strip(), "why": why.strip(), "recommended": int(recommended),
+         "options": [{k: v for k, v in o.items() if k in ("label", "do", "winner", "text", "capability", "drop")} for o in options],
+         "lessons": {i: {"text": rows[i]["text"], "capability": rows[i]["capability"], "status": rows[i]["status"]} for i in ids},
+         "status": "open", "ts": round(time.time(), 1)}
+    _qsave(qs + [q])
+    return {"status": "ok", "id": q["id"], "note": "the user answers it in the Lessons panel; the group is not reported again meanwhile"}
+
+
+def answer(qid: str, choice: Optional[int] = None, note: str = "", by: str = "") -> Dict[str, Any]:
+    """The user's answer: an option is applied at once; free text (no choice) goes back to the consolidation agent."""
+    qs = _qall()
+    q = next((x for x in qs if x["id"] == qid), None)
+    if not q or q.get("status") != "open":
+        return {"status": "error", "error": f"no open question {qid}"}
+    if choice is None:
+        if not (note or "").strip():
+            return {"status": "error", "error": "pick an option or write your answer"}
+        q.update(status="for_agent", answer={"note": note.strip(), "by": by, "ts": round(time.time(), 1)})
+        _qsave(qs)
+        return {"status": "for_agent", "id": qid, "question": q}
+    o = (q["options"] or [])[int(choice)]
+    why = note.strip() or o["label"]
+    if o["do"] == "keep":
+        r = keep(q["ids"], why)
+    elif o["do"] == "supersede":
+        r = learning.retire(q["ids"], by, winner=o["winner"], note=why)
+        w = learning.all_lessons().get(o["winner"])
+        if w and w["status"] == "pending":
+            learning.decide(o["winner"], True, by)
+    elif o["do"] == "drop":
+        r = learning.retire(o["drop"], by, note=why)
+    else:
+        m = learning.merge(q["ids"], o["text"], o["capability"], why, by)
+        r = learning.decide(m["id"], True, by) if m.get("status") == "ok" else m
+    if r.get("status") == "error":
+        return r
+    q.update(status="answered", answer={"choice": int(choice), "label": o["label"], "note": note.strip(), "by": by, "ts": round(time.time(), 1)})
+    _qsave(qs)
+    return {"status": "ok", "id": qid, "applied": o["do"], "result": r}
+
+
+def close(qid: str, what: str) -> Dict[str, Any]:
+    """The agent acted on the user's own answer."""
+    qs = _qall()
+    q = next((x for x in qs if x["id"] == qid), None)
+    if not q or q.get("status") != "for_agent":
+        return {"status": "error", "error": f"{qid} is not waiting for the agent"}
+    q.update(status="answered", done=what)
+    _qsave(qs)
+    return {"status": "ok", "id": qid}

@@ -2124,5 +2124,157 @@
   "expect": {
    "contains": "--diff=3000"
   }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "class FilterTask:\n    def on_finish(self):\n        self.stdout = 'Initial number of alignments: 10\\nFinal number of alignments: 4\\n'\n        return None\n\n\nif __name__ == '__main__':\n    FilterTask().on_finish()\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "filtered_msa"
+    ],
+    "entity_types": [
+     {
+      "type": "filtered_msa",
+      "role": "output",
+      "description": "the filtered alignment of one sequence",
+      "id_scheme": "sequence"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "FilterTask.on_finish",
+      "name": "filter_msa",
+      "generated": [
+       {
+        "type": "filtered_msa",
+        "key": "s1",
+        "store": "memory"
+       }
+      ],
+      "capture": {
+       "outputs": {
+        "final": "int(self.stdout.split(':')[-1])"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "unresolved": [],
+    "rc": 0,
+    "captured": [
+     {
+      "activity": "filter_msa",
+      "relation": "GENERATED",
+      "type": "filter_msa.output",
+      "value": "final=4"
+     }
+    ]
+   },
+   "contains": "final=4"
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "class FilterTask:\n    def on_finish(self):\n        self.stdout = 'Initial number of alignments: 10\\nFinal number of alignments: 4\\n'\n        return None\n\n\nif __name__ == '__main__':\n    FilterTask().on_finish()\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "filtered_msa"
+    ],
+    "entity_types": [
+     {
+      "type": "filtered_msa",
+      "role": "output",
+      "description": "the filtered alignment of one sequence",
+      "id_scheme": "sequence"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "FilterTask.on_finish",
+      "name": "filter_msa",
+      "generated": [
+       {
+        "type": "filtered_msa",
+        "key": "s1",
+        "store": "memory"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "rc": 0,
+    "captured": []
+   }
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "def pipeline():\n    text = 'Final number of alignments: 4'\n    return text\n\n\nif __name__ == '__main__':\n    pipeline()\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "marker"
+    ],
+    "entity_types": [
+     {
+      "type": "marker",
+      "role": "output",
+      "description": "a marker entity generated at a statement",
+      "id_scheme": "name"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "mode": "statement",
+      "in": "pipeline",
+      "anchor": "text = 'Final",
+      "at": "after",
+      "name": "count_step",
+      "generated": [
+       {
+        "type": "marker",
+        "key": "m1",
+        "store": "memory"
+       }
+      ],
+      "capture": {
+       "outputs": {
+        "final": "int(text.split(':')[-1])"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "unresolved": [],
+    "rc": 0
+   },
+   "contains": "final=4"
+  }
  }
 ]

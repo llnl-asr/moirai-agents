@@ -1,13 +1,1 @@
-{
- "description": "Explains the evidence part of a computed answer.",
- "level": "level_1",
- "tools": [
-  "Read"
- ],
- "skills": [
-  "explain_evidence"
- ],
- "permission_mode": "plan",
- "background": true,
- "instructions": "explain_evidence on the answer, then explain_evidence_check. Return the explanation and the verdict."
-}
+{"description": "Explains the evidence part of a computed answer.", "level": "level_1", "tools": ["Read"], "skills": ["explain_evidence"], "permission_mode": "plan", "background": true, "instructions": "explain_evidence on the answer, then explain_evidence_check. Return the explanation and the verdict."}

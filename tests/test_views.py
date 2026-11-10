@@ -464,3 +464,69 @@ def test_every_part_is_checked_against_the_traces_and_the_confidence_counts_what
     assert [i["how"] for i in g["items"] if i.get("llm")] == ["llm_verified", "wording", "llm"] and g["llm_inferred"] == 1
     assert "2.5" in [i for i in g["items"] if i["how"] == "llm"][0]["why"] and g["score"] == 75      # 3 of the 4 parts with values come from queries; wording is not counted
     assert S.call("answer_confidence", "confidence_validate", answer=guess)["status"] == "pass"
+
+
+def _publish(root, name, ts, kind):
+    d = root / "provenance-traces" / name / ts
+    (d / "raw").mkdir(parents=True)
+    with gzip.open(d / "raw" / "prov.pfw.gz", "wt") as fh:
+        fh.write(json.dumps({"name": "EH", "cat": "dftracer", "ph": 4, "args": {"id": f"e-{name}-{ts}", "type": "t"}}) + "\n")
+    (d / "run.json").write_text(json.dumps({"app": {"name": name, "source_commit": "abc"}, "run": {"kind": kind, "scale": "baseline", "timestamp": ts}}))
+    (root / "provenance-repro" / name).mkdir(parents=True, exist_ok=True)
+
+
+def test_every_published_version_of_an_app_can_be_asked(tmp_path):
+    from moirai_agents.webui import workbench as W
+    root = tmp_path / "pub"
+    _publish(root, "fold", "20261030_100000", "baseline")
+    _publish(root, "fold", "20261031_100000", "verification")
+    _publish(root, "fold-v2", "20261108_100000", "baseline")
+    _publish(root, "fold-v4", "20261108_100000", "baseline")           # the same run published again
+    (root / "provenance-repro" / "fold-v3").mkdir(parents=True)          # a package without traces
+    _publish(root, "fold-other", "20261108_100000", "baseline")        # another app
+    app = P.new("run", "fold", source=str(tmp_path), command="python app.py")
+    P.update(app["id"], lambda c: c["stages"]["package"]["outputs"].update(publish_root=str(root), publish_app="fold-v4"))
+    W._PUB.clear()
+    runs = W.published_runs(P.load(app["id"]))
+    assert [(r["label"], r["kind"], r["ts"]) for r in runs] == [("v1", "baseline", "20261030_100000"), ("v2", "baseline", "20261108_100000"),
+                                                                ("v4", "baseline", "20261108_100000")]      # v3 has no traces
+    assert runs[2]["same_as"] == "v2" and "fold-other" not in str(runs)
+    d = W.open_published("", app["id"], runs[1]["path"], "chat1")
+    assert d["kind"] == "analysis" and d["parent"] == app["id"] and d["published"]["label"] == "v2"
+    assert W.open_published("", app["id"], runs[1]["path"], "chat2")["id"] == d["id"]          # made once
+    with pytest.raises(P.PipelineError):
+        W.open_published("", app["id"], str(tmp_path), "chat3")                                # only the app's own published runs
+    it = W.items("")
+    assert [x["id"] for x in it["published"]] == [d["id"]] and it["datasets"] == []
+    a = next(x for x in it["apps"] if x["id"] == app["id"])
+    assert next(r for r in a["versions"] if r["label"] == "v2")["pipeline"] == d["id"]
+    assert A.graph(P.load(d["id"]))[0].entities                                                # its traces are what is asked
+
+
+def test_a_how_good_question_is_answered_directly_with_a_verdict_and_each_items_values(tmp_path):
+    """'What is the quality of the MSAs?' opens with the verdict and the numbers over every item, then each MSA's own values best first,
+    joined with its template search by folder - and all of it holds against the traces."""
+    from moirai_agents.core import capstore as S, evidence as E
+    run = integrated_app(tmp_path)
+    d = tmp_path / "traces" / "raw"
+    d.mkdir(parents=True)
+    recs = [et("msa", 3), et("hits", 3), et("msa.attribute", 1), et("hits.attribute", 1)]
+    for k, (prob, cov) in enumerate([(98.6, 0.79), (82.0, 0.71), (54.3, 0.12), (22.3, 0.65), (17.3, 0.70)]):
+        recs += [{"name": "EH", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"id": f"m{k}", "type": "msa", "uri": f"/al/Q{k}/a.a3m"}},
+                 {"name": "EH", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"id": f"h{k}", "type": "hits", "uri": f"/al/Q{k}/h.hhr"}}]
+        for i, t, uri, obj in ((f"am{k}", "msa.attribute", f"mean_query_coverage={cov}", f"m{k}"), (f"ah{k}", "hits.attribute", f"best_hit_probability={prob}", f"h{k}")):
+            recs += [{"name": "EH", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"id": i, "type": t, "uri": uri, "store": 0}},
+                     {"name": "ER", "cat": "dftracer", "ph": 4, "pid": 1, "args": {"subject": i, "object": obj, "relation": 19}}]
+    (d / "a.pfw.gz").write_bytes(member(*recs))
+    P.record(run["id"], "baseline", outputs={"traces": str(d)})
+    rec = E.ask(run["id"], "What is the quality of the MSAs?", [{"op": "entities", "type": "msa", "all": True}, {"op": "attributes", "from": 0},
+                                                              {"op": "entities", "type": "hits", "all": True}, {"op": "attributes", "from": 2}])
+    t = rec["steps"][3]["table"]
+    assert "| median |" in t and "| 54.3 |" in t and rec["steps"][3]["per"].count("Q") == 5
+    ans = S.call("explain_answer", "explain_answer", answer=rec)
+    assert ans["summary"].startswith("The quality of the MSAs is mixed: `best_hit_probability` has a median of `54.3`, from `17.3` to `98.6` [R1]; 3 of 5")
+    each = next(b for b in ans["body"] if b["type"] == "table")
+    assert each["columns"] == ["folder", "best_hit_probability", "mean_query_coverage"]
+    assert [r[0] for r in each["rows"]] == ["Q0", "Q1", "Q2", "Q3", "Q4"] and each["rows"][2] == ["Q2", "54.3", "0.12"]
+    v = S.call("explain_answer", "explain_answer_check", pipeline=run["id"], answer_id=rec["id"])
+    assert v["status"] == "pass", v

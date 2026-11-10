@@ -30,7 +30,7 @@ The Rules, Constraints and Corner cases below are shared by explain_plan, explai
 - Long cells: keep them; the view clips and expands them. Very long results: tables are cut at 200 rows with the total stated.
 
 ## Corrector
-Validator `query_explain_validate` (runs each part's `explain_<part>_check`).
+Validator `query_explain_validate` (runs each part's `explain_<part>_check`). Given the pipeline, every part is checked against the traces: the plan runs again with TraceViewer on the files the answer was computed on, and every claim is looked up in what it computes. The Query view runs it on every answer.
 
 | Failed check | Correct |
 |---|---|

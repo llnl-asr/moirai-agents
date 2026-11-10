@@ -136,8 +136,168 @@ def _step_line(s: dict) -> str:
     return (f"{lead}: {t['total']} {noun}{'' if t['total'] == 1 else 's'}" + (f", {len(varied)} differ ({names})" if varied else ", none differ") + f" [S{n}]")
 
 
+# Known measures of quality, so a "how good" question gets a verdict, not only numbers: (name pattern, higher is better, the level on a
+# 0-100 scale or as recorded, what reaching it means). The level is said in the answer, so the reader can disagree with it.
+QUALITY = [(r"prob", True, 50, "the HHsearch level for a likely homolog (95 is near certain)"),
+           (r"e_?val", False, 0.001, "the usual cut-off for a significant hit"),
+           (r"plddt", True, 70, "AlphaFold's level for a confident structure"),
+           (r"coverage", True, 0.5, "covering at least half of the query"),
+           (r"identity", True, 0.3, "above the twilight zone of sequence identity")]
+GOOD_Q = re.compile(r"\b(quality|good|well|reliab\w*|confiden\w*|trust\w*|accura\w*)\b", re.I)
+ASK = re.compile(r"^\s*(?:what|how)\s+(?:good\s+|well\s+|reliable\s+)?(is|are|was|were)\s+(.+?)\s*\??\s*$", re.I)
+
+
+def _subject(q: str):
+    """("The quality of the MSAs", "is") from "What is the quality of the MSAs?"; None when the question is not that shape."""
+    m = ASK.match(q or "")
+    if not m:
+        return None
+    subj = re.sub(r"^(?:the\s+)?", "", m.group(2).strip(), flags=re.I)
+    return "The " + subj if not re.match(r"(?:a|an|my|our|this|these|those)\b", subj, re.I) else subj[0].upper() + subj[1:], m.group(1).lower()
+
+
+def _known(name: str):
+    return next(((i, hi, lvl, why) for i, (pat, hi, lvl, why) in enumerate(QUALITY) if re.search(pat, name, re.I)), None)
+
+
+def _per_values(step: dict, name: str):
+    """Every entity's (or run's) own value of name, from the step's per table: {row label: [floats]}; None without one."""
+    t = X.md_table(step.get("per") or "")
+    if not t or name not in t["columns"]:
+        return None
+    c = t["columns"].index(name)
+    out = {}
+    for r in t["rows"]:
+        raw = [v for v in X.split_values(X.cell_text(r[c])) if v not in ("", "…")]
+        if raw and all(_num(v) is not None for v in raw):
+            out[X.cell_text(r[0])] = raw
+    return out
+
+
+def _of(steps, s) -> str:
+    """What a step's rows are: the type its entities step asked for (template_hits), else entities or runs."""
+    src = (s.get("args") or {}).get("from")
+    st = steps[src] if isinstance(src, int) and 0 <= src < len(steps) else None
+    return (((st or {}).get("args") or {}).get("type") or ("entities" if s.get("op") == "attributes" else "runs")).replace("_", " ")
+
+
+def measures(answer: dict, question: str = "") -> list:
+    """The numeric values the answer holds - every attributes/inputs/outputs step's rows with a median - most relevant first: a name the
+    question uses, then a known measure of quality (in QUALITY's order), then the rest. Each: {name, step, link, min, median, max, n, of,
+    known, values, k (how many reach the level)}."""
+    steps = answer.get("steps") or []
+    words = {w.rstrip("s") for w in re.findall(r"[a-z]{3,}", (question or "").lower())}
+    out = []
+    for si, s in enumerate(steps):
+        last = si == len(steps) - 1
+        t = X.md_table(((answer.get("result") or {}).get("table") if last else s.get("table")) or "")      # the last step is the result
+        if not t or "median" not in t["columns"]:
+            continue
+        ci = {c: t["columns"].index(c) for c in ("min", "median", "max")}
+        for ri, r in enumerate(t["rows"], 1):
+            name, med = X.cell_text(r[0]), X.cell_text(r[ci["median"]])
+            if med == "":
+                continue
+            kn = _known(name)
+            pv = _per_values(s, name) or {}
+            vals = [_num(v) for vs in pv.values() for v in vs]
+            m = {"name": name, "step": s.get("step", si + 1), "link": f"[R{ri}]" if last else f"[S{s.get('step', si + 1)}]",
+                 "min": X.cell_text(r[ci["min"]]), "median": med, "max": X.cell_text(r[ci["max"]]), "n": len(vals) or None,
+                 "of": _of(steps, s), "known": kn, "values": pv, "k": None, "level": None}
+            if kn and vals:
+                hi, lvl = kn[1], kn[2]
+                if lvl >= 1 and max(vals) <= 1:              # a probability or score recorded as 0-1
+                    lvl = lvl / 100
+                m["level"] = lvl
+                m["k"] = sum(1 for v in vals if (v >= lvl if hi else v <= lvl))
+            hit = bool(words & {w.rstrip("s") for w in re.split(r"[_\W]+", name.lower()) if len(w) > 2})
+            m["named"] = hit
+            m["rank"] = (0 if hit else 1, kn[0] if kn else len(QUALITY), si, ri)
+            out.append(m)
+    return sorted(out, key=lambda m: m["rank"])
+
+
+def _lvl(m) -> str:
+    return X.fmt_value(m["level"]) if m["level"] < 1 else str(int(m["level"])) if m["level"] == int(m["level"]) else str(m["level"])
+
+
+def _measure_line(m, lead=False) -> str:
+    """One measure as a clause: its median and range, linked; then, for a known measure, how many reach its level."""
+    s = (f"`{m['name']}` has a median of `{m['median']}`, from `{m['min']}` to `{m['max']}` {m['link']}" if m["min"] != m["max"]
+         else f"`{m['name']}` is `{m['median']}` for every one {m['link']}")
+    if m["k"] is not None:
+        hi = m["known"][1]
+        one = m["k"] == 1
+        s += (f"; {m['k']} of {m['n']} {m['of']} {('reaches' if one else 'reach') if hi else ('is' if one else 'are') + ' at or below'} {_lvl(m)}"
+              f"{' or more' if hi else ''}, {m['known'][3]}")
+    return s
+
+
+def direct(answer: dict):
+    """The direct answer to the question, from the values the answer holds: "The quality of the MSAs is mixed: ..." for a how-good question
+    with a known measure; the median and range of the measure the question names. None otherwise (a question about which parameters or
+    values were used is told as what differs and what stays the same)."""
+    q = answer.get("question") or ""
+    ms = measures(answer, q)
+    if not ms or not (ms[0]["named"] or (GOOD_Q.search(q) and ms[0]["k"] is not None)):
+        return None
+    sv = _subject(q)
+    head = ms[0]
+    if head["k"] is not None and GOOD_Q.search(q):
+        share = head["k"] / head["n"]
+        word = "good" if share >= 0.75 else "mixed" if share >= 0.4 else "poor"
+        lead = f"{sv[0]} {sv[1]} {word}" if sv else f"Overall {word}"
+        first = f"{lead}: {_measure_line(head)}."
+    else:
+        lead = f"{sv[0]}" if sv else "In numbers"
+        first = f"{lead}: {_measure_line(head)}."
+    others = [_measure_line(m) for m in ms[1:4]]
+    paras = [first] + ([f"The other measures: {'. '.join(others)}."] if others else [])
+    return paras, ms
+
+
+def _table_of(ms) -> dict:
+    """Each item's own values of the measures, one row each - joined across steps by folder when the items share one (an MSA and its
+    template search sit in the same folder) - best first by the lead measure."""
+    cols = [m for m in ms[:6] if m["values"]]
+    if not cols:
+        return None
+    key = lambda lab: lab.rsplit("/", 1)[0] if "/" in lab else lab      # noqa: E731
+    keys = {}
+    for m in cols:
+        for lab in m["values"]:
+            keys.setdefault(key(lab), {})
+    if any(len({key(l) for l in m["values"]}) != len(m["values"]) for m in cols):   # folders are not one per item: no join
+        cols = [m for m in cols if m["step"] == cols[0]["step"]]
+        keys = {lab: {} for lab in cols[0]["values"]}
+        key = lambda lab: lab                                              # noqa: E731
+    for m in cols:
+        for lab, vs in m["values"].items():
+            keys.setdefault(key(lab), {})[m["name"]] = " | ".join(X.fmt_value(v) for v in vs)
+    lead = cols[0]
+    rank = lambda kv: -(_num((kv[1].get(lead["name"]) or "").split(" | ")[0]) or float("-inf")) * (1 if not lead["known"] or lead["known"][1] else -1)  # noqa: E731
+    rows = [[k] + [d.get(m["name"], "") for m in cols] for k, d in sorted(keys.items(), key=rank)]
+    return X.block("table", columns=[lead["of"] if len({m["step"] for m in cols}) == 1 else "folder"] + [m["name"] for m in cols],
+                   numeric=[m["name"] for m in cols], total=len(rows), rows=rows)
+
+
+def derived(answer: dict) -> list:
+    """The numbers the direct answer works out itself (how many reach a level, of how many, the level): known to the validator."""
+    return [str(x) for m in measures(answer, answer.get("question") or "") if m["k"] is not None
+            for x in [m["k"], m["n"], _lvl(m)] + re.findall(r"\d+(?:\.\d+)?", m["known"][3])]
+
+
 def narrative(answer: dict):
     """The answer told from the computed result, as paragraphs with [R] / [S] links, and the steps that led there."""
+    d = direct(answer)
+    if d:
+        steps = answer.get("steps") or []
+        return d[0], ([_step_line(s) for s in steps] if steps else []), _table_of(d[1])
+    paras, how = _narrative(answer)
+    return paras, how, None
+
+
+def _narrative(answer: dict):
     steps = answer.get("steps") or []
     last = steps[-1].get("step", len(steps)) if steps else 1
     res = answer.get("result") or {}
@@ -168,15 +328,19 @@ def narrative(answer: dict):
 
 
 def explain(answer: dict) -> dict:
+    """The answer part: the direct answer to the question first (a verdict and its numbers when the question asks how good), then each
+    item's values, how it was found, the gaps; the agent's write-up and its check folded in the details."""
     syn = answer.get("synthesis") or ""
     sc = answer.get("synthesis_check") or {}
     gaps = answer.get("gaps") or []
-    paras, how = narrative(answer)
+    paras, how, each = narrative(answer)
     summary = paras[0]
     if len(paras) > 1 and len(summary) + len(paras[1]) < X.SUMMARY_MAX:
         summary += " " + paras[1]
     rest = paras[1:] if summary == paras[0] else paras[2:]
     body = [X.block("text", text=p) for p in rest]
+    if each:
+        body += [X.block("text", text=f"Each of the {len(each['rows'])}, best first by {each['columns'][1]}:"), each]
     if how:
         body += [X.block("text", text="How it was found:"), X.block("list", items=how)]
     if gaps:
@@ -218,7 +382,7 @@ def register(mcp):
         the plan runs again with TraceViewer. Without a pipeline only the record is checked. Returns {status: pass|fail, problems, data}."""
         def part_check(a, f):
             p = explain(a)
-            bad = X.check(p, a, "answer")
+            bad = X.check(p, {**a, "_derived": derived(f or a)}, "answer")
             body_blocks = p.get("body") or []
             text = p["summary"] + " " + " ".join(b.get("text", "") + " " + " ".join(b.get("items", [])) for b in body_blocks)
             rows, steps = _links(text)
@@ -231,8 +395,8 @@ def register(mcp):
             n, k = (len(t["rows"]) if t else 0), len(src.get("steps") or [])
             bad += [f"[R{r}] is not a row of the result table ({n} rows)" for r in rows if not 1 <= r <= n]
             bad += [f"[S{x}] is not a step ({k} steps)" for x in steps if not 1 <= x <= max(k, 1)]
-            bad += X.check({**p, "summary": "x", "facts": [], "details": [{"title": "body", "blocks": body_blocks}]}, a, "answer")
-            known = X.known_numbers(src)
+            bad += X.check({**p, "summary": "x", "facts": [], "details": [{"title": "body", "blocks": body_blocks}]}, {**a, "_derived": derived(f or a)}, "answer")
+            known = X.known_numbers(src) | set(derived(src))
             plain = re.sub(r"\[[RS]\d+\]|`[^`]*`", "", text)
             bad += [f"{m} is neither in the {'traces' if f else 'answer'} nor a count of it" for m in re.findall(r"(?<![\w.:-])\d[\d,]*(?:\.\d+)?", plain)
                     if m.replace(",", "") not in known and not re.fullmatch(r"[0-9]", m)]
@@ -243,7 +407,7 @@ def register(mcp):
 
                 def truth_step(x):
                     s = f["steps"][x - 1] if 1 <= x <= len(f["steps"]) else {}
-                    return (s.get("headline") or "") + " " + (s.get("table") or "").replace("\\|", "|")
+                    return (s.get("headline") or "") + " " + (s.get("table") or "").replace("\\|", "|") + " " + (s.get("per") or "").replace("\\|", "|")
                 for vals, rws, sts in X.claims(text):
                     hay = " ".join([truth_row(r) for r in rws] + ([truth_step(x) for x in sts] if not rws else []))
                     hay += " " + " ".join(X.fmt_value(w) for w in re.findall(r"[\w.:/+-]+", hay))

@@ -133,12 +133,29 @@ $('#capabilities').addEventListener('click',async ev=>{const b=ev.target.closest
  if(r&&r.status==='error'){m.textContent=[r.error,...(r.problems||[])].join(' · ');return}box.hidden=true;pollCaps(true)});
 
 // ---- Consolidation: the server looks for overlaps and conflicts by itself; a person starts the work, in its own chat on the server's node
-const CONSOL_ASK={lessons:'Consolidate the lessons. Call consolidation_report and read the lessons groups. For overlapping lessons, propose one merged lesson with lesson_merge. If lessons contradict each other, ask me which holds before proposing anything. If a group is different on purpose, use consolidation_keep. Work on this node only: no jobs, no compute nodes. List what you proposed.',
- capabilities:'Consolidate the capabilities. Call consolidation_report and read the capabilities groups, then read each capability with capability_get. For an overlap, propose moving what is shared to the better home with capability_update, and ask me before disabling anything. If rules conflict, ask me which holds before proposing anything. If a group is different on purpose, use consolidation_keep. Work on this node only: no jobs, no compute nodes. List what you proposed.'};
-async function pollConsolidation(){if(!me)return;const d=await api('api/consolidation');if(!d||d.error)return;
- for(const [key,id] of [['lessons','#lconsol'],['capabilities','#cconsol']]){const G=d[key]||[],b=$(id),c=G.filter(g=>g.kind==='conflict').length;b.hidden=!G.length;b.classList.toggle('bad',c>0);
+let CQ=[];const CQ_DO={keep:'keep both: different on purpose',supersede:'one holds, the others are retired',merge:'merge into one lesson',drop:'drop the wrong ones'};
+async function pollConsolidation(){if(!me)return;const d=await api('api/consolidation');if(!d||d.error)return;CQ=d.questions||[];drawQuestions();
+ for(const [key,id] of [['lessons','#lconsol'],['capabilities','#cconsol']]){const G=d[key]||[],b=$(id),c=G.filter(g=>g.kind==='conflict').length,nq=key==='lessons'?CQ.length:0;
+  b.hidden=!G.length&&!nq;b.classList.toggle('bad',c>0||nq>0);
+  if(nq){b.textContent=`answer ${nq}`;b.title=`${nq} question${nq===1?'':'s'} from the consolidation agent: lessons that contradict each other. Click to answer.`+(G.length?`\n${G.length} more group${G.length===1?'':'s'} not looked at yet.`:'');
+   b.onclick=ev=>{ev.preventDefault();ev.stopPropagation();const s=document.querySelector('details[data-sec=lessons]');if(s)s.open=true;const q=$('#lqs .cq');if(q)q.scrollIntoView({block:'start',behavior:'smooth'})};continue}
   b.textContent=`consolidate ${G.length}`;b.title=`${c} possible conflict${c===1?'':'s'}, ${G.length-c} overlap${G.length-c===1?'':'s'}. Click to run the consolidation agent now, in the background (Agents panel).\n`+G.slice(0,6).map(g=>`${g.kind}: ${g.ids.join(', ')}`).join('\n');
   b.onclick=ev=>{ev.preventDefault();ev.stopPropagation();bgStart(key==='lessons'?'consolidation-lessons':'consolidation-capabilities')}}}
+// a conflict the agent could not settle: its question, the lessons in full, the options with its recommendation preselected, or your own answer
+function drawQuestions(){const box=$('#lqs');if(!box||box.contains(document.activeElement)&&document.activeElement.tagName==='TEXTAREA')return;
+ box.innerHTML=CQ.map(q=>`<div class="cq" data-q="${esc(q.id)}"><div class="cqh">? ${esc(q.question)}</div>
+  <div class="cql">${q.ids.map(i=>{const l=(q.lessons||{})[i]||{};return `<div><b>${esc(i)}</b> <span class="tg">${esc(l.capability||'')}</span><div>${esc(l.text||'')}</div></div>`}).join('')}</div>
+  <div class="cqo">${q.options.map((o,k)=>`<label class="${k===q.recommended?'rec':''}"><input type="radio" name="${esc(q.id)}" value="${k}" ${k===q.recommended?'checked':''}> <span><b>${esc(o.label)}</b>${k===q.recommended?' <span class="recm">recommended</span>':''}<span class="st"> · ${esc(CQ_DO[o.do]||o.do)}${o.do==='supersede'?': '+esc(o.winner)+' holds':o.do==='drop'?': '+esc((o.drop||[]).join(', ')):''}</span>${o.do==='merge'?`<div class="st">→ ${esc(o.text)}</div>`:''}</span></label>`).join('')}
+   <label><input type="radio" name="${esc(q.id)}" value=""> <span><b>Something else</b><span class="st"> · tell the agent in your words, it acts on it now</span></span></label></div>
+  <div class="cqw"><b>Why the agent recommends it:</b> ${esc(q.why)}</div>
+  <textarea class="note" placeholder="optional: a note kept with the decision (required for “something else”)"></textarea>
+  <div class="acts"><button class="btn primary" data-qa="1">Apply</button><span class="msg st"></span></div></div>`).join('')}
+$('#lqs').addEventListener('click',async ev=>{const b=ev.target.closest('[data-qa]');if(!b)return;ev.preventDefault();const c=b.closest('.cq'),m=c.querySelector('.msg'),r0=c.querySelector('input[type=radio]:checked'),note=c.querySelector('textarea').value.trim();
+ const choice=r0?r0.value:'';if(choice===''&&!note){m.textContent='write your answer for the agent first';return}
+ b.disabled=true;m.textContent='applying…';const r=await act('api/consolidation/answer',{id:c.dataset.q,choice:choice===''?null:+choice,note});b.disabled=false;
+ if(!r||r.status==='error'||r.error){m.textContent=(r&&(r.error))||'failed';return}
+ m.textContent=r.status==='for_agent'?`sent to the consolidation agent${r.agent?' ('+r.agent+')':''}`:'✓ applied';c.querySelector('textarea').blur();
+ setTimeout(()=>{pollConsolidation();pollLessons(true);pollBackground()},700)});
 
 // ---- gates: an ask_user that names a pipeline and a stage
 const askCard0=Renderer.prototype.askCard;

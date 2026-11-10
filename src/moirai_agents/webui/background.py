@@ -48,9 +48,13 @@ LEARN_ASK = (
     "Turns:\n")
 
 CONSOL_ASK = {
-    "lessons": ("Consolidate the lessons. Call consolidation_report and read the lessons groups. For overlapping lessons, "
-                "propose one merged lesson with lesson_merge. Lessons that contradict each other: do not pick one; list "
-                "them in your report for the user. A group that is different on purpose: consolidation_keep."),
+    "lessons": ("Consolidate the lessons. First call consolidation_answers: act on each answer the user wrote, then "
+                "consolidation_close it. Then call consolidation_report and read every member of each lessons group in full "
+                "with lesson_get. For overlapping lessons, propose one merged lesson with lesson_merge. Lessons that "
+                "contradict each other, or that you cannot settle alone: do not pick one yourself - call consolidation_ask "
+                "with one plain question, 2-4 concrete options (keep, supersede, merge, drop) and the one you recommend "
+                "with its evidence, so the user can answer it in the Lessons panel. Every conflict group must end as a "
+                "question, a merge or a keep, never only in your report. A group that is different on purpose: consolidation_keep."),
     "capabilities": ("Consolidate the capabilities. Call consolidation_report and read the capabilities groups, then each "
                      "capability with capability_get. For an overlap, propose moving what is shared to the better home "
                      "with capability_update; never disable one. Conflicting rules: do not pick one; list them in your "
@@ -161,6 +165,8 @@ class Background:
     @staticmethod
     def _fp(rep: dict, part: str) -> str:
         ids = sorted(",".join(sorted(g["ids"])) for g in rep.get(part) or [])
+        if part == "lessons":                     # answers the user wrote for the agent are work too
+            ids += sorted(q["id"] for q in consolidate.questions("for_agent"))
         return hashlib.sha1("|".join(ids).encode()).hexdigest() if ids else ""
 
     def consolidate_once(self, rep: dict, force: str = "") -> dict:
@@ -178,7 +184,9 @@ class Background:
                 out[part] = "waiting"
                 continue
             n = len(rep[part])
-            r = self.start(agent, f"Consolidation: {part} ({n} group{'s' if n != 1 else ''})", CONSOL_ASK[part], groups=n)
+            ans = len(consolidate.questions("for_agent")) if part == "lessons" else 0
+            title = f"Consolidation: {part} ({n} group{'s' if n != 1 else ''}" + (f", {ans} answer{'s' if ans != 1 else ''} from you" if ans else "") + ")"
+            r = self.start(agent, title, CONSOL_ASK[part], groups=n)
             if r.get("status") == "started":
                 with self.lock:
                     self.st[agent] = {"fp": fp, "at": time.time()}
@@ -201,10 +209,10 @@ class Background:
 
     def agents(self) -> List[dict]:
         out = []
-        rep = getattr(self.app, "consolidation", None) or {}
+        rep = consolidate.unkept(getattr(self.app, "consolidation", None) or {})
         descs = {"learner": "Reads every finished chat turn and turns what it met and what you said into lessons and "
                             f"capabilities (complex ones split into step capabilities); checks every {LEARN_S / 60:g} min.",
-                 "consolidation-lessons": "Merges overlapping lessons into one copy of each fact; conflicts are left to you.",
+                 "consolidation-lessons": "Merges overlapping lessons into one copy of each fact; on a conflict it asks you, with its recommendation, in the Lessons panel.",
                  "consolidation-capabilities": "Moves what capabilities share to one home; conflicts are left to you."}
         names = {"learner": "learner", "consolidation-lessons": "lessons consolidation",
                  "consolidation-capabilities": "capabilities consolidation"}
@@ -220,6 +228,9 @@ class Background:
             else:
                 g = len(rep.get(agent.split("-", 1)[1]) or [])
                 idle = f"{g} open group{'s' if g != 1 else ''}"
+                nq = len(rep.get("questions") or []) if agent == "consolidation-lessons" else 0
+                if nq:
+                    idle += f" · {nq} question{'s' if nq != 1 else ''} waiting for you (Lessons panel)"
             if r:
                 idle += f" · last run {time.strftime('%F %H:%M', time.localtime(r['at']))}"
             out.append({"id": agent, "name": names[agent], "kind": "background agent",

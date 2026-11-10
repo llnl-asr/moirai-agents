@@ -1,7 +1,7 @@
 {
  "name": "explain_evidence",
  "description": "Explain the evidence of a computed answer - engine, files, queries, records read and cited, result hash - as a plain summary and folded tables of files, queries and cited records. Used by query_explain for the Query view.",
- "version": 2,
+ "version": 3,
  "enabled": true,
  "stages": [],
  "tools": [
@@ -29,6 +29,12 @@
    "by": "haridev",
    "proposal": "65ff8bc5aa28",
    "why": "Consolidation: shared rules now live in query_explain; keep only what is specific to the evidence part."
+  },
+  {
+   "version": 3,
+   "ts": 1794270403.876838,
+   "by": "haridev",
+   "why": "Restore the code, checks and agent of the current version: approving the consolidation proposal (made before the trace validators) had put back the older code. The consolidated SKILL.md stays."
   }
  ]
 }

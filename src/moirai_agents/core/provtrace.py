@@ -212,11 +212,55 @@ class Graph:
                 "edges": self.edges[-limit * 2:], "relations": self.relations[-limit:], "counts": self.counts()}
 
 
-def read(traces: str) -> Graph:
-    """The whole graph of finished traces."""
+PARALLEL_BYTES = 256 << 20       # finished traces of this size or more are read one file per process
+
+
+def _read_serial(traces: str) -> Graph:
     g, t = Graph(), Tail(traces)
     while True:
         recs = t.poll()
         if not recs:
             return g
         g.extend(recs)
+
+
+def _merge(g: Graph, o: Graph) -> None:
+    """Add what another file's graph holds, with the dedup the serial reader applies (entity ids, activity ids, relation keys)."""
+    g.total += o.total
+    for k, v in o.types.items():
+        g.types.setdefault(k, v)
+    for k, v in o.entities.items():
+        g.entities.setdefault(k, v)
+    g.events.update(o.events)
+    known = {(r["relation"], r["subject"], r["object"]) for r in g.relations}
+    for r in o.relations:
+        k = (r["relation"], r["subject"], r["object"])
+        if k not in known:
+            known.add(k)
+            g.relations.append(r)
+    by_act: Dict[str, List[Dict[str, str]]] = {}
+    for e in o.edges:
+        by_act.setdefault(e["activity"], []).append(e)
+    taken = {a["id"] for a in g.activities}
+    for a in o.activities:
+        if a["id"] in taken:
+            continue
+        taken.add(a["id"])
+        g.activities.append(a)
+        g.edges.extend(by_act.get(a["id"], []))
+
+
+def read(traces: str, workers: int = 0) -> Graph:
+    """The whole graph of finished traces. Many large files (a multi-node run) are parsed one file per process and merged, because parsing
+    is the cost (about 50 s per 100 MB file): 31 files of a 32 node run took half an hour serially. workers=1 forces the serial reader."""
+    files = expand(traces)
+    big = sum(os.path.getsize(f) for f in files if os.path.exists(f)) >= PARALLEL_BYTES
+    n = workers or min(len(files), os.cpu_count() or 4, 16)
+    if workers == 1 or len(files) < 2 or not big or n < 2:
+        return _read_serial(traces)
+    from concurrent.futures import ProcessPoolExecutor
+    g = Graph()
+    with ProcessPoolExecutor(max_workers=n) as ex:
+        for o in ex.map(_read_serial, files):
+            _merge(g, o)
+    return g

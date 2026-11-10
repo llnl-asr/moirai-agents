@@ -1,6 +1,8 @@
 """Run pipeline stages 5 and 6: run the annotated app under moirai-service, first a smoke run, then the baseline, watched live on the Dashboard.
 Two shapes: a plain command (one launcher), or a generated `flux batch` run.sh (batch mode): run.sh stays UNMODIFIED; its app job runs a generated
 per-chunk submit wrapper (--submit-script) that starts moirai-service inside the job's own shell. The wrapper is written beforehand by moirai_wrapper_write.
+Batch mode submits the flux batch DETACHED (own session, nohup, clean environment, no cancel on any signal) and records the flux job id; state and the
+post-run evaluation come from flux and run.out (moirai_run_status / moirai_validate), never from a process of the tool server. Only moirai_run_stop cancels.
 A third entry: a flux batch submitted by hand and already finished (BioTox) is attached with moirai_run_attach so that moirai_validate can judge it."""
 import glob
 import hashlib
@@ -11,6 +13,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -31,6 +34,9 @@ FLUX_JOBS_FORMAT = "{state} {result} {returncode} {runtime}"
 FLUX_ID_RE = re.compile(r"^[A-Za-z0-9]{2,32}$")
 ATTACH_LOG_TAIL = 20000
 TRACE_HOST_RE = re.compile(r"^prov[_-](?P<host>.+?)(?:-spill)?\.pfw(?:\.gz)?$")
+BATCH_SOURCE = "flux-batch"
+FLUX_QUEUED = ("NEW", "DEPEND", "PRIORITY", "SCHED")
+OUTPUT_SCAN_BYTES = 50 * 1024 * 1024      # the tail of run.out that the post-run evaluation reads
 
 
 def _script(env, pid, stage, log, data_dir, command, launcher, nodes):
@@ -274,73 +280,48 @@ def batch_output_path(run_sh: str) -> str:
     return m.group(1).strip("'\"") if m else ""
 
 
-# After the batch job: its return code does not reflect the bulksubmit chunk jobs (run.sh ends normally when a chunk job fails), so read its --output.
-_BATCH_TAIL = r'''_out=__OUT__
-_hosts=__HOSTS__
-if [ -n "${_out}" ]; then
-  if [ ! -r "${_out}" ]; then
-    echo "wrapper: batch job $jid ended ${res} but its --output file ${_out} is not readable: cannot tell whether the chunk jobs ran" >&2
-    exit 6
-  fi
-  _failed="$(grep -E ' failed[[:space:]]*$' "${_out}" | head -5)"
-  _codes="$(grep -E 'exited with exit code [1-9][0-9]*' "${_out}" | head -5)"
-  if [ -n "${_failed}" ] || [ -n "${_codes}" ]; then
-    _ids="$(printf '%s\n' "${_failed}" | sed -n 's/^.*: \([^ ][^ ]*\) failed[[:space:]]*$/\1/p' | tr '\n' ' ')"
-    echo "wrapper: batch job $jid returned 0 but a chunk job FAILED (chunk job id(s): ${_ids:-unknown}); run.sh ends normally even when its bulksubmit chunk job fails. Evidence in ${_out}:" >&2
-    printf '%s\n%s\n' "${_codes}" "${_failed}" >&2
-    exit 4
-  fi
-fi
-if [ ! -s "${_hosts}" ]; then
-  echo "wrapper: batch job $jid left no host in ${_hosts}: no per-chunk wrapper ran, so no service was started and nothing was traced" >&2
-  exit 5
-fi
-echo "wrapper: batch job $jid clean: no failed chunk job in ${_out:-<no --output header>}; hosts: $(sort -u "${_hosts}" | tr '\n' ' ')"
-exit 0
-'''
-
-
-def _wrapper(run_script, minutes, queue, modules, name, out_path="", hosts=""):
+# ---------------------------------------------------------------- the detached batch submit script (pure text)
+def _wrapper(run_script, minutes, queue, modules, name, idfile):
+    """The text of the SUBMIT job: load modules, check dbcast, `flux batch`, write the flux job id to `idfile`, exit. It does not wait, does not watch and never
+    cancels: the Flux job belongs to Flux, and its state and the post-run evaluation are read later from flux and run.out by finish_batch."""
     q = shlex.quote
     mods = " ".join(q(m) for m in modules)
-    head = f"""set -uo pipefail
+    return f"""set -uo pipefail
+# This script only submits. It never cancels the flux job (not on a signal either): only moirai_run_stop does, with an explicit cancel of the recorded id.
+# After the job ends, moirai_run_status / moirai_validate evaluate it from flux and the run.sh --output file (a chunk line 'exited with exit code [1-9][0-9]*'
+# or ending ' failed' means a chunk job failed although the batch returned 0; no host in hosts.txt means no wrapper ran).
 if [ -n {q(mods)} ]; then
   type module >/dev/null 2>&1 || {{ echo "wrapper: the 'module' command is not defined in this shell; cannot load {mods}" >&2; exit 1; }}
   module load {mods} || {{ echo "wrapper: module load {mods} failed" >&2; exit 1; }}
 fi
 command -v dbcast >/dev/null 2>&1 || {{ echo "wrapper: dbcast not on PATH after module load; flux batch would propagate a shell without it" >&2; exit 1; }}
 jid="$(flux batch -t {minutes} --queue {q(queue)} {q(run_script)})" || {{ echo "wrapper: flux batch submission failed" >&2; exit 1; }}
+case "$jid" in ''|*[!A-Za-z0-9]*) echo "wrapper: flux batch printed no usable job id: '$jid'" >&2; exit 1 ;; esac
 echo "batch job: $jid"
-cleanup() {{ trap - TERM INT; flux cancel "$jid" 2>/dev/null; exit 143; }}
-trap cleanup TERM INT
-flux watch "$jid" || true
-rc="$(flux jobs -n -o '{{returncode}}' "$jid" 2>/dev/null | tr -d ' ')"
-res="$(flux jobs -n -o '{{result}}' "$jid" 2>/dev/null | tr -d ' ')"
-echo "batch job $jid result=$res returncode=$rc"
-if [ "$res" != "COMPLETED" ] || [ "$rc" != "0" ]; then
-  echo "wrapper: batch job $jid FAILED (result=$res returncode=$rc); see its --output file, the chunk logs and the service logs next to the traces" >&2
-  case "$rc" in ''|*[!0-9]*) exit 1 ;; 0) exit 1 ;; *) exit "$rc" ;; esac
-fi
+mkdir -p "$(dirname {q(idfile)})" && printf '%s\\n' "$jid" > {q(idfile)}.tmp && mv {q(idfile)}.tmp {q(idfile)} || {{ echo "wrapper: cannot record the job id $jid in {idfile}" >&2; exit 1; }}
+echo "wrapper: batch job $jid submitted and recorded in {idfile}; its state is read from flux (flux jobs $jid), not from this script"
+exit 0
 """
-    return head + _BATCH_TAIL.replace("__OUT__", q(out_path)).replace("__HOSTS__", q(hosts))
 
 
 def render_batch(original, env, stage_dir, data_dir="", shm_base="/moirai-agents-run", queue="pdebug", limit=2400, run_sh="", run_script="",
                  annotated="", venv="", dft_service="", modules=("mpifileutils/0.11.1",), wait_s=60, stage="moirai_smoke") -> dict:
-    """Pure: wrapper text, batch wrapper text, exact submit command, and (when run_sh text is given) the run.sh check. Never touches the cluster."""
+    """Pure: wrapper text, batch submit script text, exact submit command, and (when run_sh text is given) the run.sh check. Never touches the cluster."""
     sd = str(stage_dir).rstrip("/")
     wpath = f"{sd}/{WRAPPER_NAME}"
     minutes = max(1, math.ceil(int(limit) / 60))
     rs = run_script or f"{str(Path(sd).parent)}/run.sh"
     submit = f"flux batch -t {minutes} --queue {shlex.quote(queue)} {shlex.quote(rs)}"
     out_path = batch_output_path(run_sh)
+    idfile = f"{sd}/flux_job_id"
     r = {"status": "ok", "wrapper_path": wpath, "wrapper_script": render_submit_wrapper(original, env, sd, data_dir, shm_base, wait_s, venv, dft_service),
-         "batch_wrapper": _wrapper(rs, minutes, queue, list(modules), stage, out_path, f"{sd}/hosts.txt"), "submit_command": submit, "minutes": minutes,
-         "run_script_path": rs, "original_script": original, "hosts_file": f"{sd}/hosts.txt", "traces": f"{sd}/raw", "batch_output": out_path, "warnings": []}
+         "batch_wrapper": _wrapper(rs, minutes, queue, list(modules), stage, idfile), "submit_command": submit, "minutes": minutes,
+         "run_script_path": rs, "original_script": original, "hosts_file": f"{sd}/hosts.txt", "traces": f"{sd}/raw", "batch_output": out_path,
+         "flux_job_id_file": idfile, "warnings": []}
     if not venv and not dft_service:
         r["warnings"].append("no service venv given and dftracer_service not resolved here: the wrapper can only find it through python's dftracer package on PATH")
     if run_sh and not out_path:
-        r["warnings"].append("run.sh has no '#flux: --output <path>' header: the batch wrapper job cannot read the chunk jobs' output, it only checks hosts.txt")
+        r["warnings"].append("run.sh has no '#flux: --output <path>' header: the post-run evaluation cannot read the chunk jobs' output, it only checks hosts.txt")
     if run_sh:
         chk = check_run_sh(run_sh, wpath, annotated)
         r["run_sh_check"] = chk
@@ -385,6 +366,204 @@ def _plan(pipeline, stage, batch_script, queue, limit, data_dir, venv, original=
     return c, r
 
 
+# ---------------------------------------------------------------- detached submit, state from flux, post-run evaluation, explicit stop
+def detached_env() -> dict:
+    """Pure-ish: the clean environment the detached submit gets (HOME, USER, LOGNAME, TERM from this process; PATH only so that nohup/env are found)."""
+    e = {"PATH": "/usr/bin:/bin"}
+    for k in ("HOME", "USER", "LOGNAME"):
+        if os.environ.get(k):
+            e[k] = os.environ[k]
+    e["TERM"] = os.environ.get("TERM") or "dumb"
+    return e
+
+
+def detached_argv(sh, subrc, env_pass=None) -> list:
+    """Pure: argv of the detached submit: nohup env -i HOME USER TERM bash -lc 'bash <sh>; echo $? > <subrc>' (a clean login shell, so `module` exists and
+    flux/PATH come from the login profile, not from the tool server). The caller starts it in its own session with stdin /dev/null and the output in the job log."""
+    q = shlex.quote
+    env_pass = env_pass if env_pass is not None else detached_env()
+    pairs = [f"{k}={v}" for k, v in env_pass.items() if k != "PATH"]
+    return ["nohup", "env", "-i", *pairs, "bash", "-lc", f"bash {q(str(sh))}; echo $? > {q(str(subrc))}"]
+
+
+def start_detached(pipeline: str, stage: str, name: str, script: str, cwd: str, limit: int, extra: dict) -> dict:
+    """Write the submit script and start it detached from this process (own session via setsid(2), nohup, clean env, stdin /dev/null, output to the job log).
+    Writes the job record <pipeline>/jobs/<id>.json with source 'flux-batch'; the flux job id is added as soon as the script records it. Returns the record."""
+    d = P.pdir(pipeline) / "jobs"
+    d.mkdir(parents=True, exist_ok=True)
+    jid = f"{re.sub(r'[^a-z0-9_]+', '-', name.lower())}-{int(time.time() * 10) % 10**9}"
+    sh, log, rcf, subrc = d / f"{jid}.sh", d / f"{jid}.log", d / f"{jid}.rc", d / f"{jid}.submit.rc"
+    sh.write_text(script)
+    env_pass = detached_env()
+    with open(log, "ab") as lf:
+        p = subprocess.Popen(detached_argv(sh, subrc, env_pass), cwd=cwd, env=env_pass, start_new_session=True,
+                             stdin=subprocess.DEVNULL, stdout=lf, stderr=subprocess.STDOUT)
+    rec = {"id": jid, "pipeline": pipeline, "stage": stage, "name": name, "pid": p.pid, "cwd": cwd, "started": round(time.time(), 1), "limit_s": int(limit),
+           "script": str(sh), "log": str(log), "rc_file": str(rcf), "submit_rc_file": str(subrc), "source": BATCH_SOURCE, "flux_job_id": "", **extra}
+    (d / f"{jid}.json").write_text(json.dumps(rec, indent=1))
+    return rec
+
+
+def _read(p) -> str:
+    try:
+        return Path(str(p)).read_text().strip() if p else ""
+    except OSError:
+        return ""
+
+
+def evaluate_batch(row: dict, jid: str, out_path: str, hosts_file: str):
+    """Pure-ish (reads out_path and hosts_file): the verdict on a FINISHED flux batch, from `flux jobs` fields and the run.sh --output file, because the batch
+    return code does not reflect its bulksubmit chunk jobs. Returns (rc, message lines): flux's own non-zero returncode (124 for TIMEOUT, 1 when none) when the
+    batch itself failed; 6 --output unreadable; 4 a chunk job failed ('exited with exit code <non-zero>' or a line ending ' failed'); 5 no host in hosts.txt; else 0."""
+    res, rcs = row.get("result", ""), str(row.get("returncode", ""))
+    if res != "COMPLETED" or rcs != "0":
+        rc = 124 if res == "TIMEOUT" else (int(rcs) if rcs.isdigit() and int(rcs) > 0 else 1)
+        return rc, [f"batch job {jid} result={res} returncode={rcs}",
+                    f"wrapper: batch job {jid} FAILED (result={res} returncode={rcs}); see its --output file, the chunk logs and the service logs next to the traces"]
+    if out_path:
+        try:
+            with open(out_path, "rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - OUTPUT_SCAN_BYTES))
+                lines = fh.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            return 6, [f"wrapper: batch job {jid} ended {res} but its --output file {out_path} is not readable: cannot tell whether the chunk jobs ran"]
+        failed = [l for l in lines if re.search(r" failed\s*$", l)][:5]
+        codes = [l for l in lines if re.search(r"exited with exit code [1-9][0-9]*", l)][:5]
+        if failed or codes:
+            ids = " ".join(m.group(1) for m in (re.match(r"^.*: (\S+) failed\s*$", l) for l in failed) if m)
+            return 4, [f"wrapper: batch job {jid} returned 0 but a chunk job FAILED (chunk job id(s): {ids or 'unknown'}); run.sh ends normally even when its "
+                       f"bulksubmit chunk job fails. Evidence in {out_path}:", *codes, *failed]
+    hosts = _read(hosts_file)
+    if not hosts:
+        return 5, [f"wrapper: batch job {jid} left no host in {hosts_file}: no per-chunk wrapper ran, so no service was started and nothing was traced"]
+    uniq = " ".join(sorted(set(hosts.split())))
+    return 0, [f"wrapper: batch job {jid} clean: no failed chunk job in {out_path or '<no --output header>'}; hosts: {uniq}"]
+
+
+def finish_batch(rec: dict, flux: str = "flux", tries: int = 2, pause: float = 0.5) -> dict:
+    """The state of a detached flux batch job record, derived from FLUX and files, never from a server process. Records the flux job id in the record as soon as
+    the submit script wrote it. When flux says INACTIVE with a result and no rc file exists yet, runs evaluate_batch and writes the rc file and the verdict lines
+    into the job log (so it also happens after a restart of the server, by whoever asks first). Returns {state, flux_job_id, flux_state, flux_result,
+    flux_returncode, flux_runtime, rc, message}. state: submitting | queued | running | completed | failed | cancelled | timeout | lost | unreachable.
+    'lost' only when flux answers that it does not know the id (or the submit ended without recording one); 'unreachable' when flux itself cannot be run."""
+    rcf, logf = Path(rec["rc_file"]), Path(rec["log"])
+    jpath = Path(rec["script"]).with_suffix(".json")
+    fid = rec.get("flux_job_id") or _read(rec.get("idfile"))
+    if fid and fid != rec.get("flux_job_id"):
+        rec["flux_job_id"] = fid
+        try:
+            jpath.write_text(json.dumps(rec, indent=1))
+        except OSError:
+            pass
+    out = {"state": "", "flux_job_id": fid, "flux_state": "", "flux_result": "", "flux_returncode": "", "flux_runtime": "", "rc": None, "message": ""}
+    done = _read(rcf)
+    if done.isdigit():
+        out["rc"] = int(done)
+        out["state"] = "completed" if out["rc"] == 0 else ("timeout" if out["rc"] == 124 else "failed")
+        out["message"] = "already evaluated"
+        if rec.get("flux_result") == "CANCELED":
+            out["state"] = "cancelled"
+        return out
+
+    def write_rc(rc, lines):
+        with open(logf, "a") as fh:
+            fh.write("\n".join(lines) + f"\nbatch job rc={rc}\n")
+        rcf.write_text(f"{rc}\n")
+
+    if not fid:
+        sub = _read(rec.get("submit_rc_file"))
+        if sub == "" and J._alive(int(rec.get("pid") or 0)):
+            out["state"], out["message"] = "submitting", "the detached submit is still running; no flux job id recorded yet"
+        elif sub.isdigit() and int(sub) != 0 or sub == "0":
+            rc = int(sub) if sub.isdigit() and int(sub) > 0 else 1
+            write_rc(rc, [f"wrapper: the submit ended (rc {sub}) without recording a flux job id: nothing was submitted; read the lines above"])
+            out["rc"], out["state"], out["message"] = rc, "failed", "submit failed before flux printed a job id"
+        else:
+            out["state"], out["message"] = "lost", "the submit process is gone and no flux job id nor submit rc was recorded"
+        return out
+    try:
+        row = flux_status(fid, flux, tries, pause)
+    except P.PipelineError as e:
+        out["state"] = "unreachable" if "command not found" in str(e) else "lost"
+        out["message"] = str(e)
+        return out
+    out.update(flux_state=row["state"], flux_result=row["result"], flux_returncode=row["returncode"], flux_runtime=row["runtime"])
+    if row["state"] == "INACTIVE" and row["result"] not in ("", "-"):
+        rc, lines = evaluate_batch(row, fid, rec.get("batch_output", ""), rec.get("hosts_file", ""))
+        write_rc(rc, lines)
+        rec["flux_result"] = row["result"]
+        try:
+            jpath.write_text(json.dumps(rec, indent=1))
+        except OSError:
+            pass
+        out["rc"] = rc
+        out["state"] = "cancelled" if row["result"] == "CANCELED" else "timeout" if row["result"] == "TIMEOUT" else "completed" if rc == 0 else "failed"
+        out["message"] = lines[-1]
+    elif row["state"] in FLUX_QUEUED:
+        out["state"], out["message"] = "queued", f"flux job {fid} is waiting in the queue ({row['state']})"
+    else:
+        out["state"], out["message"] = "running", f"flux job {fid} state {row['state']}"
+    return out
+
+
+def stop_batch(rec: dict, flux: str = "flux") -> dict:
+    """The ONLY way a detached batch is cancelled: `flux cancel <recorded id>` when flux says the job is not INACTIVE. Returns {status, id, stopped, flux_job_id, note}."""
+    fid = rec.get("flux_job_id") or _read(rec.get("idfile"))
+    if not fid:
+        return {"status": "ok", "id": rec["id"], "stopped": False, "flux_job_id": "",
+                "note": "no flux job id is recorded yet (the submit is still running or failed): nothing was cancelled; ask again in a few seconds"}
+    try:
+        row = flux_status(fid, flux, 2, 0.5)
+    except P.PipelineError as e:
+        return {"status": "error", "id": rec["id"], "stopped": False, "flux_job_id": fid, "error": str(e)}
+    if row["state"] == "INACTIVE":
+        return {"status": "ok", "id": rec["id"], "stopped": False, "flux_job_id": fid, "note": f"flux job {fid} already ended ({row['result']})"}
+    try:
+        p = subprocess.run([flux, "cancel", fid], capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return {"status": "error", "id": rec["id"], "stopped": False, "flux_job_id": fid, "error": f"flux cancel {fid} failed: {e}"}
+    if p.returncode != 0:
+        return {"status": "error", "id": rec["id"], "stopped": False, "flux_job_id": fid, "error": f"flux cancel {fid}: {(p.stderr or p.stdout).strip()[-200:]}"}
+    return {"status": "ok", "id": rec["id"], "stopped": True, "flux_job_id": fid, "note": f"flux cancel {fid} sent; moirai_run_status shows it as cancelled once flux has ended it"}
+
+
+def _load_rec(pipeline: str, jid: str) -> dict:
+    p = P.pdir(pipeline) / "jobs" / f"{jid}.json"
+    if not p.exists():
+        raise P.PipelineError(f"no job {jid} in {pipeline}")
+    return json.loads(p.read_text())
+
+
+def _sync_stage(pipeline: str, rec: dict, fb: dict) -> None:
+    """Write the flux job id and flux state into the stage outputs when they changed (only for the stage's current job)."""
+    try:
+        o = P.stage(P.load(pipeline), rec["stage"])["outputs"]
+        if o.get("job") != rec["id"]:
+            return
+        key = (fb["flux_job_id"], fb["state"])
+        if (o.get("flux_job_id"), o.get("flux_state")) != key:
+            P.record(pipeline, rec["stage"], outputs={"flux_job_id": fb["flux_job_id"], "flux_state": fb["state"]},
+                     note=f"flux job {fb['flux_job_id'] or '-'}: {fb['state']}" + (f" ({fb['message']})" if fb["message"] and fb["state"] in ("lost", "unreachable", "failed") else ""))
+    except (P.PipelineError, OSError, KeyError):
+        pass
+
+
+def batch_job(pipeline: str, jid: str, tail: int = 2000, flux: str = "flux", tries: int = 2, pause: float = 0.5) -> dict:
+    """J.get for any job, but a detached flux batch (source 'flux-batch') is first brought up to date from flux (finish_batch) and its status is the real one:
+    running (submitting, queued or running in flux), done (evaluated, rc set), lost (flux does not know the id) or unknown (flux not reachable). Adds flux_*."""
+    rec = _load_rec(pipeline, jid)
+    if rec.get("source") != BATCH_SOURCE:
+        return J.get(pipeline, jid, tail)
+    fb = finish_batch(rec, flux, tries, pause)
+    j = J.get(pipeline, jid, tail)
+    if j["status"] != "done":
+        j["status"] = "lost" if fb["state"] == "lost" else "unknown" if fb["state"] == "unreachable" else "running"
+    j.update(flux_job_id=fb["flux_job_id"], flux_state=fb["state"], flux_detail=fb)
+    _sync_stage(pipeline, rec, fb)
+    return j
+
+
 def _start_batch(pipeline, stage, batch_script, queue, limit, data_dir, venv, wait, original):
     if not batch_script:
         raise P.PipelineError("give batch_script (the generated run.sh)")
@@ -399,16 +578,25 @@ def _start_batch(pipeline, stage, batch_script, queue, limit, data_dir, venv, wa
     elif wr["action"] == "created":
         note_w = "; the wrapper did not exist and was created (run moirai_wrapper_write before generating run.sh)"
     Path(r["hosts_file"]).unlink(missing_ok=True)
-    j = J.start(pipeline, stage, stage.replace("_", "-") + "-batch", r["batch_wrapper"], r["annotated"], limit=int(limit) + 300)
+    Path(r["flux_job_id_file"]).unlink(missing_ok=True)
+    extra = {"idfile": r["flux_job_id_file"], "batch_output": r["batch_output"], "hosts_file": r["hosts_file"], "queue": queue, "submit_command": r["submit_command"]}
+    j = start_detached(pipeline, stage, stage.replace("_", "-") + "-batch", r["batch_wrapper"], r["annotated"], int(limit), extra)
     P.set_dashboard(pipeline, r["traces"], live=True)
     P.record(pipeline, stage, status="running", outputs={"job": j["id"], "traces": r["traces"], "batch_script": str(batch_script), "run_script": r["run_script_path"],
                                                         "wrapper": r["wrapper_path"], "wrapper_sha256": wr["sha256"], "hosts_file": r["hosts_file"],
                                                         "submit_command": r["submit_command"], "queue": queue, "mode": "batch", "batch_output": r["batch_output"],
-                                                        "service_venv": r["service_venv"]},
-             note=f"submitted as a flux batch: {r['submit_command']}{note_w}")
-    w = J.wait(pipeline, j["id"], wait)
+                                                        "service_venv": r["service_venv"], "flux_job_id": "", "flux_state": "submitting"},
+             note=f"submitted DETACHED as a flux batch (independent of the server): {r['submit_command']}{note_w}")
+    end = time.time() + max(0, int(wait))
+    while True:                         # wait only for the id to be recorded; the job itself is not waited for
+        w = batch_job(pipeline, j["id"], 2500)
+        if w["flux_job_id"] or w["status"] in ("done", "lost", "unknown") or time.time() >= end:
+            break
+        time.sleep(0.5)
     return {"status": w["status"], "job": j["id"], "rc": w["rc"], "elapsed": w["elapsed"], "traces": r["traces"], "submit_command": r["submit_command"],
-            "wrapper": wr, "log_tail": w.get("log_tail", "")[-2500:], "note": "the Dashboard tab shows the provenance as it arrives" + note_w}
+            "flux_job_id": w["flux_job_id"], "flux_state": w["flux_state"], "wrapper": wr, "log_tail": w.get("log_tail", "")[-2500:],
+            "note": "the flux batch is detached: a restart of the server does not cancel it; follow it with moirai_run_status, cancel it only with moirai_run_stop. "
+                    "The Dashboard tab shows the provenance as it arrives" + note_w}
 
 
 def _start(pipeline, stage, command, launcher, nodes, data_dir, wait, limit):
@@ -493,7 +681,7 @@ def attach_job(pipeline: str, stage: str, flux_job_id: str, output_file: str = "
     o = P.stage(c, stage)["outputs"]
     if o.get("job"):
         try:
-            prev = J.get(pipeline, o["job"], 0)
+            prev = batch_job(pipeline, o["job"], 0, flux, 1, 0)
         except P.PipelineError:
             prev = {}
         if prev.get("status") == "running":
@@ -568,12 +756,15 @@ def _validate(pipeline: str, stage: str) -> dict:
     if not v.check("ran", bool(o.get("job")), "the run has not started",
                    "start the run (moirai_smoke_run / moirai_baseline_run); for a flux batch submitted by hand that has FINISHED: moirai_run_attach(pipeline, stage, flux_job_id, output_file, result_json)"):
         return P.finish_validation(pipeline, v)
-    j = J.get(pipeline, o["job"], 1500)
-    if j["status"] == "running":
-        v.inconclusive("finished", f"still running after {j['elapsed']} s")
+    j = batch_job(pipeline, o["job"], 1500)       # a detached flux batch is evaluated here from flux and run.out when it has ended (also after a server restart)
+    if j["status"] in ("running", "unknown"):
+        fx = f" (flux job {j['flux_job_id']}: {j['flux_state']})" if j.get("flux_job_id") else ""
+        v.inconclusive("finished", f"{'still running' if j['status'] == 'running' else 'flux not reachable'} after {j['elapsed']} s{fx}")
         return P.finish_validation(pipeline, v)
-    v.check("exit_0", j["rc"] == 0, f"rc={j['rc']}{' (timed out)' if j.get('timed_out') else ''}: {j.get('log_tail', '')[-300:]}",
+    lost = f" flux does not know job {j.get('flux_job_id') or '?'}: {j.get('flux_detail', {}).get('message', '')};" if j["status"] == "lost" else ""
+    v.check("exit_0", j["rc"] == 0, f"rc={j['rc']}{' (timed out)' if j.get('timed_out') else ''}:{lost} {j.get('log_tail', '')[-300:]}",
             "raise limit if it timed out; rc 4/5/6 in batch mode: a chunk job failed / no wrapper ran / --output unreadable, read the batch --output file, the chunk logs (moirai-wrapper: lines) and service-<host>-<job>.log; "
+            "lost: `flux jobs -a <flux_job_id>` from the shell that owns the flux instance; "
             "attached: rc comes from flux result/returncode and result_json ok, the problems are at the end of the log")
     files = T.expand(o["traces"])
     v.check("trace", bool(files), "no trace file", "read the service log next to the trace prefix")
@@ -617,11 +808,12 @@ def _validate(pipeline: str, stage: str) -> dict:
 
 
 _FAKE_FLUX = """#!/bin/bash
+# fake flux for the detached batch: `batch` prints an id; `jobs` prints the line in ./state for that id (unknown otherwise); `cancel` is logged in ./cancelled
+d="$(dirname "$0")"
 case "$1" in
   batch) echo fFAKEBATCH ;;
-  watch) exit 0 ;;
-  jobs) case "$*" in *returncode*) echo 0 ;; *result*) echo COMPLETED ;; esac ;;
-  cancel) exit 0 ;;
+  jobs) case "${@: -1}" in fFAKEBATCH) cat "$d/state" ;; *) echo "flux-jobs: error: unknown job ${@: -1}" >&2; exit 1 ;; esac ;;
+  cancel) echo "$*" >> "$d/cancelled" ;;
 esac
 """
 _FAKE_FLUX_JOBS = """#!/bin/bash
@@ -639,8 +831,9 @@ _RUN_OUT_FAIL = ("flux-job: task(s) exited with exit code 2\nFri Oct 30 23:32:42
 _RUN_OUT_OK = "Fri Oct 30 23:30:01 PDT 2026: f35QqToh9 done\nflux-job: there are no more waitable jobs\nAll jobs completed (or failed)!\n"
 
 
-def _run_batch_wrapper(td, name, out_text, hosts_text):
-    """Run the rendered batch wrapper job text under bash with a fake flux/dbcast on PATH (no cluster): returns (rc, combined output, render)."""
+def _batch_case(td, name, out_text, hosts_text, flux_line):
+    """Render the detached submit script, run it under bash with a fake flux (it records the id), then evaluate with finish_batch against the fake flux's
+    state line `flux_line`. Returns (finish result, rc file text, log text, script text, id file text, record, fake flux path, render)."""
     base = Path(td) / name
     sd, bindir = base / "stage", base / "bin"
     sd.mkdir(parents=True)
@@ -648,6 +841,7 @@ def _run_batch_wrapper(td, name, out_text, hosts_text):
     for n, body in (("flux", _FAKE_FLUX), ("dbcast", "#!/bin/sh\nexit 0\n")):
         (bindir / n).write_text(body)
         (bindir / n).chmod(0o755)
+    (bindir / "state").write_text(flux_line + "\n")
     out = base / "run.out"
     if out_text is not None:
         out.write_text(out_text)
@@ -658,7 +852,12 @@ def _run_batch_wrapper(td, name, out_text, hosts_text):
     script = base / "batch.sh"
     script.write_text(r["batch_wrapper"])
     p = subprocess.run(["bash", str(script)], env={"PATH": f"{bindir}:/usr/bin:/bin"}, capture_output=True, text=True, timeout=60)
-    return p.returncode, p.stdout + p.stderr, r
+    rec = {"id": "x-1", "stage": "moirai_smoke", "pid": 0, "started": time.time(), "rc_file": str(base / "x.rc"), "log": str(base / "x.log"), "script": str(base / "x.sh"),
+           "submit_rc_file": str(base / "x.submit.rc"), "idfile": r["flux_job_id_file"], "flux_job_id": "", "batch_output": r["batch_output"], "hosts_file": r["hosts_file"]}
+    (base / "x.json").write_text(json.dumps(rec))
+    (base / "x.log").write_text(p.stdout + p.stderr)
+    fb = finish_batch(rec, str(bindir / "flux"), 1, 0)
+    return fb, _read(base / "x.rc"), (base / "x.log").read_text(), r["batch_wrapper"], _read(r["flux_job_id_file"]), rec, str(bindir / "flux"), r, p.returncode
 
 
 def _attach_selftest(td) -> dict:
@@ -738,8 +937,8 @@ def _attach_selftest(td) -> dict:
 
 
 def _selftest() -> dict:
-    """Wrapper write, idempotence and mismatch handling on a temp dir, through the pure render and sync_wrapper; the batch wrapper job text run with a fake flux;
-    the resolver on a fake venv; moirai_run_attach on a temp pipeline with a fake flux. Nothing else is touched."""
+    """Wrapper write, idempotence and mismatch handling on a temp dir, through the pure render and sync_wrapper; the detached batch submit script run with a fake
+    flux and the state/evaluation read from flux (finish_batch); the resolver on a fake venv; moirai_run_attach on a temp pipeline with a fake flux."""
     cases = {}
     with tempfile.TemporaryDirectory(prefix="moirai_wrapper_selftest_") as td:
         sd = Path(td) / "traces" / "moirai_smoke"
@@ -801,18 +1000,46 @@ def _selftest() -> dict:
         cases["explicit_env_first"] = explicit.index('if [ -z "${MOIRAI_DFTRACER_SERVICE:-}" ]') < explicit.index("import dftracer")
         cases["no_warning_with_venv"] = render_batch(*args, venv=str(venv), dft_service=real)["warnings"] == []
 
-        # D1: the batch wrapper job text, run with a fake flux (return code 0, COMPLETED), against real failing / clean run.out text
-        rc, msg, r = _run_batch_wrapper(td, "fail", _RUN_OUT_FAIL, "nodeA\n")
-        cases["batch_fail_detected"] = rc == 4 and "f35QqToh9" in msg and "FAILED" in msg
-        rc, msg, _ = _run_batch_wrapper(td, "clean", _RUN_OUT_OK, "nodeA\n")
-        cases["batch_clean_pass"] = rc == 0 and "clean" in msg
-        rc, msg, _ = _run_batch_wrapper(td, "nohosts", _RUN_OUT_OK, None)
-        cases["batch_hosts_missing"] = rc == 5 and "no per-chunk wrapper ran" in msg
-        rc, msg, _ = _run_batch_wrapper(td, "emptyhosts", _RUN_OUT_OK, "")
-        cases["batch_hosts_empty"] = rc == 5
-        rc, msg, _ = _run_batch_wrapper(td, "noout", None, "nodeA\n")
-        cases["batch_output_unreadable"] = rc == 6
+        # D1 (chunk job failed although the batch returned 0), now evaluated from flux + run.out by finish_batch: fake flux says INACTIVE COMPLETED 0
+        done = "INACTIVE COMPLETED 0 12.0"
+        fb, rcf, log, script, idf, rec, fx, r, srt = _batch_case(td, "fail", _RUN_OUT_FAIL, "nodeA\n", done)
+        cases["batch_fail_detected"] = rcf == "4" and fb["state"] == "failed" and "f35QqToh9" in log and "FAILED" in log
+        fb, rcf, log, *_ = _batch_case(td, "clean", _RUN_OUT_OK, "nodeA\n", done)
+        cases["batch_clean_pass"] = rcf == "0" and fb["state"] == "completed" and "clean" in log
+        fb, rcf, log, *_ = _batch_case(td, "nohosts", _RUN_OUT_OK, None, done)
+        cases["batch_hosts_missing"] = rcf == "5" and "no per-chunk wrapper ran" in log
+        fb, rcf, *_ = _batch_case(td, "emptyhosts", _RUN_OUT_OK, "", done)
+        cases["batch_hosts_empty"] = rcf == "5"
+        fb, rcf, *_ = _batch_case(td, "noout", None, "nodeA\n", done)
+        cases["batch_output_unreadable"] = rcf == "6"
         cases["batch_output_parsed"] = r["batch_output"].endswith("/fail/run.out") and batch_output_path("#!/bin/bash\n#flux: --output=/x/y.out\n") == "/x/y.out"
+        fb, rcf, *_ = _batch_case(td, "flfail", _RUN_OUT_OK, "nodeA\n", "INACTIVE FAILED 3 1.0")
+        cases["batch_flux_failure_rc"] = rcf == "3" and fb["state"] == "failed"
+        fb, rcf, *_ = _batch_case(td, "cancel", _RUN_OUT_OK, "nodeA\n", "INACTIVE CANCELED - 1.0")
+        cases["batch_cancelled_state"] = rcf == "1" and fb["state"] == "cancelled"
+
+        # f3j9BPvr1Agw: the submit never cancels, records the id, and the state comes from flux (queued / running / ended after a "restart" / unknown id)
+        cases["batch_no_cancel_trap"] = "trap" not in script and "flux cancel" not in script and "flux watch" not in script and "never cancels the flux job" in script
+        cases["batch_id_recorded"] = idf == "fFAKEBATCH" and srt == 0
+        fb, rcf, *_ = _batch_case(td, "queued", _RUN_OUT_OK, "nodeA\n", "SCHED - - 0.0")
+        cases["status_queued_from_flux"] = fb["state"] == "queued" and fb["flux_job_id"] == "fFAKEBATCH" and rcf == "" and fb["rc"] is None
+        fb, rcf, log, script, idf, rec, fx, r, srt = _batch_case(td, "restart", _RUN_OUT_OK, "nodeA\n", "RUN - - 5.0")
+        running = fb["state"] == "running" and rcf == ""
+        (Path(fx).parent / "state").write_text("INACTIVE COMPLETED 0 99.0\n")
+        rec2 = json.loads((Path(rec["script"]).with_suffix(".json")).read_text())     # a fresh process reads the record only
+        fb2 = finish_batch(rec2, fx, 1, 0)
+        cases["finish_after_server_restart"] = running and rec2["flux_job_id"] == "fFAKEBATCH" and fb2["state"] == "completed" and _read(rec["rc_file"]) == "0" and fb2["flux_runtime"] == "99.0"
+        rec3 = dict(rec2, flux_job_id="fGONE")
+        Path(rec3["rc_file"]).unlink()
+        cases["status_lost_only_when_flux_unknown"] = finish_batch(rec3, fx, 1, 0)["state"] == "lost" and running and fb2["state"] != "lost"
+        cancelled_log = Path(fx).parent / "cancelled"
+        cases["cancel_only_by_stop"] = (not cancelled_log.exists())
+        st = stop_batch(dict(rec2, flux_job_id="fFAKEBATCH"), fx)
+        (Path(fx).parent / "state").write_text("RUN - - 5.0\n")
+        st = stop_batch(dict(rec2, flux_job_id="fFAKEBATCH"), fx)
+        cases["cancel_only_by_stop"] = cases["cancel_only_by_stop"] and st["stopped"] is True and "cancel fFAKEBATCH" in _read(cancelled_log)
+        av = detached_argv("/j/a.sh", "/j/a.submit.rc", {"PATH": "/usr/bin:/bin", "HOME": "/h", "USER": "u", "TERM": "xterm"})
+        cases["detached_argv"] = av[:3] == ["nohup", "env", "-i"] and "HOME=/h" in av and "USER=u" in av and "TERM=xterm" in av and "PATH=/usr/bin:/bin" not in av and av[-2] == "-lc" and "bash /j/a.sh" in av[-1]
 
         # attach: a finished, externally submitted flux batch (fake flux, temp pipeline)
         cases.update(_attach_selftest(td))
@@ -827,7 +1054,7 @@ def register(mcp):
         """Write ONLY the per-chunk submit wrapper <work>/traces/<stage>/submit_moirai.sh (mode 755) and create the stage and raw dirs. Use right after
         integrate, BEFORE elmerfold_run_script: the run.sh generator requires --submit-script to be an existing file. The text is the one moirai_batch_plan shows.
         It submits and starts nothing. Idempotent: the same text changes nothing (action unchanged); a different file on disk is rewritten (action rewritten).
-        pipeline: pipeline id. stage: moirai_smoke|baseline. service_venv: venv holding dftracer/bin/dftracer_service; default the venv root of the integrate
+        pipeline: pipeline id. stage: moirai_smoke|baseline|live_run. service_venv: venv holding dftracer/bin/dftracer_service; default the venv root of the integrate
         stage's moirai.python (the text is identical whether passed or defaulted); an error naming the fix when <venv>/lib/python*/site-packages/dftracer/bin/dftracer_service
         is missing or not executable. data_dir: MOIRAI_DATA_DIR (default the annotated tree). original_script: the app's own submit script the wrapper runs
         (default <annotated>/monomer-structure-prediction/submit_smsp.sh).
@@ -846,12 +1073,12 @@ def register(mcp):
     def moirai_wrapper_selftest() -> dict:
         """Self-test of the wrapper tools on a temp dir (no pipeline, nothing on the cluster): create, sha256, mode 755, dirs, idempotence, detection and rewrite
         of a differing file, a changed render, mode repair, a run.sh not referencing the wrapper refused; the resolver on a fake venv (python entry script),
-        defaulted vs explicit venv rendering the same text, the python-based fallback; the batch wrapper job text run under bash with a fake flux against a
-        failing run.out (exit 4, chunk job id named), a clean one (exit 0), a missing/empty hosts.txt (exit 5) and an unreadable output (exit 6); and
-        moirai_run_attach on a temp pipeline with a fake flux (attach_* cases: COMPLETED rc 0 passes 'ran' and 'exit_0' of moirai_validate, FAILED fails exit_0,
-        unfinished/unknown/bad stage refused, result_json ok false gives a non-zero rc).
-        Use after any change to the wrapper text, the batch wrapper, the resolver or the attach tool.
-        Returns {status, line, cases}: line is 'moirai wrapper selftest PASS ...' or 'moirai wrapper selftest FAIL <case>'."""
+        defaulted vs explicit venv rendering the same text, the python-based fallback; the DETACHED batch submit script run under bash with a fake flux (records
+        the flux job id, contains no cancel trap), and the state / post-run evaluation read from flux and run.out by finish_batch: a failing run.out (rc 4, chunk
+        job id named), a clean one (rc 0), a missing/empty hosts.txt (rc 5), an unreadable output (rc 6), a failed or cancelled flux result, queued and running
+        states, evaluation after a simulated server restart, 'lost' only for an id flux does not know, cancel only through stop_batch; and moirai_run_attach on a
+        temp pipeline with a fake flux (attach_* cases). Use after any change to the wrapper text, the batch submit, the status/finish logic, the resolver or the
+        attach tool. Returns {status, line, cases}: line is 'moirai wrapper selftest PASS ...' or 'moirai wrapper selftest FAIL <case>'."""
         return _selftest()
 
     @mcp.tool()
@@ -860,13 +1087,15 @@ def register(mcp):
         """Run the annotated app on the small test under moirai-service. Use after integrate. It stops the service however the app ends; limit: seconds before it is
         stopped. The Dashboard tab follows it live. batch_script: path of the generated flux-batch run.sh (Elmerfold), generated WITH --submit-script <wrapper path>
         from moirai_wrapper_write; run.sh is not modified: the wrapper <work>/traces/<stage>/submit_moirai.sh is compared with the freshly rendered text
-        (rewritten, mode 755, and reported when it differs) and a detached job runs `flux batch -t <limit/60> --queue <queue> <run.sh>`, then reads the run.sh
-        `#flux: --output` file: the job fails (exit 4 naming the chunk job, 5 no hosts.txt, 6 output unreadable) when a chunk job failed even though the batch
-        returned 0. A run.sh that does not reference the wrapper is refused before anything is written. Run moirai_batch_plan first and get the user's yes.
-        queue: the batch queue. data_dir: MOIRAI_DATA_DIR (default the annotated tree). service_venv: venv holding dftracer/bin/dftracer_service (default the venv
-        root of integrate's moirai.python; verified executable). original_script: the app's own submit script the wrapper runs
-        (default <annotated>/monomer-structure-prediction/submit_smsp.sh). A flux batch already submitted by hand and FINISHED is not run here: moirai_run_attach.
-        Returns {status, job, rc, elapsed, traces, wrapper: {action, sha256,
+        (rewritten, mode 755, and reported when it differs) and a DETACHED submit (own session, nohup, clean env, no cancel on any signal) runs
+        `flux batch -t <limit/60> --queue <queue> <run.sh>` and records the flux job id; the batch then belongs to Flux, not to this server: a server restart does not
+        cancel it, and only moirai_run_stop does. Its state comes from flux (moirai_run_status), and when it ends moirai_run_status / moirai_validate read the run.sh
+        `#flux: --output` file: rc 4 naming the chunk job, 5 no hosts.txt, 6 output unreadable when a chunk job failed even though the batch returned 0.
+        A run.sh that does not reference the wrapper is refused before anything is written. Run moirai_batch_plan first and get the user's yes.
+        wait: seconds to wait for the flux job id to be recorded (the job itself is not waited for in batch mode). queue: the batch queue. data_dir: MOIRAI_DATA_DIR
+        (default the annotated tree). service_venv: venv holding dftracer/bin/dftracer_service (default the venv root of integrate's moirai.python; verified executable).
+        original_script: the app's own submit script the wrapper runs (default <annotated>/monomer-structure-prediction/submit_smsp.sh). A flux batch already submitted
+        by hand and FINISHED is not run here: moirai_run_attach. Returns {status, job, rc, elapsed, traces, flux_job_id, flux_state, wrapper: {action, sha256,
         previous_sha256}, log_tail}."""
         if batch_script:
             return _start_batch(pipeline, "moirai_smoke", batch_script, queue, limit, data_dir, service_venv, wait, original_script)
@@ -878,8 +1107,10 @@ def register(mcp):
         """Start the real baseline run under moirai-service, in the background, on what the user approved at the gate. command: the full run. launcher: e.g. 'flux run -N4 -n32'.
         nodes: one service starts per node. data_dir: where its I/O is traced. limit: seconds before it is stopped. batch_script, queue, service_venv, original_script: as in
         moirai_smoke_run (batch mode ignores command, launcher, nodes: the run.sh decides; service_venv defaults from integrate's moirai.python; the wrapper on disk is
-        verified against the fresh render and rewritten, with a report, when it differs; the batch job fails when a chunk job failed). The Dashboard tab shows events
-        as they appear. A finished flux batch submitted by hand is attached with moirai_run_attach instead. Returns {status, job, traces, wrapper}: watch with moirai_run_status."""
+        verified against the fresh render and rewritten, with a report, when it differs; the flux batch is submitted DETACHED and its flux job id recorded, so a server
+        restart never cancels it (only moirai_run_stop does); state and the chunk-failure evaluation come from flux and run.out in moirai_run_status / moirai_validate).
+        The Dashboard tab shows events as they appear. A finished flux batch submitted by hand is attached with moirai_run_attach instead.
+        Returns {status, job, traces, flux_job_id, flux_state, wrapper}: watch with moirai_run_status."""
         if batch_script:
             return _start_batch(pipeline, "baseline", batch_script, queue, limit, data_dir, service_venv, wait, original_script)
         if not command:
@@ -892,7 +1123,10 @@ def register(mcp):
         """Start a LIVE run: the long (multi-hour) run of an app a run pipeline already annotated, under moirai-service, in the background, with provenance written live
         (the Live Run view draws the graph as it forms). pipeline: a live pipeline (pipeline_new(kind='live', parent=<run pipeline>)); it uses the parent's annotated
         tree and moirai_env.sh. command: the real run (default the live pipeline's command, which defaults to the parent's). limit: seconds before it is stopped
-        (default 12 h). batch_script, queue, service_venv, original_script: as in moirai_baseline_run. Returns {status, job, traces}: follow with moirai_run_status(pipeline,
+        (default 12 h). batch_script, queue, service_venv, original_script: as in moirai_baseline_run. In batch mode the flux batch is submitted DETACHED from the
+        server (a web UI / tool-server restart, which happens regularly, does NOT cancel it, queued or running); the flux job id is recorded in the job record and the
+        stage outputs, moirai_run_status reads the real state (queued/running/completed/failed/cancelled/timeout/lost) from flux, and only moirai_run_stop cancels.
+        Returns {status, job, traces, flux_job_id, flux_state}: follow with moirai_run_status(pipeline,
         'live_run'); when it ends, moirai_validate(pipeline, 'live_run'), then the publish_data stage."""
         if batch_script:
             return _start_batch(pipeline, "live_run", batch_script, queue, limit, data_dir, service_venv, wait, original_script)
@@ -924,11 +1158,12 @@ def register(mcp):
         is missing, in sync or differs (wrapper_on_disk). The wrapper itself is written by moirai_wrapper_write, which must run BEFORE elmerfold_run_script (the
         generator needs an existing --submit-script). Order: moirai_wrapper_write, elmerfold_run_script with submit_script (and cwd), elmerfold_run_check with
         submit_script, this tool with batch_script, the user's yes, moirai_smoke_run. Once batch_script (the generated run.sh) is given it checks run.sh (one bulksubmit
-        line, its ':::' input list, the wrapper path and the annotated tree in it) and prints the exact submit command, the batch wrapper job text (which reads the
-        run.sh `#flux: --output` file, batch_output, after the batch) and the service venv used.
-        stage: moirai_smoke|baseline. limit: seconds (the batch gets ceil(limit/60) minutes). service_venv: default the venv root of integrate's moirai.python.
+        line, its ':::' input list, the wrapper path and the annotated tree in it) and prints the exact submit command, the detached batch submit script text (batch_wrapper:
+        submits, records the flux job id, never cancels; the run.sh `#flux: --output` file, batch_output, is read after the batch by moirai_run_status/moirai_validate)
+        and the service venv used.
+        stage: moirai_smoke|baseline|live_run. limit: seconds (the batch gets ceil(limit/60) minutes). service_venv: default the venv root of integrate's moirai.python.
         original_script: default the annotated copy's submit_smsp.sh.
-        Returns {status, wrapper_path, wrapper_script, wrapper_on_disk, batch_wrapper, batch_output, run_sh_check, submit_command, resolver, service_venv, warnings} or {status: error, error}."""
+        Returns {status, wrapper_path, wrapper_script, wrapper_on_disk, batch_wrapper, batch_output, flux_job_id_file, run_sh_check, submit_command, resolver, service_venv, warnings} or {status: error, error}."""
         try:
             _, r = _plan(pipeline, stage, batch_script, queue, limit, data_dir, service_venv, original_script)
         except (P.PipelineError, OSError) as e:
@@ -943,8 +1178,10 @@ def register(mcp):
             r["warnings"].append(f"wrapper on disk is {r['wrapper_on_disk']['state']}: run moirai_wrapper_write (the run would rewrite it and say so)")
         r["warnings"] += ["UNCONFIRMED: whether `moirai-service start` returns by itself (the wrapper backgrounds it and waits for the ring either way)",
                           "UNCONFIRMED: submit_smsp.sh puts ${ELMER_ENV}/lib first in LD_LIBRARY_PATH for the app (libstdc++ shadowing of moirai/dftracer libs)",
-                          "UNCONFIRMED: trace file names per host; whether the GPU server runs on the same node as the driver"]
-        r.setdefault("note", "dry run: nothing started or written; the real run verifies the wrapper (mode 755, rewritten when it differs), then submits the batch wrapper job, which runs the submit command")
+                          "UNCONFIRMED: trace file names per host; whether the GPU server runs on the same node as the driver",
+                          "UNCONFIRMED: the detached submit runs in `env -i HOME USER TERM bash -lc`: flux and `module` must come from the login profile (not run on a real cluster)"]
+        r.setdefault("note", "dry run: nothing started or written; the real run verifies the wrapper (mode 755, rewritten when it differs), then submits the batch DETACHED "
+                             "(a server restart does not cancel it), which runs the submit command and records the flux job id")
         return r
 
     @mcp.tool()
@@ -953,8 +1190,8 @@ def register(mcp):
         """Pure text render, no pipeline or files needed (sandbox checks, experiments). original: path of the app's own submit script; env: moirai_env.sh path;
         stage_dir: <work>/traces/<stage>; shm_base: ring name prefix (the job id is appended at run time). Optional run_sh: text of a generated run.sh to check against
         the wrapper (status error when it does not run the wrapper, has no ':::' or does not hold `annotated`); its `#flux: --output <path>` header is the file the
-        batch wrapper job reads after the batch (batch_output). Returns {status, wrapper_path, wrapper_script,
-        batch_wrapper, batch_output, submit_command, run_sh_check, warnings, error?}."""
+        post-run evaluation reads after the batch (batch_output). batch_wrapper is the detached submit script: it submits, writes the flux job id to flux_job_id_file
+        and never cancels. Returns {status, wrapper_path, wrapper_script, batch_wrapper, batch_output, flux_job_id_file, submit_command, run_sh_check, warnings, error?}."""
         return render_batch(original, env, stage_dir, data_dir, shm_base, queue, limit, run_sh, run_script, annotated, service_venv)
 
     @mcp.tool()
@@ -970,23 +1207,40 @@ def register(mcp):
 
     @mcp.tool()
     def moirai_run_status(pipeline: str, stage: str) -> dict:
-        """Follow a run: job state, log tail and what the trace holds so far (readable while the run is going). Use while it runs, to report progress or spot a stall.
-        Returns {job, rc, elapsed, counts, log_tail}."""
+        """Follow a run: job state, log tail and what the trace holds so far (readable while the run is going). Use while it runs, to report progress or spot a stall,
+        and after the web server or tool server restarted. For a flux batch the state is READ FROM FLUX (`flux jobs` of the recorded flux_job_id), never from a
+        server process: flux_state is queued (waiting in the Flux queue), running, completed, failed, cancelled, timeout, submitting (id not recorded yet), lost (flux
+        does not know the id, or the submit vanished without one) or unreachable (flux cannot be run from here). When flux says the job ended, this call performs the
+        post-run evaluation once (rc 0 only for COMPLETED 0 with no failed chunk job in run.out and a non-empty hosts.txt; rc 4/5/6 otherwise, see SKILL) and writes the
+        rc into the job; the stage outputs get flux_job_id and flux_state. status is running (also while queued), done, lost or unknown.
+        Returns {job, status, rc, elapsed, timed_out, flux_job_id, flux_state, flux_detail, counts, log_tail}."""
         o = P.stage(P.load(pipeline), stage)["outputs"]
-        j = J.get(pipeline, o["job"], 2000)
-        return {"job": j["id"], "status": j["status"], "rc": j["rc"], "elapsed": j["elapsed"], "timed_out": j.get("timed_out", False), "counts": T.read(o["traces"]).counts(), "log_tail": j["log_tail"]}
+        if not o.get("job"):
+            raise P.PipelineError(f"stage {stage} has no job: start it with moirai_smoke_run / moirai_baseline_run / moirai_live_run, or attach a finished one")
+        j = batch_job(pipeline, o["job"], 2000)
+        return {"job": j["id"], "status": j["status"], "rc": j["rc"], "elapsed": j["elapsed"], "timed_out": j.get("timed_out", False),
+                "flux_job_id": j.get("flux_job_id", ""), "flux_state": j.get("flux_state", ""), "flux_detail": j.get("flux_detail", {}),
+                "counts": T.read(o["traces"]).counts(), "log_tail": j["log_tail"]}
 
     @mcp.tool()
     def moirai_run_stop(pipeline: str, stage: str) -> dict:
-        """Stop a run (the service is stopped and the trace closed; in batch mode the batch wrapper job cancels the batch job, whose app jobs get TERM and stop their service).
-        Use when the user asks, or the run is clearly stuck. An attached (finished) job has nothing to stop. Returns {status, id, stopped}."""
-        return J.stop(pipeline, P.stage(P.load(pipeline), stage)["outputs"]["job"])
+        """Stop a run on the user's request, or when it is clearly stuck. This is the ONLY thing that cancels a flux batch: for a detached batch it runs
+        `flux cancel <recorded flux job id>` (when flux says it has not ended; a queued job is cancelled too); a restart of the server never does. The app jobs then get
+        TERM and stop their service; moirai_run_status shows the job as cancelled. For a plain command the job's process group is terminated. An attached (finished) job
+        has nothing to stop. Returns {status, id, stopped, flux_job_id?, note?}."""
+        jid = P.stage(P.load(pipeline), stage)["outputs"]["job"]
+        rec = _load_rec(pipeline, jid)
+        if rec.get("source") == BATCH_SOURCE:
+            return stop_batch(rec)
+        return J.stop(pipeline, jid)
 
     @mcp.tool()
     def moirai_validate(pipeline: str, stage: str) -> dict:
         """Validate a moirai run: exit 0, a trace from the service and not spill files, activities and entities recorded, no dangling edge, every entity type in
-        the spec seen; in batch mode also one trace per host that ran the wrapper (hosts.txt) and no host with only spill traces. An attached run (moirai_run_attach)
+        the spec seen; in batch mode also one trace per host that ran the wrapper (hosts.txt) and no host with only spill traces. A detached flux batch that has
+        ended is evaluated here too (state from flux, chunk failures from run.out) when no earlier call did, so it works after a server restart; queued/running
+        flux jobs give an inconclusive 'finished'. An attached run (moirai_run_attach)
         is judged the same way; without a wrapper hosts.txt the per-host evidence comes only from prov_<host> trace file names (spill-only hosts fail
-        host_service_trace; no such names: no per-host judgement). exit_0 is never relaxed. stage: moirai_smoke|baseline.
+        host_service_trace; no such names: no per-host judgement). exit_0 is never relaxed. stage: moirai_smoke|baseline|live_run.
         Use after the job ended. Returns the verdict {status, failed, unknown, passed, total}."""
         return _validate(pipeline, stage)

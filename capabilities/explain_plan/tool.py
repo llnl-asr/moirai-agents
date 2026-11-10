@@ -96,11 +96,26 @@ def register(mcp):
         return explain(answer)
 
     @mcp.tool()
-    def explain_plan_check(answer: dict) -> dict:
-        """Validator: the plan explanation of this answer is well formed - a short plain summary, numbers that come from the answer, known
-        block types, one detail group per step. Returns {status: pass|fail, problems}."""
-        p = explain(answer)
-        bad = X.check(p, answer, "plan")
-        if len(p["details"]) != len(answer.get("steps") or []):
-            bad.append("details: one group per step")
-        return {"status": "fail" if bad else "pass", "problems": bad}
+    def explain_plan_check(answer: dict = None, pipeline: str = "", answer_id: str = "") -> dict:
+        """Validator: the plan explanation is well formed (a short plain summary, numbers from the answer, known blocks, one group per step)
+        and - against the traces - every step still finds what it says (same headline, same number of records cited, same queries).
+        Give pipeline and answer_id (or answer and pipeline) to check against the traces: the plan runs again with TraceViewer and each step's findings are compared with what the explanation says.
+        Without a pipeline only the record is checked. Returns {status: pass|fail, problems, data: what was checked against}."""
+        def part_check(a, f):
+            p = explain(a)
+            bad = X.check(p, a, "plan")
+            if len(p["details"]) != len(a.get("steps") or []):
+                bad.append("details: one group per step")
+            if f:
+                for old, new in zip(a.get("steps") or [], f["steps"]):
+                    n = old.get("step")
+                    if old.get("headline") != new.get("headline"):
+                        bad.append(f"S{n}: the traces now give {X.clip(new.get('headline'), 120)!r}, not {X.clip(old.get('headline'), 120)!r}")
+                    if int(old.get("cited") or 0) != int(new.get("cited") or 0):
+                        bad.append(f"S{n}: {new.get('cited')} records cited now, {old.get('cited')} said")
+                    if len(old.get("queries") or []) != len(new.get("queries") or []):
+                        bad.append(f"S{n}: {len(new.get('queries') or [])} TraceViewer queries now, {len(old.get('queries') or [])} said")
+                if len(f["steps"]) != len(a.get("steps") or []):
+                    bad.append(f"the plan has {len(f['steps'])} steps when run, {len(a.get('steps') or [])} said")
+            return bad
+        return X.against(pipeline, answer, answer_id, part_check)

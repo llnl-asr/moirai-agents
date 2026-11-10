@@ -1,7 +1,7 @@
 {
  "name": "prov_annotate",
- "description": "Add moirai provenance to an application - find data accesses, agree entity types and activities with the user, insert them into a copy (decorate a function, patch or subclass a method, annotate a statement, record a shell step of a Maestro YAML, invalidate, conditional edges), validate. Load for the annotate stage.",
- "version": 8,
+ "description": "Add moirai provenance to an application - find data accesses, agree entity types and activities with the user, insert them into a copy (decorate a function, patch or subclass a method, annotate a statement, record a shell step of a Maestro YAML, invalidate, conditional edges), validate, and show the user an entity-type relationship diagram of what was annotated at the gate. Load for the annotate stage, or when a spec needs an inherited method, an inline subprocess step, a delete, a key from a local variable or an optional input, when the work is a shell command in a Maestro YAML `cmd:` step (AlphaFold 3, Rosetta FlexPepDock, BioTox, yaml_step), when a question about the parameters or flags of a step finds none recorded (a no-argument on_finish/run/__call__ hook whose command line was built in the constructor), when a gap says no_outputs or no_attributes (a hook that returns None keeps its result on self: record it with capture.outputs and as attributes; a question about quality, depth, size or counts of a data entity finds no attributes), or when the annotate verdict is inconclusive about PYTHONPATH, moirai_env.sh or maestro_dry.",
+ "version": 11,
  "enabled": true,
  "stages": [
   "annotate"
@@ -20,31 +20,29 @@
    "annotate_spec",
    "annotate_apply",
    "annotate_preview",
-   "annotate_diagram",
-   "annotate_diagram_preview"
+   "annotate_diagram"
   ],
   "validator": [
-   "annotate_validate",
-   "annotate_validate_preview"
+   "annotate_validate"
   ]
  },
  "review": [
   "imports shutil: copies/removes files",
   "imports subprocess: runs commands",
-  "line 1015: writes or deletes files (write_text)",
-  "line 1192: writes or deletes files (write_text)",
-  "line 1201: writes or deletes files (write_text)",
-  "line 1265: writes or deletes files (write_text)",
-  "line 1308: writes or deletes files (write_text)",
-  "line 1670: writes or deletes files (write_text)",
-  "line 1684: writes or deletes files (rmtree)",
-  "line 1688: writes or deletes files (write_text)",
-  "line 1713: writes or deletes files (write_text)",
-  "line 1724: writes or deletes files (write_text)",
+  "line 1048: writes or deletes files (write_text)",
+  "line 1225: writes or deletes files (write_text)",
+  "line 1234: writes or deletes files (write_text)",
+  "line 1298: writes or deletes files (write_text)",
+  "line 1341: writes or deletes files (write_text)",
+  "line 1710: writes or deletes files (write_text)",
+  "line 1724: writes or deletes files (rmtree)",
+  "line 1728: writes or deletes files (write_text)",
   "line 1753: writes or deletes files (write_text)",
-  "line 1808: writes or deletes files (write_text)",
-  "line 1815: writes or deletes files (write_text)",
-  "line 704: writes or deletes files (write_text)"
+  "line 1764: writes or deletes files (write_text)",
+  "line 1793: writes or deletes files (write_text)",
+  "line 1848: writes or deletes files (write_text)",
+  "line 1855: writes or deletes files (write_text)",
+  "line 737: writes or deletes files (write_text)"
  ],
  "history": [
   {
@@ -104,6 +102,27 @@
    "by": "haridev",
    "proposal": "b879be8b8ee0",
    "why": "Gap G-082a03t0 (pipeline elmerfold-prov-20261030-125944): a no-argument hook method (on_finish(self)) of an object whose command line was built in its constructor and stored on self recorded no parameters; the annotation had no capture. Rule, exploration steps and a reproducing annotate_preview case added to the skill. Skill text only; tool and existing checks unchanged."
+  },
+  {
+   "version": 9,
+   "ts": 1794269846.6343582,
+   "by": "haridev",
+   "proposal": "4d7359d47c85",
+   "why": "Gaps G-71ce0cb0 (no_outputs, missed_outputs) and G-9e3bd857 (no_attributes, missed_attributes) from the question about the quality and depth of the MSAs: a hook returning None keeps its result on self, so default output capture recorded nothing; entities read through an index carried no attributes. Skill-only: new rules, corrector rows for no_outputs and no_attributes."
+  },
+  {
+   "version": 10,
+   "ts": 1794273556.9565465,
+   "by": "haridev",
+   "proposal": "a7f495087875",
+   "why": "Gap G-71ce0cb0 (no_outputs, activity filter_msa) kept coming back: an attributes-only fix on the generated entity does not feed the {op: outputs, activity} query, which reads the activity's <activity>.output entities, and those could only come from a return value. The hook MMseqsFilterTask.on_finish(self) returns None and its result lives on self.stdout. Adds capture.outputs: {label: expression}, evaluated after the call over the arguments, self and result (statement: its locals), guarded, one <activity>.output entity (generated, name=value) per label, in addition to the return value. Updated: helper (_emit_outputs, _output, _outputs, activity, event), spec emitter _kw, _exprs scope validation (names_resolve), _check_spec, annotate_spec docstring, SKILL.md; two preview checks added."
+  },
+  {
+   "version": 11,
+   "ts": 1794278335.638846,
+   "by": "haridev",
+   "proposal": "0d18829be0f7",
+   "why": "User: \"can u support quality of msas\". Answer said traces give depth but not quality (no coverage, identity or e-value). Add a generic rule: quality is a set of cheap computed metrics recorded as attributes, placed on a worker activity, with the stated limits of the data."
   }
  ]
 }

@@ -10,12 +10,14 @@ asked with chat). Both are pipelines underneath; this module is the plain view o
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import threading
 import time
 import uuid
 from collections import Counter, deque
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..core import jobs, pipeline as P, provtrace as T
@@ -58,10 +60,92 @@ def _running_jobs(pid: str, js: List[dict], ws: str) -> List[dict]:
     return out[:6]
 
 
+# ------------------------------------------------------------------ published versions of an app: every baseline it ever published
+PUB_CACHE_S = 60.0
+_PUB: Dict[str, tuple] = {}
+
+
+def _family(name: str) -> str:
+    return re.sub(r"-v\d+$", "", name or "")
+
+
+def published_runs(c: Dict[str, Any]) -> List[dict]:
+    """The baseline runs an app published under its name, one per version (name, name-v2, ... name-vN), oldest first, read from
+    <publish_root>/provenance-traces/<name>/<timestamp>/run.json; a version published without baseline traces is not listed.
+    Cached for a minute: the publish root is on a shared file system."""
+    pk = (c.get("stages", {}).get("package") or {}).get("outputs") or {}
+    root, app = pk.get("publish_root"), pk.get("publish_app")
+    if not root or not app:
+        return []
+    fam = _family(app)
+    key = f"{root}|{fam}"
+    hit = _PUB.get(key)
+    if hit and time.time() - hit[0] < PUB_CACHE_S:
+        return hit[1]
+    rx = re.compile(re.escape(fam) + r"(?:-v(\d+))?$")
+    out, seen = [], {}
+    traces_root = Path(root) / "provenance-traces"
+    names = set()
+    for base in (traces_root,):
+        try:
+            names |= {d.name for d in base.iterdir() if d.is_dir() and rx.fullmatch(d.name)}
+        except OSError:
+            pass
+    for name in sorted(names, key=lambda n: int(rx.fullmatch(n).group(1) or 1)):      # oldest first: a re-published run points back to its first
+        ver = int(rx.fullmatch(name).group(1) or 1)
+        runs = []
+        try:
+            stamps = sorted(d for d in (traces_root / name).iterdir() if d.is_dir())
+        except OSError:
+            stamps = []
+        for d in stamps:
+            try:
+                meta = json.loads((d / "run.json").read_text())
+            except (OSError, ValueError):
+                meta = {}
+            if not T.expand(str(d / "raw")):
+                continue
+            r = meta.get("run") or {}
+            kind = r.get("kind") or ("verification" if (d / "verification.json").exists() else "baseline")
+            item = {"name": name, "version": ver, "kind": kind, "ts": d.name, "path": str(d / "raw"), "scale": r.get("scale") or "",
+                    "input": r.get("input") or "", "result": r.get("result") or "", "commit": (meta.get("app") or {}).get("source_commit", "")[:10],
+                    "label": f"v{ver} {kind}"}
+            same = seen.get((kind, d.name))
+            if same:
+                item["same_as"] = f"v{same}"           # one run published again under a newer name
+            else:
+                seen[(kind, d.name)] = ver
+            runs.append(item)
+        best = next((r for r in reversed(runs) if r["kind"] == "baseline"), None)       # one per version: its published baseline traces
+        if best:
+            best["label"] = f"v{ver}"
+            out.append(best)
+    out.sort(key=lambda x: x["version"])
+    _PUB[key] = (time.time(), out)
+    return out
+
+
+def open_published(ws: str, app: str, path: str, chat: str) -> Dict[str, Any]:
+    """The dataset of one published run of ``app``: made on first use, the same one after."""
+    c = P.load(app, ws)
+    run = next((r for r in published_runs(c) if r["path"] and r["path"] == path), None)
+    if not run:
+        raise P.PipelineError(f"{path} is not a published run of {c['name']}")
+    for x in P.list_all("", ws):
+        if x.get("kind") == "analysis" and x.get("parent") == app and (x.get("published") or {}).get("path") == path:
+            return x
+    d = open_dataset(ws, path, f"{run['name']}-{run['kind'][:6]}-{run['ts']}", chat)
+
+    def tie(x):
+        x["parent"], x["published"] = app, {k: run.get(k) for k in ("name", "version", "kind", "ts", "path", "scale", "input", "commit", "label")}
+    P.update(d["id"], tie)
+    return P.load(d["id"], ws)
+
+
 def items(ws: str, busy: Optional[set] = None) -> Dict[str, List[dict]]:
     """apps: run pipelines (the Annotate view), lives: live runs (the Live Run view, each under its app), datasets: analysis
     pipelines; every one of them can be asked in the Query view. campaigns = apps, for older pages."""
-    out = {"apps": [], "lives": [], "datasets": []}
+    out = {"apps": [], "lives": [], "datasets": [], "published": []}
     for c in P.list_all("", ws):
         js = jobs.list_jobs(c["id"], ws)
         cur = next((n for n in P.KINDS.get(c["kind"], c["stages"]) if n in c["stages"] and c["stages"][n]["status"] not in ("passed", "skipped")), None)
@@ -82,13 +166,21 @@ def items(ws: str, busy: Optional[set] = None) -> Dict[str, List[dict]]:
             row.update(published=pk.get("published_package") or "", diff=((gr.get("health") or {}).get("diff") or {}).get("summary"),
                        can_live=c["stages"]["integrate"]["status"] == "passed", live_inputs=c.get("live_inputs"),
                        gaps=[{k: g.get(k) for k in ("id", "kind", "subject", "detail", "status", "cause", "how")} for g in c.get("gaps") or []])
+            row["versions"] = published_runs(c)
+        elif c["kind"] == "analysis" and c.get("parent") and c.get("published"):
+            row.update(published_run=c["published"])
         elif c["kind"] == "live":
             row.update(published=c["stages"]["publish_data"]["outputs"].get("published_live") or "",
                        started=c["stages"]["live_run"].get("started"), command=c.get("command", ""), inputs=c.get("inputs") or {})
-        out[{"run": "apps", "live": "lives"}.get(c["kind"], "datasets")].append(row)
+        out[{"run": "apps", "live": "lives"}.get(c["kind"], "published" if row.get("published_run") else "datasets")].append(row)
     names = {a["id"]: a["name"] for a in out["apps"]}
-    for x in out["lives"]:
+    for x in out["lives"] + out["published"]:
         x["app"] = names.get(x["parent"], x["parent"])
+    opened = {(x["parent"], x["published_run"]["path"]): x["id"] for x in out["published"]}
+    for a in out["apps"]:
+        for r in a.get("versions") or []:
+            if (a["id"], r["path"]) in opened:
+                r["pipeline"] = opened[(a["id"], r["path"])]
     out["campaigns"] = out["apps"]
     return out
 

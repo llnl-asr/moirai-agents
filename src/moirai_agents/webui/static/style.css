@@ -599,3 +599,13 @@ details.xp-more[open]>summary::before{content:'▾ '}
 .xp-t tr.flash td{animation:xpflash 2s ease-out}
 @keyframes xpflash{0%,40%{background:color-mix(in srgb,#f59e0b 35%,transparent)}100%{background:transparent}}
 .xp-note.info{color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,transparent)}
+
+/* consolidation questions: a conflict for the user to settle */
+.cq{border:1px solid var(--bad);border-radius:8px;margin:6px 0;padding:8px;font-size:12.5px;background:var(--panel,transparent)}
+.cq .cqh{font-weight:600;margin-bottom:6px}
+.cq .cql>div{border-left:3px solid var(--line);padding:2px 0 2px 7px;margin:4px 0}.cq .cql .tg{font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--accent)}
+.cq .cqo{margin:7px 0}.cq .cqo label{display:flex;gap:6px;align-items:flex-start;padding:3px 4px;border-radius:6px;cursor:pointer}.cq .cqo label.rec{background:color-mix(in srgb,var(--ok) 12%,transparent)}
+.cq .recm{font-size:10.5px;border:1px solid var(--ok);color:var(--ok);border-radius:8px;padding:0 5px}
+.cq .st{font-size:11px;color:var(--muted)}.cq .cqw{font-size:11.5px;color:var(--muted);margin:4px 0}
+.cq textarea{width:100%;box-sizing:border-box;min-height:38px;font:inherit;font-size:12px;margin:4px 0}.cq .acts{display:flex;gap:8px;align-items:center}
+.wb-targets+.wb-pubs{margin-top:-4px}.wb-tg.pub{border-style:solid;font-size:12px;padding:2px 10px}.wb-tg.off{opacity:.5;cursor:default}
