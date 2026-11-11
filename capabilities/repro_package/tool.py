@@ -766,9 +766,12 @@ def render_run_files(kind, app, ts, s, info, meta):
     return {"README.md": _site("\n".join(L)), "run.json": _site(json.dumps(doc, indent=2)), "graph_summary.json": _site(json.dumps(graph, indent=2))}
 
 
-def publish_traces_core(root, app, run_dir, ts, kind, summary, meta, run_sh=""):
-    """Copy a run's raw traces (+ .dftindex) and write README.md, run.json, run.sh, graph_summary.json into <root>/provenance-traces/<app>/<ts>/ (new dir only).
-    run_sh: the exact launch script; default <run_dir>/run.sh, else <run_dir>/../../work/<scale>/run.sh (the package layout)."""
+def publish_traces_core(root, app, run_dir, ts, kind, summary, meta, run_sh="", indexer=None):
+    """Copy a run's raw traces and write README.md, run.json, run.sh, graph_summary.json into <root>/provenance-traces/<app>/<ts>/ (new dir only), then index the
+    published traces in place (raw/.dftindex, all cores) so queries on the published run start at once.
+    run_sh: the exact launch script; default <run_dir>/run.sh, else <run_dir>/../../work/<scale>/run.sh (the package layout).
+    indexer(raw_dir) -> dict: default index_raw. The run's own .dftindex is not copied: an index is keyed by absolute file path, so a copy would be rebuilt anyway.
+    An index failure does not undo the publish: it is returned as index.error (repro_publish_index builds it later)."""
     _names(app, ts)
     if kind not in TRACE_KINDS:
         raise ValueError(f"kind must be one of {TRACE_KINDS}")
@@ -794,7 +797,7 @@ def publish_traces_core(root, app, run_dir, ts, kind, summary, meta, run_sh=""):
     shutil.rmtree(tmp, ignore_errors=True)
     (tmp / "raw").mkdir(parents=True)
     try:
-        for f in pf + ([raw / ".dftindex"] if (raw / ".dftindex").exists() else []):
+        for f in pf:
             subprocess.run(["cp", "-a", str(f), str(tmp / "raw" / f.name)], check=True, capture_output=True)
         subprocess.run(["cp", "-a", str(rs), str(tmp / "run.sh")], check=True, capture_output=True)
         if kind == "verification" and rec is not None:
@@ -809,7 +812,69 @@ def publish_traces_core(root, app, run_dir, ts, kind, summary, meta, run_sh=""):
     except Exception:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
-    return {"target": str(tgt), "files": sorted(str(p.relative_to(tgt)) for p in tgt.rglob("*") if p.is_file()), "trace_files": info["files"], "trace_bytes": info["bytes"]}
+    try:
+        idx = (indexer or index_raw)(tgt / "raw")       # after the rename: the index is keyed by the final paths
+    except Exception as e:  # noqa: BLE001  the traces are published; the index can be built later
+        idx = {"error": f"{type(e).__name__}: {e}", "fix": "repro_publish_index(publish_root, app, timestamps=<this timestamp>)"}
+    return {"target": str(tgt), "files": sorted(str(p.relative_to(tgt)) for p in tgt.rglob("*") if p.is_file() and ".dftindex" not in p.parts),
+            "trace_files": info["files"], "trace_bytes": info["bytes"], "index": idx}
+
+
+def index_raw(raw):
+    """Build the TraceViewer index of every *.pfw.gz in raw into raw/.dftindex, on all cores (a no-op when it is complete), then give the group the user's bits on it
+    (g=u, no other) so everyone who can read the traces can query them. Raises when no index appears where it was asked for. Returns {index, files, secs}."""
+    import dftracer.utils as U
+    raw = Path(raw)
+    pf = sorted(str(p) for p in raw.glob("*.pfw.gz"))
+    if not pf:
+        raise ValueError(f"no *.pfw.gz in {raw}")
+    try:
+        U.set_log_level("warning")
+    except Exception:  # noqa: BLE001
+        pass
+    t = time.time()
+    U.Indexer(files=pf, index_dir=str(raw), parallelism=0).ensure_indexed()
+    ix = raw / ".dftindex"
+    if not (ix / "CURRENT").is_file():
+        raise RuntimeError(f"the indexer finished but {ix} holds no index (no CURRENT)")
+    _group_like_user(ix)
+    return {"index": str(ix), "files": len(pf), "secs": round(time.time() - t, 1)}
+
+
+def _group_like_user(top):
+    """chmod g=u,o-rwx on top and everything under it (directories keep setgid): the index is written with the builder's umask."""
+    for p in [Path(top), *Path(top).rglob("*")]:
+        try:
+            m = p.lstat().st_mode
+            if stat.S_ISLNK(m):
+                continue
+            u = (m & 0o700) >> 3
+            p.chmod((m & ~0o077 & 0o7777) | u)
+        except OSError:
+            pass
+
+
+def index_published_core(root, app="", stamps=None, indexer=None):
+    """Index every published run folder under <root>/provenance-traces/<app>/ (every app when app is empty; stamps: only these). Returns [{dir, ...index_raw or error}]."""
+    root = Path(root)
+    base = root / "provenance-traces"
+    if not base.is_dir():
+        raise ValueError(f"{base} is not a directory")
+    apps = [app] if app else sorted(d.name for d in base.iterdir() if d.is_dir() and not d.name.startswith("."))
+    out = []
+    for a in apps:
+        _names(a)
+        for t in stamps or []:
+            _names(a, t)
+        runs = [base / a / t for t in stamps] if stamps else sorted(d for d in (base / a).iterdir() if d.is_dir() and TS_RE.match(d.name)) if (base / a).is_dir() else []
+        for d in runs:
+            if not _inside(root, d) or not list((d / "raw").glob("*.pfw.gz")):
+                continue
+            try:
+                out.append({"dir": str(d), **(indexer or index_raw)(d / "raw")})
+            except Exception as e:  # noqa: BLE001  one bad folder does not stop the others
+                out.append({"dir": str(d), "error": f"{type(e).__name__}: {e}"})
+    return out
 
 
 def perm_check_core(paths, group):
@@ -918,6 +983,8 @@ def publish_checks(src_pkg, root, app, group, counts_of):
             count_bad.append(f"{d.name}: run.json {g}, README has {line in readme}, graph tool {got}")
     out.append(("run_folders_complete", bool(runs) and not incomplete, "; ".join(incomplete), "repro_publish_traces"))
     out.append(("readme_counts", bool(runs) and not count_bad, "; ".join(count_bad)[:380], "regenerate: the README/run.json must come from graph tool counts"))
+    unindexed = [d.name for d in runs if not (d / "raw" / ".dftindex" / "CURRENT").is_file()]
+    out.append(("indexed", bool(runs) and not unindexed, f"no raw/.dftindex in {unindexed}", "repro_publish_index(publish_root, app)"))
     vrec, vdetail = False, "no verification folder with verification.json"
     for d in runs:
         if kinds.get(d.name) == "verification" and (d / "verification.json").is_file():
@@ -998,18 +1065,32 @@ def publish_selftest():
         summary = {"activities": 7, "entities": 9, "edges": 21, "relations": 2, "types": [{"type": "sequence", "role": "input", "description": "a sequence"}, {"type": "out", "role": "output", "description": "an output"}],
                    "records": 123, "other_events": {}, "dangling": 0, "by_type": {"sequence": 4, "out": 5}, "by_store": {"parallel_fs": 9}, "relation_kinds": {"contains": 2}}
         meta = {"job_id": "fFAKE", "queue": "pdebug", "seconds": 12.5, "result": "COMPLETED", "scale": "baseline", "env": {"MOIRAI_PC_BLOCKS": "16"}}
-        r = publish_traces_core(root, "demo", run_dir, "20260101_010101", "baseline", summary, meta)
+        seen_idx = []
+
+        def fake_index(raw):
+            seen_idx.append(Path(raw))
+            (Path(raw) / ".dftindex").mkdir()
+            (Path(raw) / ".dftindex" / "CURRENT").write_text("x")
+            return {"index": str(Path(raw) / ".dftindex"), "files": 2, "secs": 0}
+        r = publish_traces_core(root, "demo", run_dir, "20260101_010101", "baseline", summary, meta, indexer=fake_index)
         tdir = Path(r["target"])
         readme = (tdir / "README.md").read_text()
         rj = json.loads((tdir / "run.json").read_text())
         gj = json.loads((tdir / "graph_summary.json").read_text())
         cases["traces_files_copied"] = sorted(p.name for p in (tdir / "raw").glob("*")) == [".dftindex", "p0.pfw.gz", "p1.pfw.gz"] and (tdir / "run.sh").is_file()
+        cases["index_built_in_published_folder"] = seen_idx == [tdir / "raw"] and r["index"]["index"] == str(tdir / "raw" / ".dftindex") and (tdir / "raw" / ".dftindex").is_dir()
+        cases["run_index_not_copied"] = not (tdir / "raw" / ".dftindex").is_file()
+        root2 = td / "root2"
+        root2.mkdir()
+        r2 = publish_traces_core(root2, "demo", run_dir, "20260101_030303", "baseline", summary, meta, indexer=lambda raw: 1 / 0)
+        cases["index_failure_keeps_publish"] = Path(r2["target"]).is_dir() and "ZeroDivisionError" in r2["index"]["error"]
+        cases["index_published_reports_each"] = [x.get("error", "")[:17] for x in index_published_core(root2, "demo", indexer=lambda raw: 1 / 0)] == ["ZeroDivisionError"]
         cases["traces_readme_from_counts"] = "9 entities, 7 activities, 21 edges" in readme and "| sequence | input | 4 | a sequence |" in readme and "fFAKE" in readme and "12.5 s" in readme
         cases["traces_run_json_from_counts"] = rj["captured"]["graph"]["entities"] == 9 and rj["captured"]["trace_files"] == 2 and rj["run"]["kind"] == "baseline" and rj["captured"]["entities_by_store"] == {"parallel_fs": 9}
         cases["traces_graph_summary_keys"] = set(gj) == {"summary", "entity_relations", "types"} and gj["entity_relations"] == {"contains": 2}
         cases["traces_missing_fact_not_invented"] = "not recorded" in readme
         try:
-            publish_traces_core(root, "demo", run_dir, "20260101_010101", "baseline", summary, meta)
+            publish_traces_core(root, "demo", run_dir, "20260101_010101", "baseline", summary, meta, indexer=fake_index)
             cases["traces_refuses_existing"] = False
         except FileExistsError:
             cases["traces_refuses_existing"] = True
@@ -1017,13 +1098,13 @@ def publish_selftest():
         for label, args in (("bad_timestamp", (run_dir, "../../etc", "baseline")), ("bad_kind", (run_dir, "20260101_010102", "other")),
                             ("no_traces", (td / "empty", "20260101_010103", "baseline")), ("verification_needs_record", (run_dir, "20260101_010104", "verification"))):
             try:
-                publish_traces_core(root, "demo", args[0], args[1], args[2], summary, meta)
+                publish_traces_core(root, "demo", args[0], args[1], args[2], summary, meta, indexer=fake_index)
                 cases["traces_refuses_" + label] = False
             except ValueError:
                 cases["traces_refuses_" + label] = True
         hashes = tree_hashes(root / "provenance-repro" / "demo")
         (run_dir.parent.parent / "verification.json").write_text(json.dumps({"in_place": True, "ok": True, "package_hashes": hashes, "kind": "verification"}))
-        publish_traces_core(root, "demo", run_dir, "20260101_020202", "verification", summary, meta)
+        publish_traces_core(root, "demo", run_dir, "20260101_020202", "verification", summary, meta, indexer=fake_index)
         vdir = root / "provenance-traces" / "demo" / "20260101_020202"
         cases["verification_record_copied"] = (vdir / "verification.json").is_file() and "verification.json" in (vdir / "README.md").read_text() and (vdir / "run.sh").is_file()
         shutil.rmtree(root / "provenance-repro" / "bad")
@@ -1055,7 +1136,8 @@ def publish_selftest():
         cases["permissions_check_catches_missing_setgid"] = any("setgid" in x for x in perm_check_core([root / "provenance-repro" / "demo"], fake_group))
         d0.chmod(0o2770)
         after = {n: ok for n, ok, _, _ in publish_checks(src, root, "demo", fake_group, counts_of)}
-        cases["validate_all_pass_on_good_tree"] = all(after.values()) and len(after) >= 8
+        cases["validate_all_pass_on_good_tree"] = all(after.values()) and len(after) >= 9
+        cases["validate_has_indexed"] = after.get("indexed") is True
         (root / "provenance-repro" / "demo" / "README.md").write_text("changed\n")
         changed = {n: ok for n, ok, _, _ in publish_checks(src, root, "demo", fake_group, counts_of)}
         cases["validate_catches_changed_package"] = not changed["package_equals_source"] and not changed["verification_record"]
@@ -1619,6 +1701,7 @@ The number of activities and the entity types must match `inputs/expected.json`;
             a, b = T.read(str(tgt / "raw")).counts(), T.read(lo["traces"]).counts()
             keys = ("entities", "activities", "edges", "relations")
             v.check("same_counts", all(a[k] == b[k] for k in keys), f"published {[a[k] for k in keys]} vs run {[b[k] for k in keys]} ({', '.join(keys)})", "the run was still writing when it was published: publish after it ends")
+            v.check("indexed", (tgt / "raw" / ".dftindex" / "CURRENT").is_file(), f"no index in {tgt / 'raw'}", "repro_publish_index(publish_root, app, timestamps=<its timestamp>)")
         return P.finish_validation(pipeline, v)
 
     @mcp.tool()
@@ -1632,6 +1715,18 @@ The number of activities and the entity types must match `inputs/expected.json`;
         except (ValueError, OSError, subprocess.TimeoutExpired) as e:
             return {"status": "error", "error": f"{type(e).__name__}: {e}"}
         return {"status": "ok" if r["ok"] else "error", **r}
+
+    @mcp.tool()
+    def repro_publish_index(publish_root: str, app: str = "", timestamps: str = "") -> dict:
+        """Build the TraceViewer index (raw/.dftindex, all cores) of published run folders under <publish_root>/provenance-traces/<app>/ so queries on them start at once; app empty:
+        every app; timestamps: a comma list (default every run folder). A complete index is left as it is. repro_publish_traces already indexes what it publishes: use this for runs
+        published before it did, or when it returned index.error. Writes only raw/.dftindex of those folders (group bits = user bits). Returns {status, indexed, failed, runs}."""
+        try:
+            runs = index_published_core(publish_root, app, [t.strip() for t in timestamps.split(",") if t.strip()] or None)
+        except (ValueError, OSError) as e:
+            return {"status": "error", "error": f"{type(e).__name__}: {e}"}
+        bad = [r for r in runs if r.get("error")]
+        return {"status": "ok" if not bad else "error", "indexed": len(runs) - len(bad), "failed": len(bad), "runs": runs}
 
     @mcp.tool()
     def repro_publish_validate(pipeline: str, publish_root: str, app: str = "elmerfold", group: str = "moirai") -> dict:

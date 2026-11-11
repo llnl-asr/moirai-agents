@@ -11,6 +11,7 @@ Node ids: ``t:<entity type>``, ``a:<activity name>``. Edge ids: ``<kind>|<source
 """
 from __future__ import annotations
 
+import os
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
@@ -181,3 +182,181 @@ def diff(exp: Dict[str, Any], run: Dict[str, Any]) -> Dict[str, Any]:
     lists["unexpected_types"] = [n["label"] for n in nodes if n["status"] == "unexpected" and n["kind"] == "type"]
     return {"nodes": nodes, "edges": edges, "summary": summary, **lists,
             "clean": summary["missing"] == 0 and not lists["missing_types"]}
+
+
+# ------------------------------------------------------------------ the same aggregated graph, computed by TraceViewer (no graph in Python)
+def _kind(variable: str) -> str:
+    """args.relations.<kind>.<i> -> <kind>"""
+    parts = str(variable).split(".")
+    return parts[2] if len(parts) > 2 else str(variable)
+
+
+def _n(lf: Any, colname: str) -> int:
+    """Rows of a (lazy) frame with a value in colname."""
+    r = lf.group_by(None, f"count_valid:{colname}:n").collect().to_dicts()
+    return int(r[0]["n"]) if r else 0
+
+
+def _cats(tv: Any, col: Any) -> Dict[str, int]:
+    out: Dict[str, int] = {}
+    for r in tv.filter(col("ph") != 4).group_by("cat").agg(col("name").count()).collect().to_dicts():
+        out[str(r.get("cat"))] = int(next((v for k, v in r.items() if k != "cat"), 0) or 0)
+    return out
+
+
+def tv_partial(args: tuple) -> Dict[str, Any]:
+    """One trace file through TraceViewer (run in a worker process): what tv_runtime merges. Everything that is local to the file is grouped
+    by the engine; what may be shared with other files comes back as keys: entities (id, type, uri name) and entity relations (relation,
+    subject, object) for the parent to dedup, and activity relations to entities this file does not declare, to resolve there."""
+    path, idx = args
+    from . import provtrace as T
+    U = T._tv()
+    col = U.col
+    base = U.TraceViewer([path], idx)
+    rel = sorted(c for c in base.columns if c.startswith("args.relations."))
+    tv = base.phase("any")
+    rows = lambda lf: lf.collect().to_dicts()       # noqa: E731
+    out: Dict[str, Any] = {"types": {}, "cats": _cats(tv, col), "kinds": {}, "acts": {}, "edges": 0, "ents": [], "eg": [], "loose": [], "ers": []}
+    meta_df = tv.filter(col("name").is_in(list(T.PROV_NAMES))).collect()
+    meta = meta_df.lazy()
+    kinds = out["kinds"] = {r["name"]: r["n"] for r in rows(meta.group_by(["name"], "count_valid:name:n"))} if meta_df.height else {}
+    if kinds.get("ET"):
+        for r in rows(meta.filter(col("name") == "ET")):
+            t, role = r.get("args.type"), r.get("args.role", 0)
+            if t and t not in out["types"]:
+                out["types"][t] = T.ROLES[role] if isinstance(role, int) and 0 <= role < len(T.ROLES) else str(role)
+    ents = None
+    if kinds.get("EH"):
+        ents = (meta.filter(col("name") == "EH").select("args.id", "args.type", "args.uri")
+                .with_columns(**{"args.id": col("args.id").cast("string")}).filter(col("args.id").is_not_null()).unique("args.id")
+                .with_columns(an=col("args.uri").extract(r"^([^=]*)=")).select("args.id", "args.type", "an").collect().lazy())
+        out["ents"] = [(r["args.id"], r["args.type"] or "?", r["an"]) for r in rows(ents)]
+    acts_df = tv.filter(col("cat").is_in(list(T.ACTIVITY_CATS)) & (col("ph") == 1)).select("name", "pid", "ts", *rel).collect()
+    if acts_df.height:
+        acts = acts_df.lazy()
+        if _n(acts, "ts") != _n(acts.group_by(["pid", "ts"], "count_valid:ts:n"), "n"):
+            acts = acts.unique(["pid", "ts"]).collect().lazy()          # one activity per (pid, ts); unique() over the wide columns is slow: only when needed
+        out["acts"] = {r["name"]: r["n"] for r in rows(acts.group_by(["name"], "count_valid:ts:n"))}
+        if rel:
+            long_df = (acts.select("name", *rel).with_columns(**{c: col(c).cast("string") for c in rel})
+                       .unpivot(id_vars=["name"], value_vars=rel).filter(col("value").is_not_null()).collect())
+            if long_df.height:
+                long = long_df.lazy()
+                out["edges"] = long_df.height
+                if ents is not None:
+                    out["eg"] = [(r["variable"], r["name"], r["args.type"] or "?", r["an"], r["n"]) for r in
+                                 rows(long.join(ents, left_on="value", right_on="args.id", how="inner")
+                                      .group_by(["variable", "name", "args.type", "an"], "count_valid:value:n", dropna=False))]
+                    loose = long.join(ents, left_on="value", right_on="args.id", how="anti").collect()
+                else:
+                    loose = long_df
+                if loose.height:
+                    out["loose"] = [(r["variable"], r["name"], r["value"], r["n"]) for r in
+                                    rows(loose.lazy().group_by(["variable", "name", "value"], "count_valid:value:n"))]
+    if kinds.get("ER"):
+        ers = (meta.filter(col("name") == "ER").select("args.relation", "args.subject", "args.object")
+               .with_columns(**{"args.subject": col("args.subject").cast("string"), "args.object": col("args.object").cast("string")})
+               .filter(col("args.subject").is_not_null()).unique(["args.relation", "args.subject", "args.object"]))
+        out["ers"] = [(r["args.relation"], r["args.subject"], r["args.object"] or "") for r in rows(ers)]
+    return out
+
+
+def tv_runtime(traces: str, workers: int = 0) -> Dict[str, Any]:
+    """runtime() of the traces and their counts through dftracer-utils' TraceViewer: {nodes, edges, counts}. The index is built on all cores,
+    then each file is read and grouped by the engine in its own process (tv_partial), and the parent merges: entities and entity relations
+    dedup across files by id / key, as one graph would, and an activity relation to an entity declared in another file is resolved there.
+    Equal to runtime(provtrace.read(traces)) with g.counts(), without building the graph in Python (millions of entities for a multi-node run)."""
+    from . import provtrace as T
+    files = T.expand(traces)
+    if not files:
+        return {"nodes": [], "edges": [], "counts": T.Graph().counts()}
+    idx = T.ensure_index(files)
+    n = workers or min(len(files), os.cpu_count() or 4, int(os.environ.get("MOIRAI_TV_WORKERS", "48")))
+    if n < 2 or len(files) < 2:
+        parts = [tv_partial((f, idx)) for f in files]
+    else:
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=n, mp_context=mp.get_context("spawn")) as ex:     # spawn: TraceViewer's threads are running here
+            parts = list(ex.map(tv_partial, [(f, idx) for f in files]))
+
+    types: Dict[str, str] = {}
+    cats: Counter = Counter()
+    kinds: Counter = Counter()
+    ac: Counter = Counter()
+    ent: Dict[str, tuple] = {}
+    edge_n = 0
+    for p in parts:
+        for t, r in p["types"].items():
+            types.setdefault(t, r)
+        cats.update(p["cats"])
+        kinds.update(p["kinds"])
+        ac.update(p["acts"])
+        edge_n += p["edges"]
+        for i, t, a in p["ents"]:
+            if i not in ent:
+                ent[i] = (t, a)
+    tc = Counter(t for t, _ in ent.values())
+    eg: Counter = Counter()
+    dangling: set = set()
+    for p in parts:
+        for v, a, t, an, k in p["eg"]:
+            eg[(v, a, t, an)] += k
+        for v, a, i, k in p["loose"]:
+            if i in ent:
+                eg[(v, a) + ent[i]] += k
+            else:
+                dangling.add(i)
+    rg: Counter = Counter()
+    seen: set = set()
+    for p in parts:
+        for key in p["ers"]:
+            if key in seen:
+                continue
+            seen.add(key)
+            rv, s, o = key
+            for x in (s, o):
+                if x and x not in ent:
+                    dangling.add(x)
+            if s in ent and o in ent:
+                rg[(rv, ent[s][0], ent[o][0], ent[s][1])] += 1
+
+    nodes = {f"t:{t}": {"id": f"t:{t}", "kind": "type", "label": t, "role": types.get(t, ""), "count": k, "attrs": []}
+             for t, k in tc.items() if not captured_type(t)}
+    attrs: Dict[str, set] = {}
+    for (rv, st, ot, san), k in rg.items():
+        if ends(st, ".attribute") and san:
+            attrs.setdefault(ot, set()).add(san)
+    for t, names in attrs.items():
+        if f"t:{t}" in nodes:
+            nodes[f"t:{t}"]["attrs"] = sorted(names)
+    io: Dict[str, Dict[str, set]] = {}
+    ec: Counter = Counter()
+    for (v, a, t, an), k in eg.items():
+        kd = _kind(v)
+        if captured_type(t):
+            if an and ((kd == "used" and ends(t, ".input")) or (kd == "generated" and ends(t, ".output"))):
+                io.setdefault(a, {"inputs": set(), "outputs": set()})["inputs" if kd == "used" else "outputs"].add(an)
+            continue
+        e = _edge(kd, f"t:{t}", f"a:{a}") if kd == "used" else _edge(kd, f"a:{a}", f"t:{t}")
+        ec[e["id"]] += k
+    for (rv, st, ot, san), k in rg.items():
+        if captured_type(st) or captured_type(ot):
+            continue
+        ec[_edge("relation", f"t:{st}", f"t:{ot}", T.ENTITY_RELATIONS.get(rv, str(rv)))["id"]] += k
+    nodes.update({f"a:{a}": {"id": f"a:{a}", "kind": "activity", "label": a, "count": k,
+                             "inputs": sorted((io.get(a) or {}).get("inputs", ())), "outputs": sorted((io.get(a) or {}).get("outputs", ()))}
+                  for a, k in ac.items()})
+    edges = []
+    for eid, k in ec.items():
+        parts_ = eid.split("|")
+        e = _edge(parts_[0], parts_[1], parts_[2], parts_[3] if len(parts_) > 3 else "")
+        for end in (e["source"], e["target"]):
+            nodes.setdefault(end, {"id": end, "kind": "type" if end.startswith("t:") else "activity", "label": end[2:], "count": 0})
+        edges.append({**e, "count": k})
+    other = {k: v for k, v in cats.items() if k not in T.ACTIVITY_CATS}
+    if other.get("dftracer"):
+        other["dftracer"] = max(0, other["dftracer"] - sum(kinds.values()))
+    counts = {"activities": sum(ac.values()), "entities": len(ent), "edges": edge_n, "relations": len(seen), "types": len(types),
+              "records": sum(cats.values()), "other_events": {k: v for k, v in other.items() if v}, "dangling": len(dangling)}
+    return {"nodes": list(nodes.values()), "edges": edges, "counts": counts}

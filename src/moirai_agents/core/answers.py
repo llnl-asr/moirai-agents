@@ -70,6 +70,7 @@ def _drain(r: _Reader) -> bool:
     recs = r.tail.poll()
     if recs:
         r.g.extend(recs)
+    r.g.set_files(r.tail.files)
     return bool(recs)
 
 

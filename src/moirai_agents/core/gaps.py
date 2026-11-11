@@ -22,6 +22,8 @@ STATUSES = ("open", "closed", "fixed_pending_run")
 
 def _app(pid: str) -> Dict[str, Any]:
     c = P.load(pid)
+    if c["kind"] == "analysis" and c.get("parent"):     # a published run opened as a dataset: its gaps are fixed on the app that published it
+        c = P.load(c["parent"])
     if c["kind"] not in ("run", "live"):
         raise P.PipelineError("a dataset has no annotation here to fix: open the gap on the app that produced it")
     return P.origin(c)

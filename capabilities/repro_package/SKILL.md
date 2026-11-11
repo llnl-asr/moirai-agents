@@ -24,16 +24,17 @@ This is the home of the generic package and publish procedure. Workload capabili
 
 ### Publishing (here: publish_root=/p/vast1/moirai, app=elmerfold, group_script=/p/vast1/moirai/chgperm.sh; always arguments, never hardcoded)
 - Order: `repro_build`, `repro_batch_selftest` + `repro_publish_selftest` + `repro_check_selftest`, `repro_publish_plan` (dry run: show it at the gate), `repro_publish_package`, `repro_verify(in_place=<published package>)`, `repro_publish_traces` for `baseline` then `verification`, `repro_publish_permissions`, `repro_publish_validate` (and `repro_validate`, which includes the same checks once a publish was recorded). The copy mode of `repro_verify` (isolation_root) is an optional check before publishing; skip it when the package is verified in place (BioTox: the user asked for one verification only).
-- Layout, as /p/vast1/dftracer-user/moirai: `provenance-repro/<app>/` is the package; `provenance-traces/<app>/<YYYYMMDD_HHMMSS of the job start>/` is one run: `raw/*.pfw.gz` (+ `.dftindex`), `README.md`, `run.json`, `run.sh`, `graph_summary.json`, and for the verification run `verification.json`.
+- Layout, as /p/vast1/dftracer-user/moirai: `provenance-repro/<app>/` is the package; `provenance-traces/<app>/<YYYYMMDD_HHMMSS of the job start>/` is one run: `raw/*.pfw.gz`, `raw/.dftindex` (the TraceViewer index, built in place by the publish), `README.md`, `run.json`, `run.sh`, `graph_summary.json`, and for the verification run `verification.json`.
 - Timestamps are job starts: the baseline's from `flux jobs -o {t_run}` of its batch job id (found in the baseline job log, or pass `baseline_flux_job` / `baseline_timestamp`), the verification run's from its own batch job. Never the time of publishing.
 - Nothing is overwritten: every target is a new directory; an existing one stops the tool.
 - `repro_verify(in_place=...)` runs the published package as it is (`env -i bash -l`, only HOME/USER/TERM/SCALE plus the venv overrides you pass, which the record names); its output goes to the package's own OUTPUT_ROOT. The record `<OUTPUT_ROOT>/verification.json` holds job, scale, seconds, counts vs expected, exit codes and the package's file hashes before and after. Its `ok` means no failures; entity and edge count differences are never failures when the expected types show the run captures inputs or attributes. Do not touch the package after it: the validator compares those hashes with the published files.
 - `repro_publish_traces` takes every count from the trace reader (the graph tools), never typed; a fact it cannot find reads `not recorded`. `run.sh` is the exact launch script copied from the run (it can hold the run's own paths); README, run.json and graph_summary.json have the home replaced by `${HOME}`. For an app whose package keeps no run script (BioTox) pass `run_sh=<the stage's launch script>`.
+- `repro_publish_traces` indexes what it publishes: after the folder gets its final name it builds `raw/.dftindex` on all cores (an index is keyed by absolute file path, so the run's own `.dftindex` is never copied and a published folder is never moved), and gives the group the user's bits on it. Queries on the published run (a dataset opened from it) use that index directly and start at once. An index failure does not undo the publish: the result's `index.error` says so; run `repro_publish_index(publish_root, app, timestamps=<ts>)`. `repro_publish_index` also backfills runs published before this (app empty: every app).
 - `repro_publish_permissions` runs `chgperm.sh --local -q -g moirai <dir>` on the published trees only, after the user agreed. NEVER run chgperm.sh by hand or on anything else; the tool refuses a script or folder outside publish_root. Afterwards it checks group, setgid directories, g=u, no other bits. Every published folder gets it, including the verification traces folder when it is published later.
 
 ## Publish a live run's data (the `publish_data` stage of a live pipeline)
 - After the live run ended and `moirai_validate(pipeline, 'live_run')` passed: `repro_publish_traces(pipeline=<live pipeline>)`. It publishes into `<publish_root>/provenance-traces/<app>/<timestamp>/` with publish_root and app from the parent's `repro_publish_package`; give them when the parent never published.
-- Then `repro_publish_data_validate`, then the gate. Never publish while the run is still writing (the counts check fails).
+- Then `repro_publish_data_validate` (it also requires `raw/.dftindex`), then the gate. Never publish while the run is still writing (the counts check fails).
 
 ## Constraints
 - No username, home path, session path or job id in any script. Use `${USER}` and `${HOME}` in `config.ini`.
@@ -63,7 +64,7 @@ This is the home of the generic package and publish procedure. Workload capabili
 - A shared group directory: the publish tools create the parents; chgperm sets the final bits.
 
 ## Corrector
-Predictors `repro_build`, `repro_verify`, `repro_publish_plan`, `repro_publish_package`, `repro_publish_traces`, `repro_publish_permissions`; validators `repro_validate`, `repro_batch_selftest`, `repro_publish_selftest`, `repro_check_selftest`, `repro_publish_validate`. A failed verdict comes here: fix the original tool or its input, then predict and validate again. The same failure twice stops the loop: change approach, or ask.
+Predictors `repro_build`, `repro_verify`, `repro_publish_plan`, `repro_publish_package`, `repro_publish_traces`, `repro_publish_index`, `repro_publish_permissions`; validators `repro_validate`, `repro_batch_selftest`, `repro_publish_selftest`, `repro_check_selftest`, `repro_publish_validate`. A failed verdict comes here: fix the original tool or its input, then predict and validate again. The same failure twice stops the loop: change approach, or ask.
 
 | Failed check | Correct |
 |---|---|
@@ -84,6 +85,7 @@ Predictors `repro_build`, `repro_verify`, `repro_publish_plan`, `repro_publish_p
 | `verification_record` | package hashes differ from the record (the package changed after the verified run) or the run failed: `repro_verify(in_place)` again |
 | `readme_counts` | regenerate the run folder (new target) from the graph tools |
 | `permissions` | the exceptions name each path; rerun `repro_publish_permissions`; if it persists, the script or the group is wrong (ask) |
+| `indexed` | a run folder has no `raw/.dftindex`: `repro_publish_index(publish_root, app, timestamps=<ts>)`; if it fails again, the error names the file the indexer could not read |
 
 ## Self-heal
 - `moirai-service` fails only in the isolated run: the library path is set in `03_build.sh` (batch: `moirai_env.sh`) and `04_run.sh`; compare with the session's `moirai_env.sh`.

@@ -541,19 +541,26 @@ def reject(pid: str, note: str = "", by: str = "") -> dict:
     return {"status": "ok", "id": pid, "rejected": True}
 
 
-def refine(pid: str, skill_md: str = "", tool_code: str = "", note: str = "", by: str = "") -> dict:
-    """Replace a pending proposal with an edit of it, validated like any proposal. Refused: the old one stays pending. Returns the new proposal's id."""
+def refine(pid: str, skill_md: str = "", tool_code: str = "", note: str = "", by: str = "", on_current: bool = False) -> dict:
+    """Replace a pending proposal with an edit of it, validated like any proposal. Refused: the old one stays pending. Returns the new proposal's id.
+    on_current: the edit was redone on the capability as it is now (an out-of-date proposal): the files it leaves out come from the current
+    version and it is an edit of that version, so it is no longer out of date."""
     p = _proposals().get(pid)
     if not p:
         return _err(f"unknown proposal {pid}")
     if p["status"] != "pending":
         return _err(f"proposal {pid} is already {p['status']}")
-    r = propose(p["name"], tool_code or p["code"], skill_md or p["skill"], p["agent"], p["checks"], p["description"], p["why"], p.get("stages"), p["layer"], p["kind"],
-                p.get("proposed_by", ""), p.get("pvc"))
+    ex = all_caps().get(p["name"]) if on_current else None
+    cur = _current(ex[1]) if ex else {}
+    if on_current and not ex:
+        return _err(f"{p['name']} is not live: there is no current version to redo it on")
+    keep = lambda k: cur[k] if ex and cur.get(k) is not None else p[k]          # noqa: E731
+    r = propose(p["name"], tool_code or keep("code"), skill_md or keep("skill"), keep("agent"), keep("checks"),
+                (ex[2].get("description") if ex else None) or p["description"], p["why"], p.get("stages"), p["layer"], p["kind"], p.get("proposed_by", ""), p.get("pvc"))
     if r["status"] == "ok":
         _append({"id": pid, "status": "refined", "refined_into": r["id"], "ts": time.time()})
-        _append({"id": r["id"], "base": p.get("base"),           # still an edit of what the first proposal started from
-                 "revisions": p.get("revisions", []) + [{"by": by or "agent", "note": note, "ts": time.time()}]})
+        _append({"id": r["id"], **({} if ex else {"base": p.get("base")}),    # an edit of the first proposal's base, unless redone on the current version
+                 "revisions": p.get("revisions", []) + [{"by": by or "agent", "note": note + (f" (redone on v{ex[2].get('version')})" if ex else ""), "ts": time.time()}]})
     return r
 
 
@@ -667,7 +674,23 @@ def list_capabilities() -> dict:
                        "error": (_State.loaded.get(n) or {}).get("error"),
                        "lessons": lessons.read_text().count("\n- ") if lessons.exists() else 0})
     keys = ("id", "kind", "name", "layer", "description", "why", "tools", "review", "warnings", "proposed_by", "ts", "diff", "skill", "code", "revisions")
-    pend = [{k: p.get(k) for k in keys} for p in _proposals().values() if p.get("status") == "pending"]
+    caps = all_caps()
+    pend = []
+    for p in _proposals().values():
+        if p.get("status") != "pending":
+            continue
+        row = {k: p.get(k) for k in keys}
+        ex = caps.get(p.get("name"))
+        if p.get("kind") == "update" and ex:                     # out of date: the capability changed in a file this proposal changes too
+            try:
+                conflicts = _rebase(p, ex[1])[1]
+            except (KeyError, OSError):
+                conflicts = []
+            if conflicts:
+                row["stale"] = {"files": conflicts, "version": ex[2].get("version"),
+                                "why": f"{p['name']} is at v{ex[2].get('version')} now, and its {', '.join(conflicts)} changed after this was proposed: "
+                                       "approving would undo the newer version."}
+        pend.append(row)
     return {"active": active, "pending": pend}
 
 

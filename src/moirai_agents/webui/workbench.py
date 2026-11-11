@@ -310,6 +310,8 @@ class _Live:
 
     def _poll_once(self) -> bool:
         recs = self.tail.poll()                  # the slow part (reading files): outside the lock
+        with self.lock:
+            self.g.set_files(self.tail.files)
         if not recs:
             return False
         with self.lock:
@@ -341,6 +343,16 @@ def live(ws: str, pid: str) -> Dict[str, Any]:
     t = _traces(c)
     if not t:
         return {"id": pid, "status": "no traces yet", "counts": {}, "feed": []}
+    js = jobs.list_jobs(pid, ws)
+    state = _state(c, js)
+    if state != "running":                    # finished: the counts come from TraceViewer (cached), no reader keeps the graph in Python
+        agg = _tv_aggregate(c, ws)
+        n = agg["counts"] if agg else {}
+        by_type = Counter({x["label"]: x.get("count", 0) for x in (agg or {}).get("nodes", []) if x.get("kind") == "type"})
+        return {"id": pid, "name": c["name"], "state": state, "counts": n, "rate": {"entities_per_h": None, "activities_per_h": None},
+                "by_type": dict(by_type.most_common(12)), "feed": [], "quiet_s": None, "stalled": False,
+                "jobs": [{k: j.get(k) for k in ("id", "name", "status", "elapsed", "rc")} for j in js][:12],
+                "dash_run": P.dash_run(c, ws), "live": bool((c.get("dashboard") or {}).get("live")), "reading": agg is None}
     lv = _reader(pid, t)
     now = lv.seen = time.time()
     with lv.lock:
@@ -352,8 +364,6 @@ def live(ws: str, pid: str) -> Dict[str, Any]:
                 "activities_per_h": round((n["activities"] - old[2]) / hrs, 1) if now - old[0] > 60 else None}
         by_type = Counter(e["type"] for e in lv.g.entities.values())
         feed = list(lv.feed)[:20]
-    js = jobs.list_jobs(pid, ws)
-    state = _state(c, js)
     quiet = now - lv.last_new if lv.last_new else None
     return {"id": pid, "name": c["name"], "state": state, "counts": n, "rate": rate, "by_type": dict(by_type.most_common(12)),
             "feed": feed, "quiet_s": round(quiet, 1) if quiet is not None else None,
@@ -421,16 +431,50 @@ def aggregate(ws: str, pid: str) -> Dict[str, Any]:
             return {"id": pid, "mode": "none", "nodes": [], "edges": []}
         return {"id": pid, "mode": "expected", "nodes": [{**n, "status": "expected"} for n in exp["nodes"]],
                 "edges": [{**e, "status": "conditional" if e.get("conditional") else "expected"} for e in exp["edges"]]}
-    src = _source(c)
-    if src is None:
+    got = _tv_aggregate(c, ws)
+    if got is None:
         return {"id": pid, "reading": True, **({"mode": "expected", "nodes": exp["nodes"], "edges": exp["edges"]} if exp else {})}
-    lock, g = src
-    with lock:
-        run = G.runtime(g)
-        n = g.counts()
+    n, run = got["counts"], {"nodes": got["nodes"], "edges": got["edges"]}
+    extra = {"updating": True} if got.get("stale") else {}
     if exp is None:
-        return {"id": pid, "mode": "runtime", "counts": n, **run}
-    return {"id": pid, "mode": "diff", "counts": n, **G.diff(exp, run)}
+        return {"id": pid, "mode": "runtime", "counts": n, **run, **extra}
+    return {"id": pid, "mode": "diff", "counts": n, **G.diff(exp, run), **extra}
+
+
+_AGG_RUN: Dict[str, threading.Thread] = {}
+
+
+def _tv_aggregate(c: Dict[str, Any], ws: str) -> Optional[Dict[str, Any]]:
+    """The aggregated graph of a pipeline's traces, computed by TraceViewer (aggregate.tv_runtime) and kept in <pipeline>/aggregate.json with
+    the size and mtime of every trace file: the same files return it at once (also after a restart); changed files (a run still writing)
+    return the last one marked stale while a background thread computes the new one. None until the first is ready."""
+    from ..core import aggregate as G, answers as A
+    traces = _traces(c) or A.traces_of(c)
+    files = T.expand(traces)
+    key = [[f, *(T._stamp(f) or (0, 0))] for f in files]
+    path = P.pdir(c["id"], ws) / "aggregate.json"
+    try:
+        kept = json.loads(path.read_text())
+    except (OSError, ValueError):
+        kept = None
+    if kept and kept.get("key") == key:
+        return kept["run"]
+    t = _AGG_RUN.get(c["id"])
+    if t is None or not t.is_alive():
+        def work():
+            try:
+                run = G.tv_runtime(traces)
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text(json.dumps({"key": key, "run": run, "ts": round(time.time(), 1)}))
+                os.replace(tmp, path)
+            except Exception as e:  # noqa: BLE001  shown as still reading; the next poll tries again
+                print(f"aggregate {c['id']} failed: {type(e).__name__}: {e}", flush=True)
+        t = _AGG_RUN[c["id"]] = threading.Thread(target=work, daemon=True, name="tv-aggregate")
+        t.start()
+        t.join(timeout=2.0)
+        if not t.is_alive():
+            return _tv_aggregate(c, ws) if path.exists() and json.loads(path.read_text()).get("key") == key else None
+    return {**kept["run"], "stale": True} if kept else None
 
 
 def graph(ws: str, pid: str, since: str = "") -> Dict[str, Any]:
@@ -438,6 +482,15 @@ def graph(ws: str, pid: str, since: str = "") -> Dict[str, Any]:
     A campaign being watched uses its live reader; otherwise the graph is read in the background (``reading`` until done).
     ``since``: the signature the page already has; the same one returns {same: true}, so a poll costs nothing."""
     c = P.load(pid, ws)
+    agg = _tv_aggregate(c, ws)            # TraceViewer counts (cached): a graph too big to draw is never built in Python
+    if agg is None:
+        return {"id": pid, "reading": True}
+    n = agg["counts"]
+    if n["entities"] + n["activities"] > GRAPH_CAP:
+        sig = f"{n['entities']}:{n['activities']}:{n['edges']}:{n['relations']}"
+        if since and since == sig:
+            return {"id": pid, "same": True, "sig": sig}
+        return {"id": pid, "sig": sig, "counts": n, "truncated": True}
     src = _source(c)
     if src is None:
         return {"id": pid, "reading": True}

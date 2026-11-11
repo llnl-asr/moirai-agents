@@ -232,3 +232,16 @@ def test_approving_an_old_code_proposal_over_newer_code_is_refused():
     a = S.apply(r["id"], True)
     assert a["status"] == "error" and a["conflicts"] == ["tool.py"]
     assert "# newer" in (S.all_caps()["demo_cap"][1] / "tool.py").read_text()
+
+
+def test_an_out_of_date_proposal_is_shown_as_such_and_redone_on_the_current_version():
+    S.apply(new()["id"], True)
+    r = S.revise("demo_cap", tool_code=TOOL.replace("x + 1", "1 + x"), note="reorder")
+    _bump_code(NEWER)
+    p = next(x for x in S.list_capabilities()["pending"] if x["id"] == r["id"])
+    assert p["stale"]["files"] == ["tool.py"] and "undo the newer version" in p["stale"]["why"]
+    redo = S.refine(r["id"], tool_code=NEWER.replace("x + 1", "1 + x"), note="redone on the newer code", on_current=True)
+    assert redo["status"] == "ok"
+    assert "stale" not in next(x for x in S.list_capabilities()["pending"] if x["id"] == redo["id"])
+    a = S.apply(redo["id"], True)
+    assert a["status"] == "ok" and "# newer" in (S.all_caps()["demo_cap"][1] / "tool.py").read_text() and "1 + x" in (S.all_caps()["demo_cap"][1] / "tool.py").read_text()

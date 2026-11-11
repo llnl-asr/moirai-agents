@@ -75,6 +75,13 @@ class Viewer:
         self.U, self.files, self.idx = U, T.expand(traces), index_dir
         if not self.files:
             raise PlanError(f"no trace file under {traces}")
+        # Index every file up front, on all cores: left to the queries, each file's index is built
+        # one after another on first touch (a 31-file, 2.8 GB live run took many minutes that way).
+        # A no-op when the index is already there.
+        try:
+            U.Indexer(files=list(self.files), index_dir=index_dir, parallelism=0).ensure_indexed()
+        except Exception:  # noqa: BLE001  the queries still build what they need, file by file
+            pass
         self.queries: List[Dict[str, Any]] = []
         self.cols: Dict[str, List[str]] = {}
 
@@ -695,6 +702,15 @@ def _graph(o, cat, ctx, cap: int = 150) -> Dict[str, Any]:
 
 
 def index_dir_of(pid: str) -> str:
+    """The TraceViewer index of the pipeline's traces: the one provtrace uses (<trace dir>/.dftindex, or its per-user cache when the trace dir is
+    read-only), so the queries, the aggregated view and the graph tools share one index. A pipeline without traces: its own tv-index."""
+    from . import answers as A
+    try:
+        files = T.expand(A.traces_of(P.load(pid)))
+    except (P.PipelineError, KeyError, OSError):
+        files = []
+    if files:
+        return T.index_dir(files)
     d = P.pdir(pid) / "tv-index"
     d.mkdir(parents=True, exist_ok=True)
     return str(d)
