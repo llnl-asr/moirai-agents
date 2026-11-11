@@ -143,6 +143,172 @@
   }
  },
  {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "guard_scale_parsed=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "guard_mismatch_refused=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "guard_dry_run_writes_nothing=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "guard_match_ok=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "guard_scale_vs_stage_refused=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "guard_log_dir_mismatch_refused=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "guard_retarget_rewrites=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "guard_old_hosts_moved_aside=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "guard_pipeline_wrapper_dir=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "adopt_links_new_only=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "adopt_stale_moved_aside=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "adopt_hosts_and_service_log=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "adopt_idempotent=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "adopt_foreign_link_moved=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "archive_raw_empties=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "follow_command_running=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "follow_command_done_from_flux=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "follow_command_flux_failure_wins=ok"
+  }
+ },
+ {
+  "tool": "moirai_wrapper_selftest",
+  "args": {},
+  "expect": {
+   "contains": "follow_command_runner_done_flux_queued=ok"
+  }
+ },
+ {
+  "tool": "moirai_stage_guard",
+  "args": {
+   "stage": "live_run",
+   "command": "SCALE=smoke bash run.sh"
+  },
+  "expect": {
+   "contains": "runs scale baseline/live/live_run"
+  }
+ },
+ {
+  "tool": "moirai_stage_guard",
+  "args": {
+   "stage": "baseline",
+   "command": "echo hi"
+  },
+  "expect": {
+   "json": {
+    "ok": true,
+    "wrapper": ""
+   }
+  }
+ },
+ {
+  "tool": "moirai_stage_guard",
+  "args": {
+   "stage": "query",
+   "command": "x"
+  },
+  "expect": {
+   "contains": "stage must be one of"
+  }
+ },
+ {
   "tool": "moirai_batch_render",
   "args": {
    "original": "/src/monomer-structure-prediction/submit_smsp.sh",

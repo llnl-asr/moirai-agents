@@ -3,7 +3,10 @@ Two shapes: a plain command (one launcher), or a generated `flux batch` run.sh (
 per-chunk submit wrapper (--submit-script) that starts moirai-service inside the job's own shell. The wrapper is written beforehand by moirai_wrapper_write.
 Batch mode submits the flux batch DETACHED (own session, nohup, clean environment, no cancel on any signal) and records the flux job id; state and the
 post-run evaluation come from flux and run.out (moirai_run_status / moirai_validate), never from a process of the tool server. Only moirai_run_stop cancels.
-A third entry: a flux batch submitted by hand and already finished (BioTox) is attached with moirai_run_attach so that moirai_validate can judge it."""
+A third entry: a flux batch submitted by hand and already finished (BioTox) is attached with moirai_run_attach so that moirai_validate can judge it.
+Stage guard (this version): a published package wrapper bakes its own STAGE= dir (traces/<SCALE>); before a command-mode run the wrapper's STAGE, its
+MOIRAI_LOG_FILE dir and the SCALE= tag of the command must agree with the stage, and after / during the run the traces the wrapper wrote are linked into the
+stage's own raw dir (stale files moved aside) so that validate and the dashboard see them."""
 import glob
 import hashlib
 import inspect
@@ -37,6 +40,11 @@ TRACE_HOST_RE = re.compile(r"^prov[_-](?P<host>.+?)(?:-spill)?\.pfw(?:\.gz)?$")
 BATCH_SOURCE = "flux-batch"
 FLUX_QUEUED = ("NEW", "DEPEND", "PRIORITY", "SCHED")
 OUTPUT_SCAN_BYTES = 50 * 1024 * 1024      # the tail of run.out that the post-run evaluation reads
+SCALE_RE = re.compile(r"(?:^|[\s;&|(])(?:export\s+)?SCALE=[\"']?([A-Za-z0-9_.-]+)")
+STAGE_TAGS = {"moirai_smoke": ("smoke",), "baseline": ("baseline",), "live_run": ("baseline", "live", "live_run")}   # SCALE values each stage may run
+STALE_SLACK_S = 5.0                       # a trace file older than the job start by more than this belongs to an earlier attempt
+LOG_ID_PREFIXED_RE = re.compile(r"^batch job:\s*(f[A-Za-z0-9]{3,31})\s*$", re.M)
+LOG_ID_BARE_RE = re.compile(r"^(f(?=[A-Za-z0-9]*\d)[A-Za-z0-9]{3,31})\s*$", re.M)
 
 
 def _script(env, pid, stage, log, data_dir, command, launcher, nodes):
@@ -278,6 +286,321 @@ def batch_output_path(run_sh: str) -> str:
     """Pure: the path in run.sh's `#flux: --output <path>` header line ('' when there is none)."""
     m = re.search(r"^#flux:\s*--output(?:=|\s+)(\S+)", run_sh or "", re.M)
     return m.group(1).strip("'\"") if m else ""
+
+
+# ---------------------------------------------------------------- stage guard: wrapper STAGE / MOIRAI_LOG_FILE / SCALE tag agree with the stage; traces land in the stage
+def _unq(s: str) -> str:
+    """Pure: the first shell word of `s` (quotes removed, a trailing comment dropped); the text stripped of quotes when it cannot be parsed."""
+    try:
+        t = shlex.split(s, comments=True)
+        return t[0] if t else ""
+    except ValueError:
+        return s.strip().strip("'\"")
+
+
+def parse_scale(command: str) -> str:
+    """Pure: the last `SCALE=<tag>` assignment in a command line ('' when none; NOSCALE=... is not SCALE)."""
+    m = SCALE_RE.findall(command or "")
+    return m[-1] if m else ""
+
+
+def wrapper_stage_info(text: str) -> dict:
+    """Pure: what a submit wrapper says about where it writes. Reads the first `STAGE=<dir>` line and the first `export MOIRAI_LOG_FILE=<file>` line ($STAGE and
+    ${STAGE} expanded). Returns {stage_dir, log_file, log_dir, log_stage_dir, unresolved}: log_stage_dir is the dir above `raw` in log_dir (the stage dir the log
+    file implies); stage_dir falls back to it when the wrapper has no STAGE= line (the pipeline's own rendered wrapper); both '' when a value has a $ left."""
+    stage, log = "", ""
+    for line in (text or "").splitlines():
+        s = line.strip()
+        m = re.match(r"^(?:export\s+)?STAGE=(.*)$", s)
+        if m and not stage:
+            stage = _unq(m.group(1))
+        m = re.match(r"^export\s+MOIRAI_LOG_FILE=(.*)$", s)
+        if m and not log:
+            log = _unq(m.group(1))
+    log = log.replace("${STAGE}", stage).replace("$STAGE", stage)
+    unresolved = ("$" in stage) or ("$" in log)
+    stage = "" if "$" in stage else stage.rstrip("/")
+    log = "" if "$" in log else log
+    log_dir = os.path.dirname(log) if log else ""
+    log_stage = os.path.dirname(log_dir) if os.path.basename(log_dir) == "raw" else log_dir
+    return {"stage_dir": stage or log_stage, "log_file": log, "log_dir": log_dir, "log_stage_dir": log_stage, "unresolved": unresolved}
+
+
+def find_wrapper(command: str, explicit: str = "") -> str:
+    """Read-only: the submit wrapper a command line uses. `explicit` (a file) wins. Else absolute paths in the command (also NAME=/abs/path values): one named
+    submit_moirai.sh that exists, else the first submit_moirai.sh found in the directory of a path or its 4 parents (a `cd <package>` or <package>/scripts/04_run.sh).
+    '' when none."""
+    if explicit:
+        p = os.path.expanduser(explicit)
+        return p if os.path.isfile(p) else ""
+    try:
+        toks = shlex.split(command or "")
+    except ValueError:
+        toks = (command or "").split()
+    cands = []
+    for t in toks:
+        v = t.split("=", 1)[1] if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t) else t
+        v = os.path.expanduser(v.strip("'\";"))
+        if v.startswith("/"):
+            cands.append(v)
+    for v in cands:
+        if os.path.basename(v) == WRAPPER_NAME and os.path.isfile(v):
+            return v
+    for v in cands:
+        d = v if os.path.isdir(v) else os.path.dirname(v)
+        for _ in range(4):
+            if not d or d == "/":
+                break
+            w = os.path.join(d, WRAPPER_NAME)
+            if os.path.isfile(w):
+                return w
+            d = os.path.dirname(d)
+    return ""
+
+
+def check_stage_agreement(command: str, stage: str, wrapper_text: str = "", expected_stage_dir: str = "") -> dict:
+    """Pure: do the wrapper's STAGE= dir, its MOIRAI_LOG_FILE dir and the SCALE= tag of `command` agree with `stage`? Problems: the SCALE is not one this stage runs
+    (STAGE_TAGS); the wrapper's STAGE and the dir implied by its MOIRAI_LOG_FILE differ; the wrapper's stage dir ends in a tag that is neither the SCALE nor the
+    stage's own name (the package wrapper renders STAGE=<root>/traces/<scale> at build time: a baseline run with a smoke wrapper writes to traces/smoke; the
+    pipeline's own wrapper is <work>/traces/<stage>); the stage dir is not `expected_stage_dir` (the pipeline's own wrapper).
+    Returns {ok, problems, warnings, scale, tag, wrapper_stage_dir, log_dir, retargetable, fix}."""
+    scale = parse_scale(command)
+    allowed = STAGE_TAGS.get(stage, ())
+    problems, warnings, retargetable = [], [], False
+    info = wrapper_stage_info(wrapper_text) if wrapper_text else {"stage_dir": "", "log_dir": "", "log_stage_dir": "", "unresolved": False}
+    sd, tag = info["stage_dir"], os.path.basename(info["stage_dir"]) if info["stage_dir"] else ""
+    fix = ""
+    scale_ok = (not scale) or scale in allowed
+    if not scale_ok:
+        problems.append(f"the command says SCALE={scale} but stage {stage} runs scale {'/'.join(allowed)}: the traces would be tagged and stored as {scale}; "
+                        f"start the stage with the matching SCALE or run the {scale} stage instead")
+    if wrapper_text:
+        if not sd:
+            warnings.append("the wrapper has no STAGE= line and no resolvable MOIRAI_LOG_FILE: where it writes cannot be checked" + (" (a value holds an unresolved $)" if info["unresolved"] else ""))
+        else:
+            if info["log_stage_dir"] and info["log_stage_dir"].rstrip("/") != sd:
+                problems.append(f"the wrapper's STAGE={sd} and its MOIRAI_LOG_FILE dir {info['log_dir']} disagree: its traces go to {info['log_stage_dir']}, its hosts.txt and "
+                                f"service logs to {sd}; re-render the wrapper (03_build.sh)")
+            if scale and scale_ok and tag != scale and tag != stage:
+                problems.append(f"the wrapper writes to STAGE={sd} (tag {tag}) but the command says SCALE={scale}: the run would put its prov files, hosts.txt and service logs "
+                                f"in {tag}/ and the stage's raw dir would stay empty; re-render the wrapper for this scale (SCALE={scale} bash <package>/scripts/03_build.sh) or "
+                                f"call again with retarget_wrapper=true (rewrites only the STAGE= line, keeps a backup)")
+                retargetable = True
+                fix = f"SCALE={scale} bash <package>/scripts/03_build.sh, or retarget_wrapper=true"
+            if expected_stage_dir and os.path.normpath(sd) != os.path.normpath(expected_stage_dir):
+                problems.append(f"the wrapper writes to {sd} but this stage's own dir is {expected_stage_dir}: rewrite the wrapper (moirai_wrapper_write)")
+                fix = "moirai_wrapper_write(pipeline, stage)"
+    elif scale:
+        warnings.append("no wrapper found in the command: where the traces land is checked after the run (stage traces dir vs the real dir)")
+    if not fix and problems:
+        fix = "start the stage with the SCALE it runs" if not scale_ok else "re-render the wrapper"
+    return {"ok": not problems, "problems": problems, "warnings": warnings, "scale": scale, "tag": tag, "wrapper_stage_dir": sd, "log_dir": info["log_dir"],
+            "retargetable": retargetable and not any("MOIRAI_LOG_FILE" in p for p in problems), "fix": fix}
+
+
+def retarget_wrapper(path: str, tag: str) -> dict:
+    """Rewrite ONLY the first `STAGE=<dir>` line of the package wrapper at `path` so that its last path component is `tag` (traces/smoke -> traces/baseline), keep
+    the mode, save the old file as <path>.bak-<epoch>, and create <new stage>/raw. A wrapper without a STAGE= line is refused. Returns {path, backup, old, new}.
+    Raises P.PipelineError."""
+    p = Path(path)
+    try:
+        text = p.read_text()
+    except OSError as e:
+        raise P.PipelineError(f"cannot read the wrapper {path}: {e}")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", tag or ""):
+        raise P.PipelineError(f"{tag!r} is not a usable stage tag")
+    m = re.search(r"^((?:export\s+)?STAGE=)(.*)$", text, re.M)
+    if not m:
+        raise P.PipelineError(f"{path} has no STAGE= line: cannot retarget it; re-render it with the package build (03_build.sh)")
+    old = _unq(m.group(2)).rstrip("/")
+    if not old or "$" in old:
+        raise P.PipelineError(f"{path}: STAGE={m.group(2)} is not a plain path: re-render it with the package build (03_build.sh)")
+    new = os.path.join(os.path.dirname(old), tag)
+    backup = f"{path}.bak-{int(time.time())}"
+    shutil.copy2(path, backup)
+    mode = p.stat().st_mode & 0o777
+    p.write_text(text[:m.start()] + m.group(1) + shlex.quote(new) + text[m.end():])
+    p.chmod(mode)
+    Path(new, "raw").mkdir(parents=True, exist_ok=True)
+    return {"path": str(p), "backup": backup, "old": old, "new": new}
+
+
+def stage_guard(stage: str, command: str, wrapper_path: str = "", retarget: bool = False, expected_stage_dir: str = "", wrapper_text=None) -> dict:
+    """The check before a run starts: find the wrapper the command uses (find_wrapper, or `wrapper_path`), read it and run check_stage_agreement. With
+    `retarget` and a tag mismatch as the only fault, rewrite the wrapper's STAGE= line (retarget_wrapper) and check again. Reads files; writes only when it
+    retargets. `wrapper_text` (tests) replaces reading a file. Returns check_stage_agreement's dict plus {wrapper, retargeted, retarget: {...}|None}."""
+    if stage not in STAGES:
+        raise P.PipelineError(f"stage must be one of {STAGES}")
+    wp, text = "", wrapper_text
+    if text is None:
+        wp = find_wrapper(command, wrapper_path)
+        if wrapper_path and not wp:
+            raise P.PipelineError(f"wrapper_path {wrapper_path} is not a file")
+        text = ""
+        if wp:
+            try:
+                text = Path(wp).read_text()
+            except OSError as e:
+                raise P.PipelineError(f"cannot read the wrapper {wp}: {e}")
+    g = check_stage_agreement(command, stage, text, expected_stage_dir)
+    g.update(wrapper=wp, retargeted=False, retarget=None)
+    if not g["ok"] and retarget and g["retargetable"] and wp and g["scale"]:
+        g["retarget"] = retarget_wrapper(wp, g["scale"])
+        g2 = check_stage_agreement(command, stage, Path(wp).read_text(), expected_stage_dir)
+        g2.update(wrapper=wp, retargeted=True, retarget=g["retarget"])
+        return g2
+    return g
+
+
+def _move_aside(root: Path, files, tag: str) -> str:
+    """Move `files` (paths below `root`, symlinks too) to <root.parent>/stale_<tag>_<epoch>/<relative path>; returns that dir ('' when nothing moved)."""
+    files = list(files)
+    if not files:
+        return ""
+    dest = root.parent / f"stale_{tag}_{int(time.time())}"
+    n = 0
+    while dest.exists():
+        n += 1
+        dest = root.parent / f"stale_{tag}_{int(time.time())}_{n}"
+    for f in files:
+        rel = f.relative_to(root)
+        (dest / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(f), str(dest / rel))
+    return str(dest)
+
+
+def archive_raw(raw_dir: str) -> str:
+    """Before a new run: move every file (and link) in the stage's raw dir to <stage dir>/stale_raw_<epoch>/ so that no file of an earlier attempt stays in it.
+    Returns the stale dir ('' when the raw dir was empty or missing)."""
+    t = Path(raw_dir)
+    if t.is_symlink():
+        t.unlink()
+        t.mkdir(parents=True, exist_ok=True)
+        return ""
+    if not t.is_dir():
+        return ""
+    return _move_aside(t, [f for f in sorted(t.rglob("*")) if f.is_symlink() or not f.is_dir()], "raw")
+
+
+def archive_hosts(stage_dir: str) -> str:
+    """Before a new run: move <stage_dir>/hosts.txt (appended to by every wrapper, so it mixes attempts) to hosts.txt.stale-<epoch>. Returns the new path ('' none)."""
+    h = Path(stage_dir) / "hosts.txt"
+    if not h.is_file():
+        return ""
+    new = Path(f"{h}.stale-{int(time.time())}")
+    h.rename(new)
+    return str(new)
+
+
+def adopt_files(real_stage: str, traces: str, started: float = 0.0) -> dict:
+    """Make the traces the wrapper really wrote visible in the stage's own raw dir `traces`. The real dir is <real_stage>/raw. Files there whose mtime is at or after
+    `started` minus STALE_SLACK_S (0: no age filter) get a symlink <traces>/<name>; older ones are counted as skipped_old and not linked (an earlier attempt). Files
+    already in `traces` that are older than the start, and links pointing anywhere else, are moved to <traces parent>/stale_raw_<epoch>/. <real_stage>/service-*.log
+    are linked next to `traces`. Idempotent. Returns {real_stage_dir, real_raw, hosts_file, linked_new, linked_total, skipped_old, stale_moved, stale_dir, note}."""
+    real = Path(real_stage)
+    rraw = real / "raw"
+    t = Path(traces)
+    out = {"real_stage_dir": str(real), "real_raw": str(rraw), "hosts_file": str(real / "hosts.txt") if (real / "hosts.txt").is_file() else "", "linked_new": 0,
+           "linked_total": 0, "skipped_old": 0, "stale_moved": [], "stale_dir": "", "note": ""}
+    if t.is_symlink():
+        if os.path.realpath(t) == os.path.realpath(rraw):
+            out["linked_total"] = len(T.expand(str(t)))
+            out["note"] = "the traces dir is a link to the real raw dir"
+            return out
+        t.unlink()
+    t.mkdir(parents=True, exist_ok=True)
+    if os.path.realpath(t) == os.path.realpath(rraw):
+        out["linked_total"] = len(T.expand(str(t)))
+        out["note"] = "the wrapper writes into the stage's own raw dir"
+        return out
+    cut = (started - STALE_SLACK_S) if started else 0.0
+    rr = os.path.realpath(rraw)
+    stale = []
+    for f in sorted(t.rglob("*")):
+        if f.is_symlink():
+            if not os.path.realpath(f).startswith(rr + os.sep):
+                stale.append(f)
+        elif not f.is_dir() and cut:
+            try:
+                if f.stat().st_mtime < cut:
+                    stale.append(f)
+            except OSError:
+                pass
+    out["stale_dir"] = _move_aside(t, stale, "raw")
+    out["stale_moved"] = [str(f.relative_to(t)) for f in stale]
+    if not rraw.is_dir():
+        out["note"] = f"the real raw dir {rraw} does not exist yet"
+    else:
+        for f in T.expand(str(rraw)):
+            fp = Path(f)
+            try:
+                if cut and fp.stat().st_mtime < cut:
+                    out["skipped_old"] += 1
+                    continue
+            except OSError:
+                continue
+            try:
+                name = str(fp.relative_to(rraw)).replace(os.sep, "__")
+            except ValueError:
+                name = fp.name
+            link = t / name
+            if link.is_symlink() or link.exists():
+                continue
+            os.symlink(str(fp), str(link))
+            out["linked_new"] += 1
+        for f in sorted(real.glob("service-*.log")):
+            link = t.parent / f.name
+            try:
+                if cut and f.stat().st_mtime < cut:
+                    continue
+            except OSError:
+                continue
+            if not (link.is_symlink() or link.exists()):
+                os.symlink(str(f), str(link))
+    out["linked_total"] = len(T.expand(str(t)))
+    return out
+
+
+def adopt_traces(pipeline: str, stage: str) -> dict:
+    """For a stage whose outputs name a wrapper_stage_dir (a command-mode run through a package wrapper): adopt_files from the real stage dir into the stage's
+    traces dir, started = the job's start time, and record real_stage_dir, real_raw, hosts_file (the real one), adopted_files and stale_dir in the stage outputs
+    (only when they changed). Returns adopt_files' dict, or {status: skipped, reason}."""
+    o = P.stage(P.load(pipeline), stage)["outputs"]
+    real = o.get("wrapper_stage_dir") or ""
+    if not real or not o.get("traces"):
+        return {"status": "skipped", "reason": "no wrapper_stage_dir recorded: the traces are written into the stage's own raw dir"}
+    started = 0.0
+    try:
+        started = float(_load_rec(pipeline, o["job"]).get("started") or 0.0)
+    except (P.PipelineError, OSError, ValueError, KeyError):
+        pass
+    r = adopt_files(real, o["traces"], started)
+    new = {"real_stage_dir": r["real_stage_dir"], "real_raw": r["real_raw"], "hosts_file": r["hosts_file"] or o.get("hosts_file", ""), "adopted_files": r["linked_total"]}
+    if r["stale_dir"]:
+        new["stale_dir"] = r["stale_dir"]
+    if any(o.get(k) != v for k, v in new.items()):
+        P.record(pipeline, stage, outputs=new)
+    r["status"] = "ok"
+    return r
+
+
+def log_flux_id(text: str) -> str:
+    """Pure: the flux job id a command's log printed: the id after a `batch job:` prefix, or a line holding only an f58 id (it must hold a digit, so that words
+    like 'failed' are not ids); the last one in the text. '' when none."""
+    best, pos = "", -1
+    for rx in (LOG_ID_PREFIXED_RE, LOG_ID_BARE_RE):
+        for m in rx.finditer(text or ""):
+            if m.start() > pos:
+                best, pos = m.group(1), m.start()
+    return best
+
+
+def _read_head(p, nbytes: int = 262144) -> str:
+    try:
+        with open(str(p), "rb") as fh:
+            return fh.read(nbytes).decode("utf-8", "replace")
+    except OSError:
+        return ""
 
 
 # ---------------------------------------------------------------- the detached batch submit script (pure text)
@@ -549,12 +872,63 @@ def _sync_stage(pipeline: str, rec: dict, fb: dict) -> None:
         pass
 
 
+def follow_command(rec: dict, j: dict, flux: str = "flux", pipeline: str = "", tail: int = 2000) -> dict:
+    """A command-mode job (J.start: a runner that waits for the command) whose log printed a flux job id (the command submitted a flux batch, e.g. a package's
+    04_run.sh): record the id in the job record, and take the job's state from FLUX, not from the runner process. A queued/running flux job is `running` even when the
+    runner is gone (a server restart) or has already exited; an ended one with the runner gone gets flux's verdict written as the rc (the first caller does it); an
+    ended one with runner rc 0 but a failed flux result gets flux's non-zero rc. `j` is J.state/J.get's dict; returns it updated with flux_job_id, flux_state and
+    flux_detail. No flux id in the log: `j` unchanged."""
+    fid = rec.get("flux_job_id") or log_flux_id(_read_head(rec.get("log")))
+    if not fid:
+        return j
+    if fid != rec.get("flux_job_id"):
+        rec["flux_job_id"] = fid
+        try:
+            Path(rec["script"]).with_suffix(".json").write_text(json.dumps(rec, indent=1))
+        except OSError:
+            pass
+    j["flux_job_id"] = fid
+    try:
+        row = flux_status(fid, flux, 1, 0)
+    except P.PipelineError as e:
+        j["flux_state"], j["flux_detail"] = "", {"state": "unreachable", "message": str(e)}
+        return j
+    ended = row["state"] == "INACTIVE" and row["result"] not in ("", "-")
+    if ended:
+        frc = derive_rc(row)
+        state = "cancelled" if row["result"] == "CANCELED" else "timeout" if row["result"] == "TIMEOUT" else "completed" if frc == 0 else "failed"
+        if j.get("status") != "done":
+            try:
+                with open(rec["log"], "a") as fh:
+                    fh.write(f"\nflux job {fid} ended {row['result']} returncode {row['returncode']}: rc={frc} (read from flux; the runner process is gone)\n")
+                Path(rec["rc_file"]).write_text(f"{frc}\n")
+            except OSError:
+                pass
+            j = {**J.state(rec, tail), "flux_job_id": fid}
+        elif j.get("rc") == 0 and frc != 0:
+            j["rc"] = frc
+            j["timed_out"] = frc in (124, 137)
+        msg = f"flux job {fid} ended {row['result']} returncode {row['returncode']}"
+    else:
+        state = "queued" if row["state"] in FLUX_QUEUED else "running"
+        j["status"], j["rc"] = "running", None
+        msg = f"flux job {fid} state {row['state']}"
+    j["flux_state"], j["flux_detail"] = state, {"state": state, "flux_state": row["state"], "message": msg}
+    if pipeline:
+        _sync_stage(pipeline, rec, {"flux_job_id": fid, "state": state, "message": msg})
+    return j
+
+
 def batch_job(pipeline: str, jid: str, tail: int = 2000, flux: str = "flux", tries: int = 2, pause: float = 0.5) -> dict:
     """J.get for any job, but a detached flux batch (source 'flux-batch') is first brought up to date from flux (finish_batch) and its status is the real one:
-    running (submitting, queued or running in flux), done (evaluated, rc set), lost (flux does not know the id) or unknown (flux not reachable). Adds flux_*."""
+    running (submitting, queued or running in flux), done (evaluated, rc set), lost (flux does not know the id) or unknown (flux not reachable). Adds flux_*.
+    A command-mode job whose log printed a flux job id is followed through flux too (follow_command)."""
     rec = _load_rec(pipeline, jid)
     if rec.get("source") != BATCH_SOURCE:
-        return J.get(pipeline, jid, tail)
+        j = J.get(pipeline, jid, tail)
+        if rec.get("source") == "attached":
+            return j
+        return follow_command(rec, j, flux, pipeline, tail)
     fb = finish_batch(rec, flux, tries, pause)
     j = J.get(pipeline, jid, tail)
     if j["status"] != "done":
@@ -564,7 +938,7 @@ def batch_job(pipeline: str, jid: str, tail: int = 2000, flux: str = "flux", tri
     return j
 
 
-def _start_batch(pipeline, stage, batch_script, queue, limit, data_dir, venv, wait, original):
+def _start_batch(pipeline, stage, batch_script, queue, limit, data_dir, venv, wait, original, command=""):
     if not batch_script:
         raise P.PipelineError("give batch_script (the generated run.sh)")
     c, r = _plan(pipeline, stage, batch_script, queue, limit, data_dir, venv, original)
@@ -577,6 +951,10 @@ def _start_batch(pipeline, stage, batch_script, queue, limit, data_dir, venv, wa
                   "pass the same service_venv/data_dir/original_script as in moirai_wrapper_write to avoid it")
     elif wr["action"] == "created":
         note_w = "; the wrapper did not exist and was created (run moirai_wrapper_write before generating run.sh)"
+    g = check_stage_agreement(command, stage, Path(wr["path"]).read_text(), r["stage_dir"])     # the wrapper on disk, after the sync, must write into this stage
+    if not g["ok"]:
+        raise P.PipelineError("nothing was started: " + "; ".join(g["problems"]) + f"; fix: {g['fix']}")
+    stale = archive_raw(r["traces"])
     Path(r["hosts_file"]).unlink(missing_ok=True)
     Path(r["flux_job_id_file"]).unlink(missing_ok=True)
     extra = {"idfile": r["flux_job_id_file"], "batch_output": r["batch_output"], "hosts_file": r["hosts_file"], "queue": queue, "submit_command": r["submit_command"]}
@@ -585,8 +963,9 @@ def _start_batch(pipeline, stage, batch_script, queue, limit, data_dir, venv, wa
     P.record(pipeline, stage, status="running", outputs={"job": j["id"], "traces": r["traces"], "batch_script": str(batch_script), "run_script": r["run_script_path"],
                                                         "wrapper": r["wrapper_path"], "wrapper_sha256": wr["sha256"], "hosts_file": r["hosts_file"],
                                                         "submit_command": r["submit_command"], "queue": queue, "mode": "batch", "batch_output": r["batch_output"],
-                                                        "service_venv": r["service_venv"], "flux_job_id": "", "flux_state": "submitting"},
-             note=f"submitted DETACHED as a flux batch (independent of the server): {r['submit_command']}{note_w}")
+                                                        "service_venv": r["service_venv"], "flux_job_id": "", "flux_state": "submitting", "scale": g["scale"],
+                                                        "stale_dir": stale},
+             note=f"submitted DETACHED as a flux batch (independent of the server): {r['submit_command']}{note_w}" + (f"; earlier files moved to {stale}" if stale else ""))
     end = time.time() + max(0, int(wait))
     while True:                         # wait only for the id to be recorded; the job itself is not waited for
         w = batch_job(pipeline, j["id"], 2500)
@@ -594,27 +973,41 @@ def _start_batch(pipeline, stage, batch_script, queue, limit, data_dir, venv, wa
             break
         time.sleep(0.5)
     return {"status": w["status"], "job": j["id"], "rc": w["rc"], "elapsed": w["elapsed"], "traces": r["traces"], "submit_command": r["submit_command"],
-            "flux_job_id": w["flux_job_id"], "flux_state": w["flux_state"], "wrapper": wr, "log_tail": w.get("log_tail", "")[-2500:],
+            "flux_job_id": w["flux_job_id"], "flux_state": w["flux_state"], "wrapper": wr, "stale_dir": stale, "log_tail": w.get("log_tail", "")[-2500:],
             "note": "the flux batch is detached: a restart of the server does not cancel it; follow it with moirai_run_status, cancel it only with moirai_run_stop. "
                     "The Dashboard tab shows the provenance as it arrives" + note_w}
 
 
-def _start(pipeline, stage, command, launcher, nodes, data_dir, wait, limit):
+def _start(pipeline, stage, command, launcher, nodes, data_dir, wait, limit, wrapper_path="", retarget=False):
     c = P.load(pipeline)
     P.require_ready(c, stage)
     integ, cmd = P.stage(P.origin(c), "integrate")["outputs"], command or c["command"]
     if not integ.get("env"):
         return {"status": "error", "error": "the integrate stage has not written moirai_env.sh"}
+    g = stage_guard(stage, f"{launcher} {cmd}".strip(), wrapper_path, retarget)     # wrapper STAGE / MOIRAI_LOG_FILE / SCALE agree with the stage, or nothing starts
+    if not g["ok"]:
+        raise P.PipelineError("nothing was started: " + "; ".join(g["problems"]) + f"; fix: {g['fix']}")
     tdir = P.work(c) / "traces" / stage / "raw"     # dfdashboard's run layout: <root>/<run>/raw/*.pfw.gz
     tdir.mkdir(parents=True, exist_ok=True)
+    stale = archive_raw(str(tdir))                  # nothing of an earlier attempt stays in the stage's raw dir
+    tdir.mkdir(parents=True, exist_ok=True)
+    hosts_moved = archive_hosts(g["wrapper_stage_dir"]) if g["wrapper"] and g["wrapper_stage_dir"] else ""
     wd = integ["annotated"]
     script = _script(integ["env"], pipeline, stage, str(tdir / "prov"), data_dir or wd, cmd, launcher, nodes)
     j = J.start(pipeline, stage, stage.replace("_", "-"), script, wd, limit=limit)
     P.set_dashboard(pipeline, str(tdir), live=True)
-    P.record(pipeline, stage, status="running", outputs={"job": j["id"], "traces": str(tdir), "command": cmd, "launcher": launcher, "nodes": nodes}, note=f"running under moirai: {cmd}")
+    out = {"job": j["id"], "traces": str(tdir), "command": cmd, "launcher": launcher, "nodes": nodes, "mode": "command", "scale": g["scale"], "flux_job_id": "",
+           "wrapper": g["wrapper"], "wrapper_stage_dir": g["wrapper_stage_dir"] if g["wrapper"] else "", "stale_dir": stale}
+    if g["wrapper"] and g["wrapper_stage_dir"]:
+        out["hosts_file"] = os.path.join(g["wrapper_stage_dir"], "hosts.txt")
+    P.record(pipeline, stage, status="running", outputs=out,
+             note=f"running under moirai: {cmd}" + (f"; wrapper {g['wrapper']} writes to {g['wrapper_stage_dir']}" if g["wrapper"] else "")
+             + ("; wrapper retargeted to the SCALE tag" if g["retargeted"] else "") + (f"; earlier raw files moved to {stale}" if stale else "")
+             + (f"; earlier hosts.txt moved to {hosts_moved}" if hosts_moved else ""))
     r = J.wait(pipeline, j["id"], wait)
     return {"status": r["status"], "job": j["id"], "rc": r["rc"], "elapsed": r["elapsed"], "traces": str(tdir), "log_tail": r.get("log_tail", "")[-2500:],
-            "note": "the Dashboard tab shows the provenance as it arrives"}
+            "scale": g["scale"], "wrapper": g["wrapper"], "wrapper_stage_dir": out["wrapper_stage_dir"], "retargeted": g["retargeted"], "stale_dir": stale,
+            "warnings": g["warnings"], "note": "the Dashboard tab shows the provenance as it arrives; the traces the wrapper writes are linked into the stage's raw dir by moirai_run_status / moirai_validate"}
 
 
 # ---------------------------------------------------------------- attach a finished, externally submitted flux batch
@@ -749,13 +1142,23 @@ def attach_job(pipeline: str, stage: str, flux_job_id: str, output_file: str = "
 
 
 # ---------------------------------------------------------------- validate
+def _adopt_safe(pipeline: str, stage: str) -> dict:
+    """adopt_traces that never raises: a filesystem problem is reported in the result, the caller goes on."""
+    try:
+        return adopt_traces(pipeline, stage)
+    except (P.PipelineError, OSError, ValueError) as e:
+        return {"status": "error", "error": f"could not link the wrapper's traces into the stage: {e}"}
+
+
 def _validate(pipeline: str, stage: str) -> dict:
     c = P.load(pipeline)
     o = P.stage(c, stage)["outputs"]
     v = P.Verdict(stage)
-    if not v.check("ran", bool(o.get("job")), "the run has not started",
+    if not v.check("ran", bool(o.get("job")),  "the run has not started",
                    "start the run (moirai_smoke_run / moirai_baseline_run); for a flux batch submitted by hand that has FINISHED: moirai_run_attach(pipeline, stage, flux_job_id, output_file, result_json)"):
         return P.finish_validation(pipeline, v)
+    ad = _adopt_safe(pipeline, stage)          # the traces a package wrapper wrote into its own STAGE dir are linked into the stage's raw dir first
+    o = P.stage(P.load(pipeline), stage)["outputs"]
     j = batch_job(pipeline, o["job"], 1500)       # a detached flux batch is evaluated here from flux and run.out when it has ended (also after a server restart)
     if j["status"] in ("running", "unknown"):
         fx = f" (flux job {j['flux_job_id']}: {j['flux_state']})" if j.get("flux_job_id") else ""
@@ -766,8 +1169,17 @@ def _validate(pipeline: str, stage: str) -> dict:
             "raise limit if it timed out; rc 4/5/6 in batch mode: a chunk job failed / no wrapper ran / --output unreadable, read the batch --output file, the chunk logs (moirai-wrapper: lines) and service-<host>-<job>.log; "
             "lost: `flux jobs -a <flux_job_id>` from the shell that owns the flux instance; "
             "attached: rc comes from flux result/returncode and result_json ok, the problems are at the end of the log")
+    if o.get("scale") and o.get("wrapper_stage_dir"):
+        tag = os.path.basename(str(o["wrapper_stage_dir"]).rstrip("/"))
+        v.check("stage_tag", tag == o["scale"], f"the run said SCALE={o['scale']} but its wrapper wrote to {o['wrapper_stage_dir']} (tag {tag})",
+                "re-render the wrapper for this scale (SCALE=<scale> bash <package>/scripts/03_build.sh) or start again with retarget_wrapper=true; the traces of the wrong dir are not this run's")
     files = T.expand(o["traces"])
-    v.check("trace", bool(files), "no trace file", "read the service log next to the trace prefix")
+    real = o.get("real_raw") or ""
+    where = ""
+    if not files and real:
+        n_real = len(T.expand(real))
+        where = f"; the wrapper's real raw dir {real} holds {n_real} trace file(s) ({ad.get('skipped_old', 0)} older than this run, not linked)"
+    v.check("trace", bool(files), "no trace file" + where, "read the service log next to the trace prefix; a package wrapper writes into its own STAGE dir (stage outputs real_stage_dir): the run needs the wrapper's STAGE tag to equal its SCALE")
     v.check("service_trace", not files or not all("-spill" in f for f in files), "only spill files: no service was running", "check the service log; is /dev/shm big enough?")
     hosts = []
     hf = o.get("hosts_file")
@@ -936,9 +1348,132 @@ def _attach_selftest(td) -> dict:
     return cases
 
 
+def _guard_selftest(td) -> dict:
+    """The stage guard on temp dirs (incident elmerfold_64-20261110-192435): a package wrapper with STAGE=<pkg>/traces/smoke refused for SCALE=baseline and
+    for a live_run with SCALE=smoke, accepted when the tag matches, MOIRAI_LOG_FILE/STAGE disagreement refused, retarget rewrites only the STAGE= line and keeps a
+    backup, the pipeline's own rendered wrapper checked against the expected stage dir; adopt_files links new traces, skips old ones, moves stale files aside and is
+    idempotent; a command job whose log printed a flux id follows flux (running / ended / flux failure wins / runner done but flux running), with a fake flux."""
+    cases = {}
+    td = Path(td)
+    pkg = td / "pkg"
+    (pkg / "scripts").mkdir(parents=True)
+    wp = pkg / WRAPPER_NAME
+
+    def mk(stage_tag, log_tag=""):
+        log = f"{pkg}/traces/{log_tag}/raw/prov" if log_tag else '"${STAGE}/raw/prov"'
+        wp.write_text(f"#!/bin/bash\n# Per-chunk submit wrapper\nSTAGE={pkg}/traces/{stage_tag}\nexport MOIRAI_LOG_FILE={log}\n_svclog=\"${{STAGE}}/service.log\"\n")
+        wp.chmod(0o755)
+
+    cmd = f"cd {pkg} && SCALE=baseline LIMIT_MIN_baseline=720 bash {pkg}/scripts/04_run.sh"
+    cases["guard_scale_parsed"] = parse_scale(cmd) == "baseline" and parse_scale("export SCALE=smoke; x") == "smoke" and parse_scale("echo NOSCALE=1") == "" and parse_scale("a SCALE=smoke SCALE=baseline b") == "baseline"
+    mk("smoke")
+    before = wp.read_text()
+    g = stage_guard("live_run", cmd)
+    cases["guard_mismatch_refused"] = (not g["ok"]) and g["wrapper"] == str(wp) and g["scale"] == "baseline" and g["tag"] == "smoke" and any("SCALE=baseline" in p and "smoke" in p for p in g["problems"]) and "03_build.sh" in g["fix"]
+    cases["guard_dry_run_writes_nothing"] = wp.read_text() == before and not (pkg / "traces" / "baseline").exists()
+    mk("baseline")
+    cases["guard_match_ok"] = stage_guard("live_run", cmd)["ok"] and stage_guard("baseline", cmd)["ok"]
+    mk("smoke")
+    cases["guard_smoke_ok"] = stage_guard("moirai_smoke", f"cd {pkg} && SCALE=smoke bash scripts/04_run.sh")["ok"]
+    gs = stage_guard("live_run", f"cd {pkg} && SCALE=smoke bash {pkg}/scripts/04_run.sh")
+    cases["guard_scale_vs_stage_refused"] = (not gs["ok"]) and any("SCALE=smoke" in p and "live_run" in p for p in gs["problems"])
+    mk("baseline", log_tag="smoke")
+    gl = stage_guard("live_run", cmd)
+    cases["guard_log_dir_mismatch_refused"] = (not gl["ok"]) and any("MOIRAI_LOG_FILE" in p for p in gl["problems"]) and not gl["retargetable"]
+    mk("smoke")
+    (pkg / "traces" / "baseline").mkdir(parents=True)
+    old_hosts = pkg / "traces" / "baseline" / "hosts.txt"
+    old_hosts.write_text("old-host\n")
+    gr = stage_guard("live_run", cmd, retarget=True)
+    new_text = wp.read_text()
+    cases["guard_retarget_rewrites"] = (gr["ok"] and gr["retargeted"] and "traces/baseline" in new_text and "traces/smoke" not in new_text and new_text.count("\n") == before.count("\n")
+                                        and "MOIRAI_LOG_FILE" in new_text and Path(gr["retarget"]["backup"]).read_text() == before and (pkg / "traces" / "baseline" / "raw").is_dir()
+                                        and (wp.stat().st_mode & 0o777) == 0o755)
+    moved = archive_hosts(str(pkg / "traces" / "baseline"))
+    cases["guard_old_hosts_moved_aside"] = bool(moved) and not old_hosts.exists() and Path(moved).read_text() == "old-host\n"
+    sd = td / "pipe" / "traces" / "live_run"
+    txt = render_submit_wrapper("/o.sh", "/e.sh", str(sd), "/data", "/moirai-agents-x")
+    cases["guard_pipeline_wrapper_dir"] = (check_stage_agreement("SCALE=baseline x", "live_run", txt, str(sd))["ok"] and wrapper_stage_info(txt)["stage_dir"] == str(sd)
+                                           and not check_stage_agreement("", "live_run", txt, str(td / "other"))["ok"])
+    ng = stage_guard("baseline", "echo hi")
+    cases["guard_no_wrapper_ok"] = ng["ok"] and ng["wrapper"] == "" and not stage_guard("baseline", "SCALE=smoke echo hi")["ok"]
+    try:
+        stage_guard("query", "x")
+        cases["guard_bad_stage_refused"] = False
+    except P.PipelineError:
+        cases["guard_bad_stage_refused"] = True
+
+    # adopt: the wrapper wrote into its own STAGE dir; the stage's raw dir gets links to this run's files only
+    real = td / "real"
+    (real / "raw").mkdir(parents=True)
+    old, new = real / "raw" / "prov_old.pfw.gz", real / "raw" / "prov_n1.pfw.gz"
+    old.write_bytes(b"")
+    new.write_bytes(b"")
+    os.utime(old, (time.time() - 1000, time.time() - 1000))
+    (real / "hosts.txt").write_text("n1\n")
+    (real / "service-n1-1.log").write_text("x")
+    t = td / "pstage" / "raw"
+    t.mkdir(parents=True)
+    stalef = t / "prov_stale.pfw.gz"
+    stalef.write_bytes(b"")
+    os.utime(stalef, (time.time() - 1000, time.time() - 1000))
+    a1 = adopt_files(str(real), str(t), time.time() - 100)
+    cases["adopt_links_new_only"] = (a1["linked_new"] == 1 and (t / "prov_n1.pfw.gz").is_symlink() and not (t / "prov_old.pfw.gz").exists() and a1["skipped_old"] == 1
+                                     and a1["linked_total"] == 1 and T.expand(str(t)) == [str(t / "prov_n1.pfw.gz")])
+    cases["adopt_stale_moved_aside"] = (not stalef.exists() and a1["stale_moved"] == ["prov_stale.pfw.gz"] and Path(a1["stale_dir"], "prov_stale.pfw.gz").exists())
+    cases["adopt_hosts_and_service_log"] = a1["hosts_file"] == str(real / "hosts.txt") and (t.parent / "service-n1-1.log").is_symlink()
+    a2 = adopt_files(str(real), str(t), time.time() - 100)
+    cases["adopt_idempotent"] = a2["linked_new"] == 0 and a2["linked_total"] == 1 and a2["stale_moved"] == []
+    (t / "prov_n1.pfw.gz").unlink()
+    os.symlink(str(td / "elsewhere.pfw.gz"), str(t / "prov_foreign.pfw.gz"))
+    a3 = adopt_files(str(real), str(t), time.time() - 100)
+    cases["adopt_foreign_link_moved"] = a3["stale_moved"] == ["prov_foreign.pfw.gz"] and a3["linked_total"] == 1 and not (t / "prov_foreign.pfw.gz").is_symlink()
+    arch = archive_raw(str(t))
+    cases["archive_raw_empties"] = bool(arch) and not list(t.iterdir()) and archive_raw(str(t)) == ""
+    cases["adopt_real_raw_missing_noted"] = "does not exist yet" in adopt_files(str(td / "nowhere"), str(td / "p2" / "raw"), 0.0)["note"]
+
+    # a command-mode job that printed a flux id: its state is flux's
+    cases["log_flux_id"] = (log_flux_id("start\nbatch job: fFAKEBATCH\nmore") == "fFAKEBATCH" and log_flux_id("failed\nfinished\n") == "" and log_flux_id("f3j9zUsgjby9\n") == "f3j9zUsgjby9")
+    bindir = td / "gbin"
+    bindir.mkdir()
+    (bindir / "flux").write_text(_FAKE_FLUX)
+    (bindir / "flux").chmod(0o755)
+    fx = str(bindir / "flux")
+
+    def crec(name, rc_text=None):
+        r = {"id": name, "stage": "live_run", "pid": 0, "started": time.time() - 5, "rc_file": str(td / f"{name}.rc"), "log": str(td / f"{name}.log"), "script": str(td / f"{name}.sh")}
+        (td / f"{name}.log").write_text("starting\nbatch job: fFAKEBATCH\n")
+        (td / f"{name}.json").write_text(json.dumps(r))
+        if rc_text is not None:
+            (td / f"{name}.rc").write_text(rc_text)
+        return r
+
+    (bindir / "state").write_text("RUN - - 5.0\n")
+    r1 = crec("c1")
+    j1 = follow_command(r1, J.state(r1, 200), fx)
+    cases["follow_command_running"] = j1["status"] == "running" and j1["flux_job_id"] == "fFAKEBATCH" and j1["flux_state"] == "running" and r1["flux_job_id"] == "fFAKEBATCH" and J.state(r1)["status"] == "lost"
+    (bindir / "state").write_text("INACTIVE COMPLETED 0 9.0\n")
+    j2 = follow_command(r1, J.state(r1, 200), fx)
+    cases["follow_command_done_from_flux"] = j2["status"] == "done" and j2["rc"] == 0 and _read(r1["rc_file"]) == "0" and j2["flux_state"] == "completed"
+    (bindir / "state").write_text("INACTIVE FAILED 2 1.0\n")
+    r3 = crec("c3", "0\n")
+    j3 = follow_command(r3, J.state(r3, 200), fx)
+    cases["follow_command_flux_failure_wins"] = j3["status"] == "done" and j3["rc"] == 2 and j3["flux_state"] == "failed"
+    (bindir / "state").write_text("SCHED - - 0.0\n")
+    r4 = crec("c4", "0\n")
+    j4 = follow_command(r4, J.state(r4, 200), fx)
+    cases["follow_command_runner_done_flux_queued"] = j4["status"] == "running" and j4["rc"] is None and j4["flux_state"] == "queued"
+    r5 = {"id": "c5", "stage": "live_run", "pid": 0, "started": time.time(), "rc_file": str(td / "c5.rc"), "log": str(td / "c5.log"), "script": str(td / "c5.sh")}
+    (td / "c5.log").write_text("no flux here\n")
+    j5 = J.state(r5, 100)
+    cases["follow_command_without_id_unchanged"] = follow_command(r5, dict(j5), fx) == j5
+    return cases
+
+
 def _selftest() -> dict:
     """Wrapper write, idempotence and mismatch handling on a temp dir, through the pure render and sync_wrapper; the detached batch submit script run with a fake
-    flux and the state/evaluation read from flux (finish_batch); the resolver on a fake venv; moirai_run_attach on a temp pipeline with a fake flux."""
+    flux and the state/evaluation read from flux (finish_batch); the resolver on a fake venv; the stage guard and trace adoption; moirai_run_attach on a temp
+    pipeline with a fake flux."""
     cases = {}
     with tempfile.TemporaryDirectory(prefix="moirai_wrapper_selftest_") as td:
         sd = Path(td) / "traces" / "moirai_smoke"
@@ -1041,6 +1576,9 @@ def _selftest() -> dict:
         av = detached_argv("/j/a.sh", "/j/a.submit.rc", {"PATH": "/usr/bin:/bin", "HOME": "/h", "USER": "u", "TERM": "xterm"})
         cases["detached_argv"] = av[:3] == ["nohup", "env", "-i"] and "HOME=/h" in av and "USER=u" in av and "TERM=xterm" in av and "PATH=/usr/bin:/bin" not in av and av[-2] == "-lc" and "bash /j/a.sh" in av[-1]
 
+        # the stage guard (wrapper STAGE / SCALE tag / MOIRAI_LOG_FILE), trace adoption and flux-following of command jobs
+        cases.update(_guard_selftest(td))
+
         # attach: a finished, externally submitted flux batch (fake flux, temp pipeline)
         cases.update(_attach_selftest(td))
     failed = [k for k, v in cases.items() if not v]
@@ -1076,14 +1614,37 @@ def register(mcp):
         defaulted vs explicit venv rendering the same text, the python-based fallback; the DETACHED batch submit script run under bash with a fake flux (records
         the flux job id, contains no cancel trap), and the state / post-run evaluation read from flux and run.out by finish_batch: a failing run.out (rc 4, chunk
         job id named), a clean one (rc 0), a missing/empty hosts.txt (rc 5), an unreadable output (rc 6), a failed or cancelled flux result, queued and running
-        states, evaluation after a simulated server restart, 'lost' only for an id flux does not know, cancel only through stop_batch; and moirai_run_attach on a
-        temp pipeline with a fake flux (attach_* cases). Use after any change to the wrapper text, the batch submit, the status/finish logic, the resolver or the
-        attach tool. Returns {status, line, cases}: line is 'moirai wrapper selftest PASS ...' or 'moirai wrapper selftest FAIL <case>'."""
+        states, evaluation after a simulated server restart, 'lost' only for an id flux does not know, cancel only through stop_batch; the stage guard (guard_*:
+        a package wrapper with STAGE=.../smoke refused for SCALE=baseline and for a live_run with SCALE=smoke, accepted when the tag matches, STAGE vs
+        MOIRAI_LOG_FILE disagreement refused, retarget rewrites only the STAGE= line with a backup, the pipeline's own wrapper checked against its stage dir),
+        trace adoption (adopt_*: new files linked into the stage raw dir, files of earlier attempts moved aside, idempotent), command jobs followed through
+        flux (follow_command_*, fake flux); and moirai_run_attach on a temp pipeline with a fake flux (attach_* cases). Use after any change to the wrapper text,
+        the batch submit, the guard, the adoption, the status/finish logic, the resolver or the attach tool. Returns {status, line, cases}: line is
+        'moirai wrapper selftest PASS ...' or 'moirai wrapper selftest FAIL <case>'."""
         return _selftest()
 
     @mcp.tool()
+    def moirai_stage_guard(stage: str, command: str = "", wrapper_path: str = "", expected_stage_dir: str = "") -> dict:
+        """DRY RUN (reads files, writes nothing) of the check that runs before a command-mode moirai_smoke_run / moirai_baseline_run / moirai_live_run starts.
+        Finds the submit wrapper the command uses (an absolute path in the command: <package>/submit_moirai.sh, a `cd <package>`, <package>/scripts/04_run.sh; or
+        wrapper_path), reads its STAGE= line and its MOIRAI_LOG_FILE, and compares them with the SCALE=<tag> of the command and with the stage: the package
+        wrapper bakes STAGE=<root>/traces/<scale> at build time (03_build.sh with SCALE=smoke), so a baseline/live run with SCALE=baseline would write its prov files,
+        hosts.txt and service logs to traces/smoke while the stage's raw dir stays empty. Use it before asking the user to start a live run on a published package.
+        stage: moirai_smoke|baseline|live_run (smoke runs SCALE smoke, baseline runs baseline, live_run runs baseline|live|live_run). command: the full command
+        line as it will run, launcher included. wrapper_path: the wrapper file when the command does not name it. expected_stage_dir: when given, the wrapper's
+        stage dir must equal it (the pipeline's own <work>/traces/<stage>).
+        Returns {ok, problems, warnings, scale, tag, wrapper, wrapper_stage_dir, log_dir, retargetable, fix}; the runs refuse to start when ok is false, and retarget
+        the wrapper's STAGE= line (backup kept) only when called with retarget_wrapper=true."""
+        if stage not in STAGES:
+            return {"status": "error", "error": f"stage must be one of {STAGES}"}
+        try:
+            return stage_guard(stage, command, wrapper_path, False, expected_stage_dir)
+        except (P.PipelineError, OSError) as e:
+            return {"status": "error", "error": str(e)}
+
+    @mcp.tool()
     def moirai_smoke_run(pipeline: str, command: str = "", launcher: str = "", wait: int = 600, limit: int = 1800, batch_script: str = "", queue: str = "pdebug",
-                         data_dir: str = "", service_venv: str = "", original_script: str = "") -> dict:
+                         data_dir: str = "", service_venv: str = "", original_script: str = "", wrapper_path: str = "", retarget_wrapper: bool = False) -> dict:
         """Run the annotated app on the small test under moirai-service. Use after integrate. It stops the service however the app ends; limit: seconds before it is
         stopped. The Dashboard tab follows it live. batch_script: path of the generated flux-batch run.sh (Elmerfold), generated WITH --submit-script <wrapper path>
         from moirai_wrapper_write; run.sh is not modified: the wrapper <work>/traces/<stage>/submit_moirai.sh is compared with the freshly rendered text
@@ -1095,42 +1656,55 @@ def register(mcp):
         wait: seconds to wait for the flux job id to be recorded (the job itself is not waited for in batch mode). queue: the batch queue. data_dir: MOIRAI_DATA_DIR
         (default the annotated tree). service_venv: venv holding dftracer/bin/dftracer_service (default the venv root of integrate's moirai.python; verified executable).
         original_script: the app's own submit script the wrapper runs (default <annotated>/monomer-structure-prediction/submit_smsp.sh). A flux batch already submitted
-        by hand and FINISHED is not run here: moirai_run_attach. Returns {status, job, rc, elapsed, traces, flux_job_id, flux_state, wrapper: {action, sha256,
-        previous_sha256}, log_tail}."""
+        by hand and FINISHED is not run here: moirai_run_attach.
+        Stage guard (both modes): the wrapper's STAGE= dir, its MOIRAI_LOG_FILE dir and the command's SCALE=<tag> must agree with this stage (moirai_stage_guard shows
+        the check); a mismatch refuses the start with the fix, and retarget_wrapper=true rewrites only the package wrapper's STAGE= line (backup kept). wrapper_path:
+        the wrapper file when the command does not name it. Files of earlier attempts in the stage's raw dir are moved to stale_raw_<epoch> before the run.
+        Returns {status, job, rc, elapsed, traces, flux_job_id, flux_state, wrapper, log_tail, ...}."""
         if batch_script:
-            return _start_batch(pipeline, "moirai_smoke", batch_script, queue, limit, data_dir, service_venv, wait, original_script)
-        return _start(pipeline, "moirai_smoke", command, launcher, 1, "", wait, limit)
+            return _start_batch(pipeline, "moirai_smoke", batch_script, queue, limit, data_dir, service_venv, wait, original_script, command)
+        return _start(pipeline, "moirai_smoke", command, launcher, 1, "", wait, limit, wrapper_path, retarget_wrapper)
 
     @mcp.tool()
     def moirai_baseline_run(pipeline: str, command: str = "", launcher: str = "", nodes: int = 1, data_dir: str = "", wait: int = 30, limit: int = 3600,
-                            batch_script: str = "", queue: str = "pdebug", service_venv: str = "", original_script: str = "") -> dict:
+                            batch_script: str = "", queue: str = "pdebug", service_venv: str = "", original_script: str = "", wrapper_path: str = "",
+                            retarget_wrapper: bool = False) -> dict:
         """Start the real baseline run under moirai-service, in the background, on what the user approved at the gate. command: the full run. launcher: e.g. 'flux run -N4 -n32'.
         nodes: one service starts per node. data_dir: where its I/O is traced. limit: seconds before it is stopped. batch_script, queue, service_venv, original_script: as in
         moirai_smoke_run (batch mode ignores command, launcher, nodes: the run.sh decides; service_venv defaults from integrate's moirai.python; the wrapper on disk is
         verified against the fresh render and rewritten, with a report, when it differs; the flux batch is submitted DETACHED and its flux job id recorded, so a server
         restart never cancels it (only moirai_run_stop does); state and the chunk-failure evaluation come from flux and run.out in moirai_run_status / moirai_validate).
-        The Dashboard tab shows events as they appear. A finished flux batch submitted by hand is attached with moirai_run_attach instead.
+        wrapper_path, retarget_wrapper: the stage guard, as in moirai_smoke_run: a command with SCALE=baseline and a package wrapper whose STAGE= ends in smoke is refused
+        (or retargeted with retarget_wrapper=true). The Dashboard tab shows events as they appear. A finished flux batch submitted by hand is attached with moirai_run_attach instead.
         Returns {status, job, traces, flux_job_id, flux_state, wrapper}: watch with moirai_run_status."""
         if batch_script:
-            return _start_batch(pipeline, "baseline", batch_script, queue, limit, data_dir, service_venv, wait, original_script)
+            return _start_batch(pipeline, "baseline", batch_script, queue, limit, data_dir, service_venv, wait, original_script, command)
         if not command:
             raise P.PipelineError("give command (with launcher) or batch_script")
-        return _start(pipeline, "baseline", command, launcher, nodes, data_dir, wait, limit)
+        return _start(pipeline, "baseline", command, launcher, nodes, data_dir, wait, limit, wrapper_path, retarget_wrapper)
 
     @mcp.tool()
     def moirai_live_run(pipeline: str, command: str = "", launcher: str = "", nodes: int = 1, data_dir: str = "", wait: int = 30, limit: int = LIVE_LIMIT_S,
-                        batch_script: str = "", queue: str = "pbatch", service_venv: str = "", original_script: str = "") -> dict:
+                        batch_script: str = "", queue: str = "pbatch", service_venv: str = "", original_script: str = "", wrapper_path: str = "",
+                        retarget_wrapper: bool = False) -> dict:
         """Start a LIVE run: the long (multi-hour) run of an app a run pipeline already annotated, under moirai-service, in the background, with provenance written live
         (the Live Run view draws the graph as it forms). pipeline: a live pipeline (pipeline_new(kind='live', parent=<run pipeline>)); it uses the parent's annotated
         tree and moirai_env.sh. command: the real run (default the live pipeline's command, which defaults to the parent's). limit: seconds before it is stopped
         (default 12 h). batch_script, queue, service_venv, original_script: as in moirai_baseline_run. In batch mode the flux batch is submitted DETACHED from the
         server (a web UI / tool-server restart, which happens regularly, does NOT cancel it, queued or running); the flux job id is recorded in the job record and the
         stage outputs, moirai_run_status reads the real state (queued/running/completed/failed/cancelled/timeout/lost) from flux, and only moirai_run_stop cancels.
-        Returns {status, job, traces, flux_job_id, flux_state}: follow with moirai_run_status(pipeline,
+        STAGE GUARD (command mode, e.g. a published package's `cd <pkg> && SCALE=baseline bash scripts/04_run.sh`): before anything starts, the package wrapper's STAGE=
+        dir, its MOIRAI_LOG_FILE dir and the SCALE= tag of the command must agree with live_run (SCALE baseline|live|live_run, wrapper tag = SCALE); otherwise nothing
+        is started and the error names the fix (re-render with 03_build.sh for that SCALE, or retarget_wrapper=true, which rewrites only the wrapper's STAGE= line and
+        keeps a backup). wrapper_path: the wrapper file when the command does not name it. The stage's raw dir is emptied of earlier attempts (moved to
+        stale_raw_<epoch>) and the wrapper's old hosts.txt moved aside; while it runs and after it ends, moirai_run_status / moirai_validate link the traces the wrapper
+        wrote (its real STAGE/raw, newer than the job start) into the stage's raw dir and record real_stage_dir, real_raw, hosts_file in the stage outputs. If the command
+        prints a flux job id (`batch job: f...`), it is recorded and the state is read from flux, so a restart does not turn a running batch into 'lost'.
+        Returns {status, job, traces, flux_job_id, flux_state, wrapper_stage_dir, retargeted, stale_dir}: follow with moirai_run_status(pipeline,
         'live_run'); when it ends, moirai_validate(pipeline, 'live_run'), then the publish_data stage."""
         if batch_script:
-            return _start_batch(pipeline, "live_run", batch_script, queue, limit, data_dir, service_venv, wait, original_script)
-        return _start(pipeline, "live_run", command, launcher, nodes, data_dir, wait, limit)
+            return _start_batch(pipeline, "live_run", batch_script, queue, limit, data_dir, service_venv, wait, original_script, command)
+        return _start(pipeline, "live_run", command, launcher, nodes, data_dir, wait, limit, wrapper_path, retarget_wrapper)
 
     @mcp.tool()
     def moirai_run_attach(pipeline: str, stage: str, flux_job_id: str, output_file: str = "", result_json: str = "") -> dict:
@@ -1212,34 +1786,48 @@ def register(mcp):
         server process: flux_state is queued (waiting in the Flux queue), running, completed, failed, cancelled, timeout, submitting (id not recorded yet), lost (flux
         does not know the id, or the submit vanished without one) or unreachable (flux cannot be run from here). When flux says the job ended, this call performs the
         post-run evaluation once (rc 0 only for COMPLETED 0 with no failed chunk job in run.out and a non-empty hosts.txt; rc 4/5/6 otherwise, see SKILL) and writes the
-        rc into the job; the stage outputs get flux_job_id and flux_state. status is running (also while queued), done, lost or unknown.
-        Returns {job, status, rc, elapsed, timed_out, flux_job_id, flux_state, flux_detail, counts, log_tail}."""
+        rc into the job; the stage outputs get flux_job_id and flux_state. A command-mode job whose log printed a flux job id is followed through flux the same way.
+        When the run went through a package wrapper (stage outputs wrapper_stage_dir), the traces it wrote into its own STAGE/raw since the job started are first linked
+        into the stage's raw dir (files of earlier attempts are moved to stale_raw_<epoch>), and real_stage_dir, real_raw, hosts_file are recorded.
+        status is running (also while queued), done, lost or unknown.
+        Returns {job, status, rc, elapsed, timed_out, flux_job_id, flux_state, flux_detail, counts, adopted, real_stage_dir, hosts_file, log_tail}."""
         o = P.stage(P.load(pipeline), stage)["outputs"]
         if not o.get("job"):
             raise P.PipelineError(f"stage {stage} has no job: start it with moirai_smoke_run / moirai_baseline_run / moirai_live_run, or attach a finished one")
+        ad = _adopt_safe(pipeline, stage)
+        o = P.stage(P.load(pipeline), stage)["outputs"]
         j = batch_job(pipeline, o["job"], 2000)
         return {"job": j["id"], "status": j["status"], "rc": j["rc"], "elapsed": j["elapsed"], "timed_out": j.get("timed_out", False),
                 "flux_job_id": j.get("flux_job_id", ""), "flux_state": j.get("flux_state", ""), "flux_detail": j.get("flux_detail", {}),
-                "counts": T.read(o["traces"]).counts(), "log_tail": j["log_tail"]}
+                "counts": T.read(o["traces"]).counts(), "adopted": ad, "real_stage_dir": o.get("real_stage_dir", ""), "hosts_file": o.get("hosts_file", ""),
+                "log_tail": j["log_tail"]}
 
     @mcp.tool()
     def moirai_run_stop(pipeline: str, stage: str) -> dict:
         """Stop a run on the user's request, or when it is clearly stuck. This is the ONLY thing that cancels a flux batch: for a detached batch it runs
         `flux cancel <recorded flux job id>` (when flux says it has not ended; a queued job is cancelled too); a restart of the server never does. The app jobs then get
-        TERM and stop their service; moirai_run_status shows the job as cancelled. For a plain command the job's process group is terminated. An attached (finished) job
-        has nothing to stop. Returns {status, id, stopped, flux_job_id?, note?}."""
+        TERM and stop their service; moirai_run_status shows the job as cancelled. For a plain command the job's process group is terminated, and when its log printed a
+        flux job id (the command submitted a flux batch) that flux job is cancelled too. An attached (finished) job has nothing to stop.
+        Returns {status, id, stopped, flux_job_id?, note?, flux?}."""
         jid = P.stage(P.load(pipeline), stage)["outputs"]["job"]
         rec = _load_rec(pipeline, jid)
         if rec.get("source") == BATCH_SOURCE:
             return stop_batch(rec)
-        return J.stop(pipeline, jid)
+        r = J.stop(pipeline, jid)
+        fid = rec.get("flux_job_id") or log_flux_id(_read_head(rec.get("log")))
+        if fid and rec.get("source") != "attached":
+            r["flux"] = stop_batch(dict(rec, flux_job_id=fid))
+            r["flux_job_id"] = fid
+        return r
 
     @mcp.tool()
     def moirai_validate(pipeline: str, stage: str) -> dict:
         """Validate a moirai run: exit 0, a trace from the service and not spill files, activities and entities recorded, no dangling edge, every entity type in
         the spec seen; in batch mode also one trace per host that ran the wrapper (hosts.txt) and no host with only spill traces. A detached flux batch that has
         ended is evaluated here too (state from flux, chunk failures from run.out) when no earlier call did, so it works after a server restart; queued/running
-        flux jobs give an inconclusive 'finished'. An attached run (moirai_run_attach)
+        flux jobs give an inconclusive 'finished'. A command-mode run through a package wrapper first has the traces from the wrapper's own STAGE/raw linked into the
+        stage's raw dir (stale files moved aside), judges stage_tag (the wrapper's stage dir tag equals the run's SCALE) and, when the stage's raw dir is empty, names
+        the wrapper's real raw dir and how many files it holds. An attached run (moirai_run_attach)
         is judged the same way; without a wrapper hosts.txt the per-host evidence comes only from prov_<host> trace file names (spill-only hosts fail
         host_service_trace; no such names: no per-host judgement). exit_0 is never relaxed. stage: moirai_smoke|baseline|live_run.
         Use after the job ended. Returns the verdict {status, failed, unknown, passed, total}."""

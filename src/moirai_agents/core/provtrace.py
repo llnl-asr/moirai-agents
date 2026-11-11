@@ -188,15 +188,25 @@ def _read_one(a: Tuple[str, str]):
 
 def _read_many(files: List[str], idx: str, workers: int = 0):
     """read_file over many files: one process per file (all cores) when there are several, as TraceViewer's rows become Python records."""
-    n = workers or min(len(files), os.cpu_count() or 4)
-    if len(files) < 2 or n < 2:
-        yield from (_read_one((f, idx)) for f in files)
-        return
+    # capped (MOIRAI_READ_WORKERS, default 16): one process per core on a 100+ file, multi-GB run was killed (BrokenProcessPool)
+    n = workers or min(len(files), os.cpu_count() or 4, int(os.environ.get("MOIRAI_READ_WORKERS", "16")))
     import multiprocessing as mp
     from concurrent.futures import ProcessPoolExecutor
-    # spawn, not fork: the caller already runs TraceViewer's native threads (the index check), and a forked child can hang on their locks
-    with ProcessPoolExecutor(max_workers=n, mp_context=mp.get_context("spawn")) as ex:
-        yield from ex.map(_read_one, [(f, idx) for f in files])
+    from concurrent.futures.process import BrokenProcessPool
+    todo = list(files)
+    while todo:
+        if len(todo) < 2 or n < 2:
+            for f in todo:
+                yield _read_one((f, idx))
+            return
+        # spawn, not fork: the caller already runs TraceViewer's native threads (the index check), and a forked child can hang on their locks
+        try:
+            with ProcessPoolExecutor(max_workers=n, mp_context=mp.get_context("spawn")) as ex:
+                for f, res in zip(list(todo), ex.map(_read_one, [(f, idx) for f in todo])):
+                    todo.remove(f)
+                    yield res
+        except BrokenProcessPool:        # a worker was killed (memory): the files not yet read again with half the workers, down to one process
+            n //= 2
 
 
 class Graph:
