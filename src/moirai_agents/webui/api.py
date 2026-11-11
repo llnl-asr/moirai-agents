@@ -292,11 +292,14 @@ def get_route(h, app, life, u, q):
         for x in out:
             t = app.turns.get(f"{user['uid']}/{x['id']}")
             x["running"] = bool(t and not t.done)
+        R.WARM and R.WARM.want_fresh(user)          # a new chat starts without waiting for Claude Code + MCP
         return send_json(h, out)
     if u.path.startswith("/api/session/"):
         sid = u.path.rsplit("/", 1)[1]
         t = app.turns.get(f"{user['uid']}/{sid}")
         s = t.snapshot() if t is not None and not t.done else st.get(sid)
+        if s and R.WARM and (t is None or t.done):
+            R.WARM.want(user, s)                    # the chat is open: its next message finds the agent started
         s and s.pop("claude_session", None)
         return send_json(h, s or {"error": "not found"}, 200 if s else 404)
     if u.path == "/api/pipelines":
@@ -476,6 +479,8 @@ def chat(h, app, user, st, body):
         s["model"] = allowed[0]
     if body.get("mode"):
         s["mode"] = body["mode"]
+    if not body.get("session") and R.WARM:          # a new chat: take the spare one if it was warmed for this mode and model
+        sid = s["id"] = R.WARM.reserve(user, s) or sid
     old = app.turns.get(tkey(sid))
     msg = body.get("message") or ""
     if old and not old.done:
@@ -631,12 +636,15 @@ def post_route(h, app, life, u, body):
                 return send_json(h, {"session": sid, "pipeline": c["id"], "command": c["command"], "inputs": c.get("inputs") or {}})
             c = pipeline.load(body.get("pipeline", ""), user["workspace"])     # the Query view's chat of a pipeline: made once, kept
             if c["kind"] == "analysis":
+                R.WARM and c.get("chat_session") and R.WARM.want(user, st.get(c["chat_session"]))
                 return send_json(h, {"session": c.get("chat_session") or "", "pipeline": c["id"]})
             if c.get("query_chat") and st.get(c["query_chat"]):
+                R.WARM and R.WARM.want(user, st.get(c["query_chat"]))      # the Query view is open: warm its chat
                 return send_json(h, {"session": c["query_chat"], "pipeline": c["id"]})
             st.put({"id": sid, "created": R._now(), "updated": R._now(), "turns": [], "user": user["name"], "title": f"Query: {c['name']}",
                     "mode": "ask", "pipeline": c["id"], "query": True, "app_dir": None, "folder": "queries", "model": model})
             pipeline.update(c["id"], lambda x: x.update(query_chat=sid))
+            R.WARM and R.WARM.want(user, st.get(sid))
             return send_json(h, {"session": sid, "pipeline": c["id"]})
         except pipeline.PipelineError as e:
             return send_json(h, {"error": str(e)}, 400)

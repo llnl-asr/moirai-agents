@@ -100,12 +100,15 @@ def register(mcp):
           entities {type?, uri_contains?, id?, ids?, all?, produced_since?, produced_until?} | activities {name?, pid?, since?, until?} |
           lineage {from, direction: back|forward, max_hops?} | group {from, by: type|role|store|name|pid} | ends {from} (roots of back, leaves of forward) |
           inputs {activity, since?, until?} (the parameters each run used: arguments, object attributes, command-line flags) | outputs {activity} (what it
-          returned) | attributes {from} (the attributes recorded for a step's entities).
+          returned) | attributes {from} (the attributes recorded for a step's entities) | stats {name, type?} or {name, from} (n, mean, median, min, max of
+          a recorded value over EVERY entity that records it - a mean or a range over a run is this step, never a sample or a script).
           Times: ISO, epoch seconds or microseconds, or start+30m / end-2h.
         Example, "what are the filter parameters": [{"op":"inputs","activity":"filter_msa"}].
+        Example, "what is the mean pLDDT of the predicted structures": [{"op":"stats","name":"mean_plddt","type":"best_structure"}].
         Example, "where did the top-5 summary come from": [{"op":"entities","type":"topk_summary","uri_contains":"top5"},{"op":"lineage","from":0,"direction":"back"},{"op":"ends","from":1}].
-        Returns {id, steps: [{step, op, resolved, result, table}], result_hash, stats}. Then write the user's answer from these results ONLY and attach it
-        with evidence_synthesis(pipeline, id, text), citing steps as [S1]..[Sn]."""
+        Returns {id, steps: [{step, op, resolved, result, table}], result_hash, stats}. Then write the user's answer from these results ONLY - as your
+        chat reply: the direct answer first, then spread, coverage, method, caveats - and attach it with evidence_synthesis(pipeline, id, text), citing
+        steps as [S1]..[Sn]; the Query view shows it as the answer."""
         try:
             rec = E.ask(pipeline, question, steps, chose="agent", chat=os.environ.get("MOIRAI_AGENTS_WEBUI_SESSION", ""))
         except E.PlanError as e:
@@ -116,8 +119,9 @@ def register(mcp):
 
     @mcp.tool()
     def evidence_synthesis(pipeline: str, id: str, text: str) -> dict:
-        """Attach your write-up for the user to a computed answer (evidence_answer's id). Short Markdown; every claim cites the step it rests on as [S1]..[Sn];
-        use only the numbers and names in the computed results. It is checked: a citation to no step, or a number not in the results, is flagged to the
+        """Attach your write-up for the user to a computed answer (evidence_answer's id): the same text as your chat reply, shown as the answer in the
+        Query view. Short Markdown, the direct answer in its first sentence; every claim cites the step it rests on as [S1]..[Sn]; use only the numbers
+        and names in the computed results, the question or the run's name. It is checked: a citation to no step, or a number not in the results, is flagged to the
         user next to it - fix and call again. Returns {id, synthesis_check: {ok, problems, citations}}."""
         try:
             return E.synthesize(pipeline, id, text)

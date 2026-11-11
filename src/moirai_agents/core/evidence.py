@@ -12,6 +12,8 @@ claim citing the queries and records it rests on.
                                                                   (arguments, object attributes, command-line flags, named values; name=value)
                  outputs     {activity, since?, until?}           what each run returned: "<activity>.output" entities
                  attributes  {from: step}                         the recorded attributes of a step's entities: "<type>.attribute", part_of
+                 stats       {name, type?} | {name, from: step}   n, mean, median, min, max of one recorded value over EVERY entity that
+                                                                  records it (all records, no sample), or over an attributes/inputs/outputs step
                times: ISO date-time, epoch seconds or microseconds, or relative to the run: "start+30m", "end-2h".
                "from" is the 0-based index of an earlier step.
     resolve    each step's selectors are made concrete before any query: entity type names checked against the types the
@@ -37,10 +39,10 @@ from typing import Any, Callable, Dict, List, Optional
 
 from . import pipeline as P
 from . import provtrace as T
-from .aggregate import ends       # a type the trace cut at 31 characters still counts as <x>.attribute / .input / .output
+from .aggregate import TYPE_MAX, ends       # a type the trace cut at 31 characters still counts as <x>.attribute / .input / .output
 
 MAX_STEPS, MAX_HOPS, MAX_NODES, MAX_CITE, MAX_ROWS, MAX_IN = 8, 30, 5000, 300, 200, 4000
-OPS = ("entities", "activities", "lineage", "group", "ends", "inputs", "outputs", "attributes")
+OPS = ("entities", "activities", "lineage", "group", "ends", "inputs", "outputs", "attributes", "stats")
 ACT = 'col("cat").is_in(["moirai", "PROV"])'
 
 
@@ -93,10 +95,13 @@ class Viewer:
     def q(self, why: str, text: str, build: Callable[[Any, Any, List[str]], Any]) -> List[Dict[str, Any]]:
         """build(tv, col, columns) -> a TraceViewer query (or None: nothing to ask in that file); text: how it reads, for the trail."""
         rows, t0, per = [], time.time(), {}
-        for f in self.files:
+
+        def one(f):
             tv = self.U.TraceViewer(f, self.idx).phase("any")
             q = build(tv, self.U.col, self.columns(f))
-            got = [] if q is None else [_clean(r) for r in q.collect().to_dicts()]
+            return [] if q is None else [_clean(r) for r in q.collect().to_dicts()]
+        got_all = [one(f) for f in self.files]    # one file at a time: threads made the 32-node run 2x slower
+        for f, got in zip(self.files, got_all):
             per[os.path.basename(f)] = len(got)
             rows += [{**r, "_file": os.path.basename(f)} for r in got]
         self.queries.append({"n": len(self.queries) + 1, "why": why, "query": f'TraceViewer(<file>).phase("any"){text}', "rows": len(rows),
@@ -135,7 +140,7 @@ def _act(r: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ------------------------------------------------------------------ the catalog: entity types and entities (metadata records)
-def _catalog(v: Viewer) -> Dict[str, Any]:
+def _load_catalog(v: Viewer) -> Dict[str, Any]:
     rows = v.q("catalog: the entity types, entities and entity relations the traces declare", '.filter(col("name").is_in(["ET", "EH", "ER"]))',
                lambda tv, col, cols: tv.filter(col("name").is_in(["ET", "EH", "ER"])))
     types, ents, parts = {}, {}, {}
@@ -152,6 +157,28 @@ def _catalog(v: Viewer) -> Dict[str, Any]:
             ents.setdefault(str(r["args.id"]), {"id": str(r["args.id"]), "type": r.get("args.type", ""), "uri": r.get("args.uri", ""),
                                                "store": T.STORES[st] if isinstance(st, int) and 0 <= st < len(T.STORES) else str(st), "ref": _ref(r)})
     return {"types": types, "entities": ents, "parts": parts}
+
+
+class _catalog:
+    """The entity types, entities and entity relations the traces declare, read on first use: a step that queries only what it needs (stats)
+    never loads every entity of a large run (7.9 million on the 32-node Elmerfold run)."""
+    def __init__(self, v: Viewer) -> None:
+        self.v, self.d = v, None
+
+    @property
+    def loaded(self) -> bool:
+        return self.d is not None
+
+    def _get(self) -> Dict[str, Any]:
+        if self.d is None:
+            self.d = _load_catalog(self.v)
+        return self.d
+
+    def __getitem__(self, k):
+        return self._get()[k]
+
+    def get(self, k, default=None):
+        return self._get().get(k, default)
 
 
 # ------------------------------------------------------------------ resolving times
@@ -210,22 +237,24 @@ def _entities(s, k, v, cat, outs, ctx):
         raise PlanError(f"step {k + 1} (entities): give type, uri_contains, id, ids or match (or all: true)")
     want = ([str(i)] if i else []) + [str(x) for x in (ids or [])]
     resolved = {"type": t, "uri_contains": u, "ids": want, **({"match": mt} if mt else {})}
-    text = ['col("name") == "EH"'] + ([f'col("args.type") == {t!r}'] if t else []) + ([f'col("args.uri").contains({u!r})'] if u else []) + \
+    text = ['col("name") == "EH"'] + ([f'col("args.type") == {t!r}'] if t else []) + ([f'col("args.uri").like({"%" + u + "%"!r})'] if u else []) + \
            ([f'col("args.id").is_in({want[:5]}{"…" if len(want) > 5 else ""})'] if want else []) + \
-           ([f'(col("args.id") == {mt!r} | col("args.type") == {mt!r} | col("args.uri").contains({mt!r}))'] if mt else [])
+           ([f'(col("args.id") == {mt!r} | col("args.type") == {mt!r} | col("args.uri").like({"%" + mt + "%"!r}))'] if mt else [])
 
     def build(tv, col, cols):
         p = col("name") == "EH"
         if t:
             p = p & (col("args.type") == t)
-        if u:
-            p = p & col("args.uri").contains(u)
+        if u:                                      # like, not contains: contains finds nothing once the text has "_" or "="
+            p = p & col("args.uri").like(f"%{u}%")
         if want:
             p = p & col("args.id").is_in(want)
         if mt:
-            p = p & ((col("args.id") == mt) | (col("args.type") == mt) | col("args.uri").contains(mt))
+            p = p & ((col("args.id") == mt) | (col("args.type") == mt) | col("args.uri").like(f"%{mt}%"))
         return tv.filter(p)
     rows = v.q(f"step {k + 1}: the entities", ".filter(" + " & ".join(text) + ")", build)
+    rows = [r for r in rows if (not u or u in str(r.get("args.uri", ""))) and                # "_" in a like pattern is any one character
+            (not mt or mt in (str(r.get("args.id", "")), str(r.get("args.type", ""))) or mt in str(r.get("args.uri", "")))]
     got = sorted({str(r["args.id"]) for r in rows if r.get("args.id")})
     a0, a1 = resolve_time(s.get("produced_since"), v, ctx), resolve_time(s.get("produced_until"), v, ctx)
     if a0 is not None or a1 is not None:           # entity records carry no time: an entity is in the frame when its producer is
@@ -392,8 +421,77 @@ def _attributes(s, k, v, cat, outs, ctx):
     return {"kind": "attribute", "runs": runs, "ids": sorted(by), "cites": ([_ref(r) for r in rel] + [_ref(r) for r in rows])[:MAX_CITE]}
 
 
+def _num(x) -> Optional[float]:
+    try:
+        f = float(str(x).strip())
+    except ValueError:
+        return None
+    return f if f == f else None                     # not NaN
+
+
+def _summary(vals: List[float]) -> Dict[str, Any]:
+    srt = sorted(vals)
+    m = len(srt) // 2
+    return {"n": len(srt), "mean": sum(srt) / len(srt), "median": srt[m] if len(srt) % 2 else (srt[m - 1] + srt[m]) / 2, "min": srt[0], "max": srt[-1]}
+
+
+def _stats(s, k, v, cat, outs, ctx):
+    """The statistics of one recorded value over every entity (or run) that carries it - n, mean, median, min, max - computed from all the
+    records, not a sample. {name, type?}: the "<type>.attribute" entities name=value (every type that records it when type is not given);
+    identical values share one entity, so each counts once per entity it is part_of. {name, from}: the values of an attributes / inputs /
+    outputs step."""
+    name = str(s.get("name") or "").strip()
+    if not name:
+        raise PlanError(f"step {k + 1} (stats): give name, the recorded value (e.g. mean_plddt)")
+    groups: Dict[str, Dict[str, Any]] = {}
+    cites: List[Dict[str, Any]] = []
+    if s.get("from") is not None:
+        src = _from(s, k, outs, ("attribute", "input", "output"))
+        of = (src.get("activity") or "entities") if src["kind"] != "attribute" else "entities"
+        vals = [f for r in src["runs"] for p, x in r["pairs"] if p == name for f in [_num(x)] if f is not None]
+        if vals:
+            groups[of] = {"values": vals, "distinct": len(set(vals))}
+        resolved = {"name": name, "from": s["from"]}
+    else:
+        t = s.get("type")
+        want = f"{t}.attribute" if t else None
+        rows = v.q(f"step {k + 1}: the attribute entities recording {name}", f'.filter(col("name") == "EH" & col("args.uri").like("{name}=%"))'
+                   + (f' (type {want})' if want else ' (types ending .attribute)'),
+                   lambda tv, col, cols: tv.filter((col("name") == "EH") & col("args.uri").like(f"{name}=%")))     # not contains: it finds nothing once the text has "_" or "="
+        val, typ, rec = {}, {}, {}
+        for r in rows:
+            ty, u, i = str(r.get("args.type", "")), str(r.get("args.uri", "")), str(r.get("args.id", ""))
+            if not i or not u.startswith(name + "=") or not ends(ty, ".attribute") or (want and not (ty == want or (len(ty) >= TYPE_MAX and want.startswith(ty)))):
+                continue
+            f = _num(u[len(name) + 1:])
+            if f is not None and i not in val:
+                val[i], typ[i], rec[i] = f, ty.rsplit(".", 1)[0], r
+        ids = sorted(val)
+        links = v.q(f"step {k + 1}: the entities those {len(ids)} values are part_of (one per entity that records it)",
+                    '.filter(col("name") == "ER" & col("args.subject").is_in(<ids>))',
+                    lambda tv, col, cols: tv.filter((col("name") == "ER") & col("args.subject").is_in(ids)) if ids else None) if ids else []
+        per = Counter(str(r["args.subject"]) for r in links if r.get("args.subject"))
+        by: Dict[str, List[float]] = {}
+        dist: Dict[str, int] = Counter()
+        for i in ids:
+            by.setdefault(typ[i], []).extend([val[i]] * max(per.get(i, 0), 1))
+            dist[typ[i]] += 1
+        groups = {ty: {"values": vs, "distinct": dist[ty]} for ty, vs in by.items()}
+        for ty in groups:                          # the records of the lowest and highest value of each type come first
+            mine = [i for i in ids if typ[i] == ty]
+            for i in (min(mine, key=val.get), max(mine, key=val.get)):
+                cites.append(_ref(rec[i]))
+        cites += [_ref(rec[i]) for i in ids[:MAX_CITE // 2]] + [_ref(r) for r in links[:MAX_CITE // 4]]
+        resolved = {"name": name, "type": want or "any .attribute", "entities": len(ids), "links": len(links)}
+    out = []
+    for ty, g in sorted(groups.items(), key=lambda x: -len(x[1]["values"])):
+        sm = _summary(g["values"])
+        out.append({"of": ty, "distinct": g["distinct"], **sm, "mean_distinct": (sum(set(g["values"])) / len(set(g["values"]))) if g["values"] else None})
+    return {"kind": "stats", "name": name, "groups": out, "ids": [], "resolved": resolved, "cites": cites[:MAX_CITE]}
+
+
 STEPS = {"entities": _entities, "activities": _activities, "lineage": _lineage, "group": _group, "ends": _ends,
-         "inputs": _inputs, "outputs": _outputs, "attributes": _attributes}
+         "inputs": _inputs, "outputs": _outputs, "attributes": _attributes, "stats": _stats}
 
 
 def check_plan(steps: Any) -> List[str]:
@@ -453,6 +551,11 @@ def headline(o, cat, ctx) -> str:
         return s
     if k == "group":
         return f"By {o['by']}: " + ", ".join(f"{g} {n}" for g, n in o["counts"].items()) + "."
+    if k == "stats":
+        if not o["groups"]:
+            return f"{o['name']}: no entity records it."
+        return " ".join(f"{o['name']} of {g['n']:,} {g['of']} entities: mean {_f2(g['mean'])}, median {_f2(g['median'])}, from {_f2(g['min'])} to {_f2(g['max'])}"
+                        + (f" ({g['distinct']:,} distinct values, whose mean is {_f2(g['mean_distinct'])})." if g["distinct"] != g["n"] else ".") for g in o["groups"])
     if k in ("input", "output", "attribute"):
         merged = _merged(o)
         what = {"input": f"{o.get('activity')} ran {len(o['runs'])} time(s); its parameters", "output": f"{o.get('activity')} ran {len(o['runs'])} time(s); what it returned",
@@ -476,8 +579,17 @@ def _merged(o) -> Dict[str, Any]:
     return seen
 
 
+def _f2(x: float) -> str:
+    """A statistic as stated: whole numbers as they are, others to 2 decimals."""
+    return str(int(x)) if x == int(x) and abs(x) < 1e15 else f"{x:.2f}"
+
+
 def table(o, cat, ctx) -> str:
     k = o["kind"]
+    if k == "stats":
+        return _table(["name", "of", "entities", "distinct values", "mean", "median", "min", "max", "mean of distinct"],
+                      [[o["name"], g["of"], f"{g['n']:,}", f"{g['distinct']:,}", _f2(g["mean"]), _f2(g["median"]), _f2(g["min"]), _f2(g["max"]),
+                        _f2(g["mean_distinct"])] for g in o["groups"]])
     if k == "entities":
         return _table(["type", "entity", "store", "id"], [[cat["entities"][i]["type"], _shown(cat["entities"][i]["uri"]), cat["entities"][i]["store"], i] for i in o["ids"] if i in cat["entities"]])
     if k == "activities":
@@ -563,8 +675,23 @@ def _answer_first(text: str) -> List[str]:
     return []
 
 
-def check_synthesis(text: str, n_steps: int, computed: str) -> Dict[str, Any]:
-    """Every [Sk] names a step; every number in the text appears in the computed result (headlines, tables, counts)."""
+_GROUPED = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+# a number as a reader writes it (99,801 or 79.00), not part of a name, an id or a date (elmerfold-prov-20261030, S4, 2026-11-09)
+_NUM = re.compile(r"(?<![\w.\-/:])\d[\d,]*(?:\.\d+)?(?!\.?\w|[\-/:]\d)")
+
+
+def _numbers(text: str) -> set:
+    out = set()
+    for n in re.findall(r"\d+(?:\.\d+)?", _GROUPED.sub("", text or "")):
+        out.add(n)
+        if "." in n:                                  # 79.00 is 79 and 79.0
+            out.add(n.rstrip("0").rstrip("."))
+    return out
+
+
+def check_synthesis(text: str, n_steps: int, computed: str, question: str = "") -> Dict[str, Any]:
+    """Every [Sk] names a step; every number in the text appears in the computed result (headlines, tables, counts) or in the question
+    (with the pipeline's id and name: "the 32-node run")."""
     if not text:
         return {"ok": True, "problems": [], "citations": []}
     cited = sorted({int(m) for m in _CIT.findall(text)})
@@ -572,9 +699,10 @@ def check_synthesis(text: str, n_steps: int, computed: str) -> Dict[str, Any]:
     if not cited:
         problems.append("no citation: every claim cites the step it comes from, as [S1]..[Sn]")
     problems += _answer_first(text)
-    known = set(re.findall(r"\d+(?:\.\d+)?", computed))
-    for num in re.findall(r"(?<![\w.])\d+(?:\.\d+)?(?![\w.])", _CIT.sub("", text)):
-        if num not in known:
+    known = _numbers(computed) | _numbers(question)
+    for num in _NUM.findall(re.sub(r"`[^`]*`", "", _CIT.sub("", text))):
+        n = num.replace(",", "")
+        if n not in known and n.rstrip("0").rstrip(".") not in known:
             problems.append(f"the number {num} is not in the computed result")
     return {"ok": not problems, "problems": problems[:12], "citations": cited}
 
@@ -625,6 +753,8 @@ def detect_gaps(steps: List[Dict[str, Any]], outs: List[Dict[str, Any]], cat: Di
                 add({"input": "no_inputs", "output": "no_outputs", "attribute": "no_attributes"}[o["kind"]], subject,
                     {"input": f"activity {subject} records no inputs: its parameters are not in the provenance",
                      "output": f"activity {subject} records no output value", "attribute": "these entities carry no attributes"}[o["kind"]], k)
+        elif o["kind"] == "stats" and not o["groups"]:
+            add("not_recorded", o["name"], f"no entity records {o['name']}: the annotation does not capture it as an attribute", k)
         elif o["kind"] == "entities" and not o["ids"] and (s.get("type") or s.get("match") or s.get("uri_contains")):
             what = s.get("type") or s.get("match") or s.get("uri_contains")
             add("not_recorded", what, f"nothing matching {what!r} is recorded: the annotation may not cover it", k)
@@ -652,9 +782,9 @@ def run(traces: str, steps: List[Dict[str, Any]], index_dir: str) -> Dict[str, A
     return {"gaps": detect_gaps(steps, outs, cat, ctx), "steps": res, "queries": v.queries, "reads": v.reads(), "outs": outs, "result_hash": _hash(outs), "secs": round(time.time() - t0, 3),
             "engine": {"name": "dftracer-utils TraceViewer", "version": getattr(v.U, "__version__", "?")},
             "computed": "\n".join(r["headline"] + "\n" + r["table"] for r in res),
-            "graph": _graph(lin, cat, ctx) if lin else None, "types": cat["types"],
+            "graph": _graph(lin, cat, ctx) if lin else None, "types": cat["types"] if cat.loaded else {},
             "stats": {"sources": len(v.files), "queries": len(v.queries), "rows_read": sum(q["rows"] for q in v.queries),
-                      "entities_declared": len(cat["entities"]), "cited": sum(len(o["cites"]) for o in outs)}}
+                      "entities_declared": len(cat["entities"]) if cat.loaded else None, "cited": sum(len(o["cites"]) for o in outs)}}
 
 
 def _touched(outs, ctx) -> Optional[Dict[str, Any]]:
@@ -724,7 +854,7 @@ def ask(pipeline: str, question: str, steps: List[Dict[str, Any]], synthesis: st
     if not tr:
         raise PlanError("this pipeline has no traces yet")
     r = run(tr, steps, index_dir_of(pipeline))
-    syn = check_synthesis(synthesis, len(steps), r["computed"])
+    syn = check_synthesis(synthesis, len(steps), r["computed"], f"{question} {pipeline} {c.get('name', '')}")
     last = r["steps"][-1]
     rec = {"id": uuid.uuid4().hex[:10], "ts": round(time.time(), 1), "pipeline": pipeline, "chat": chat, "engine": "traceviewer", "question": question,
            "plan": {"steps": steps, "chosen_by": chose}, "steps": r["steps"], "queries": r["queries"], "reads": r["reads"], "engine_info": r["engine"],
@@ -758,7 +888,8 @@ def synthesize(pipeline: str, aid: str, text: str) -> Dict[str, Any]:
     if not rec or rec.get("engine") != "traceviewer":
         raise PlanError("no computed answer with that id: evidence_answer first")
     computed = "\n".join(s["headline"] + "\n" + s["table"] for s in rec["steps"])
-    syn = check_synthesis(text, len(rec["steps"]), computed)
+    c = P.load(pipeline)
+    syn = check_synthesis(text, len(rec["steps"]), computed, f"{rec.get('question', '')} {pipeline} {c.get('name', '')}")
     rec = {**rec, "synthesis": text, "synthesis_check": syn, "problems": syn["problems"], "answer": text or rec["result"]["headline"], "updated": round(time.time(), 1)}
     with A._LOCK:
         with open(P.pdir(pipeline) / "answers.jsonl", "a") as fh:

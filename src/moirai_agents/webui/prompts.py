@@ -37,9 +37,11 @@ MODES = {
 DATASET = (" This chat is the Query view of one {what}: pipeline {pid}, traces at {traces}. It already exists: do not create "
            "another pipeline, and do not start, stop or change any stage or run here (another chat drives it). Load skill prov_query. "
            "Every answer is computed, not written: resolve the user's words into real types, ids and time frames (query_summary, "
-           "query_entities), run evidence_answer(pipeline={pid}, question, steps) - each step a TraceViewer query - then write a short "
-           "answer from its results only and attach it with evidence_synthesis, citing steps as [S1]..[Sn]. The Query view shows the "
-           "plan, the queries, the cited records and the lineage graph beside the chat; in the chat, one line pointing at it is enough.")
+           "query_entities), run evidence_answer(pipeline={pid}, question, steps) - each step a TraceViewer query; a mean, median or range "
+           "over the run is a stats step - never read or parse the trace files yourself. Then write the answer from its results only, as "
+           "your chat reply (the direct answer first, then spread, coverage, method, caveats), and attach the same text with "
+           "evidence_synthesis, citing steps as [S1]..[Sn]: the Query view shows it as the answer, with the plan, the queries, the cited "
+           "records and the lineage graph.")
 
 
 def system_prompt(mode: str, session: dict) -> str:
