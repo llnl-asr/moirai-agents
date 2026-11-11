@@ -300,8 +300,7 @@ async function wbAnnotate(first){if(!WB.sel||!WB.sel.item)return;const it=WB.sel
   <div class="vw-grid"><div class="vw-main"><div class="wq-tools"><b class="vw-t">${title}</b>${aggLegend(mode)}<span class="wq-btns"><button id="agfit">fit</button></span></div>
    <div id="aggann" class="vw-graph"></div><div id="agginfo" class="wq-info" hidden></div></div><div class="vw-side">${side}</div></div>`;
  if(v.dataset.h!==html){v.dataset.h=html;const keepG=AGG.ann&&$('#aggann');const old=keepG?$('#aggann'):null;v.innerHTML=html;if(old)$('#aggann').replaceWith(old);wireHead(v);$('#agfit').onclick=()=>aggFit(AGG.ann&&AGG.ann.cy);
-  const gg=$('#wbgapgo');if(gg)gg.onclick=()=>{const open=(it.gaps||[]).filter(g=>g.status==='open');
-   sendText('Improve the provenance coverage for the open gaps of this app ('+open.map(g=>g.id).join(', ')+'): gap_list, then follow skill prov_gaps for each.',running,[])};
+  const gg=$('#wbgapall');if(gg)gg.onclick=()=>workAllGaps(pid,gg);
   const dt=$('#wbdetect');if(dt)dt.onclick=()=>sendText('Describe this app\'s live-run inputs (what a scientist tunes when starting a long run): live_inputs_detect, curate them with what you know of the app, live_inputs_write and live_inputs_validate, then show them to me.',running,[])}
  await drawAgg('ann','aggann',d,null,x=>aggInfo('agginfo',x));if(first&&AGG.ann)aggFit(AGG.ann.cy);stageDetail()}
 
@@ -686,23 +685,35 @@ async function improveGaps(a,ids,btn){if(btn)btn.disabled=true;
  const r=await api('api/workbench/gaps',{pipeline:WB.sel.id,answer:a.id,gaps:ids});if(btn)btn.disabled=false;if(!r||r.error){alert((r&&r.error)||'could not open the gap');return}
  const lines=r.gaps.map(g=>`- ${g.id} (${g.kind}) ${g.subject}: ${g.detail}`).join('\n');
  const msg=`Improve the provenance coverage for ${r.gaps.length===1?'this gap':'these gaps'}, which a query exposed (question: “${a.question}”, answer ${a.id} on pipeline ${a.pipeline}):\n${lines}\n\n`+
-  'Load skill prov_gaps and follow it: explore the app\'s code for each, find why it was missed and name the cause, fix the annotation (capture inputs, outputs, '+
-  'variables or attributes, or annotate the missed function or entity), learn it generically in prov_annotate and for this workload in its workload capability, '+
-  'ask me before re-running the smoke or baseline, then re-run the question and gap_close.';
- const querySession=session,sleep=ms=>new Promise(z=>setTimeout(z,ms));
- goView('ann',r.app);
- const go=async()=>{for(let i=0;i<30&&!(WB.sel&&WB.sel.item&&WB.sel.id===r.app);i++)await sleep(300);
-  if(!WB.sel||WB.sel.id!==r.app){alert('Could not open the app in the Annotate view.');return}
-  // the request goes to the app's own chat (its annotation phase), never to the query chat it came from
-  if(r.chat){if(session!==r.chat)await openSession(r.chat);for(let i=0;i<25&&session!==r.chat;i++)await sleep(200)}
-  else if(session===querySession){$('#newbtn').onclick();setMode('run')}
-  if(r.chat?session!==r.chat:session===querySession&&querySession){alert('Could not open the app\'s chat: the request is in the box.');$('#input').value=msg;return}
-  if(running){alert('The app\'s chat is busy: your gap request is in the box; send it when the agent is done.');$('#input').value=msg;return}
-  setMode('run');sendText(msg,false,[])};go()}
-function gapsCard(it){const gs=it.gaps||[];if(!gs.length)return '';const open=gs.filter(g=>g.status==='open');
+  GAP_HOW+'ask me before re-running the smoke or baseline, then re-run the question and gap_close.';
+ toAppChat(r.app,r.chat,msg)}
+const GAP_HOW='Load skill prov_gaps and follow it: explore the app\'s code for each, find why it was missed and name the cause, fix the annotation (capture inputs, outputs, '+
+ 'variables or attributes, or annotate the missed function or entity), learn it generically in prov_annotate and for this workload in its workload capability, ';
+// the request goes to the app's own chat (its annotation phase), never to the query chat it came from
+async function toAppChat(app,chat,msg){const querySession=session,sleep=ms=>new Promise(z=>setTimeout(z,ms));
+ if(!(WB.view==='ann'&&WB.sel&&WB.sel.id===app))goView('ann',app);
+ for(let i=0;i<30&&!(WB.sel&&WB.sel.item&&WB.sel.id===app);i++)await sleep(300);
+ if(!WB.sel||WB.sel.id!==app){alert('Could not open the app in the Annotate view.');return}
+ if(chat){if(session!==chat)await openSession(chat);for(let i=0;i<25&&session!==chat;i++)await sleep(200)}
+ else if(session===querySession){$('#newbtn').onclick();setMode('run')}
+ if(chat?session!==chat:session===querySession&&querySession){alert('Could not open the app\'s chat: the request is in the box.');$('#input').value=msg;return}
+ if(running){alert('The app\'s chat is busy: your gap request is in the box; send it when the agent is done.');$('#input').value=msg;return}
+ setMode('run');sendText(msg,false,[])}
+// every gap of every query on this app (its runs, live runs, published datasets), collected onto the app and worked on in one request
+async function workAllGaps(pid,btn){if(btn){btn.disabled=true;btn.textContent='collecting the gaps of every query…'}
+ const r=await api('api/workbench/gaps/collect',{pipeline:pid});if(btn)btn.disabled=false;
+ if(!r||r.error){alert((r&&r.error)||'could not collect the gaps');if(btn)btn.textContent='Collect gaps from all queries';return}
+ if(!r.open.length){if(btn)btn.textContent=`No open gaps in ${r.answers} quer${r.answers===1?'y':'ies'}`;return}
+ const lines=r.open.map(g=>{const f=g.from||{},n=1+(g.seen_in||[]).length;return `- ${g.id} (${g.kind}) ${g.subject}: ${g.detail}\n  shown by “${f.question||'?'}” (answer ${f.answer||'?'} on ${f.pipeline||'?'})${n>1?`, and ${n-1} more answer${n>2?'s':''}`:''}`}).join('\n');
+ const msg=`Improve the provenance coverage for all ${r.open.length} open gap${r.open.length>1?'s':''} of this app, collected from every query asked about it (${r.answers} answer${r.answers===1?'':'s'}; gap_list has each one's question and plan):\n${lines}\n\n`+
+  GAP_HOW+'and work them as ONE batch: group the gaps by function or entity, fix each group in one pass, ask me ONCE before a single re-run of the smoke or baseline, '+
+  'then re-run every question that showed a gap and gap_close each.';
+ toAppChat(r.app,r.chat,msg)}
+function gapsCard(it){if(!Array.isArray(it.gaps))return '';const gs=it.gaps,open=gs.filter(g=>g.status==='open');
  return `<div class="wb-card"><div class="wb-sec">Provenance gaps <span class="sub">${open.length} open · ${gs.length-open.length} fixed</span></div><ul class="wb-gaps">${gs.slice().reverse().slice(0,pro()?30:8).map(g=>
   `<li class="${esc(g.status)}"><b>${esc(g.status==='open'?'open':g.status==='closed'?'✓ closed':'fixed, run pending')}</b> ${esc(GAP_L[g.kind]||g.kind)} <code>${esc(g.subject)}</code>${g.cause?` <span class="sub">· ${esc(g.cause.replace(/_/g,' '))}</span>`:''}${pro()&&g.how?`<div class="sub">${esc(g.how)}</div>`:''}</li>`).join('')}</ul>
-  ${open.length?`<button class="btn" id="wbgapgo">Work on the ${open.length} open gap${open.length>1?'s':''}</button>`:''}</div>`}
+  ${gs.length?'':'<div class="sub">What the queries on this app could not show. Collect them from every query asked so far, and fix them together.</div>'}
+  <button class="btn primary" id="wbgapall" title="Collect the gaps of every query on this app, its live runs and its published datasets, and send them to the app's chat as one request">Collect gaps from all queries &amp; fix them together</button></div>`}
 
 // ---- what is running now, from any tab: every app or run with a running job, a working agent, or a question for you
 function activeOf(d){return [...d.apps,...d.lives,...d.datasets].filter(x=>(x.jobs||[]).length||x.busy||['running','working','needs_you'].includes(x.state))}

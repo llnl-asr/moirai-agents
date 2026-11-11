@@ -15,6 +15,16 @@ def register(mcp):
             return {"status": "error", "error": str(e)}
 
     @mcp.tool()
+    def gap_collect(pipeline: str) -> dict:
+        """Collect the gaps of EVERY query asked about the app (its own answers, its live runs', its published datasets') onto the app, so all
+        of them are worked on together: one gap per kind and subject, a gap already fixed after the answer that showed it stays fixed.
+        Returns {app, chat, added, seen, answers, open}."""
+        try:
+            return G.collect(pipeline)
+        except P.PipelineError as e:
+            return {"status": "error", "error": str(e)}
+
+    @mcp.tool()
     def gap_open(pipeline: str, answer_id: str, gap_id: str) -> dict:
         """Open a gap of a computed answer (evidence_answer's gaps) on the app it came from, to be fixed in the annotation phase. The Query view
         does this from its 'find and fix' button; call it when the user asks you to fix a gap from the chat. Returns the gap, with app and chat."""

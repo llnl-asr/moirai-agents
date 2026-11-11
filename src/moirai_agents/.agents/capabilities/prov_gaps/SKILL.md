@@ -9,11 +9,15 @@ Cross-references: [[prov_annotate]] [[prov_query]] [[prov_discover]] [[capabilit
 
 A gap is what a computed answer could not explain: `undeclared_entity` (referenced, never declared), `missing_producer` (nothing recorded
 making an entity: a function was missed), `no_inputs` / `no_outputs` / `no_attributes` (what a function was run with, returned, or what an
-entity is, is not recorded), `not_recorded` (something the question names is not in the provenance at all). The fix belongs in the
+entity is, is not recorded), `not_recorded` (something the question names is not in the provenance at all), `reported` (the answer's write-up says the traces do not show
+something; its detail is that sentence). The fix belongs in the
 annotation, and the lesson belongs in two capabilities, so the next app and the next run of this one are captured right.
 
 ## Rules
-1. `gap_list` on the app: the gap, the question that exposed it, and the plan that ran.
+1. `gap_list` on the app: the gap, the question that exposed it, and the plan that ran. Asked to work on ALL gaps: `gap_collect` first (every
+   query's gaps onto the app, one per kind and subject), then work them as ONE batch: group the open gaps by function / entity, fix each group's
+   annotation in one pass, learn once per structure, ask ONCE before the single re-run, re-run every question that showed a gap, then
+   `gap_close` each.
 2. Explore the app's code where the subject lives (search the source tree for the function, the entity's file pattern, the parameter names). Find WHY it was missed and name the cause:
    - `missed_inputs` / `missed_variables`: the parameters are not arguments - read from `self` or a config object, built into a command line inside the function, taken from the environment or a file.
    - `missed_outputs`: the result is written, returned through a callback, or kept on the object, not returned.

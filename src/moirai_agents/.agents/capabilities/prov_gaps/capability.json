@@ -6,6 +6,7 @@
  "stages": [],
  "tools": [
   "gap_list",
+  "gap_collect",
   "gap_open",
   "gap_close",
   "gap_validate"
@@ -13,6 +14,7 @@
  "pvc": {
   "predictor": [
    "gap_list",
+   "gap_collect",
    "gap_open",
    "gap_close"
   ],

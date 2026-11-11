@@ -367,6 +367,32 @@ def test_a_gap_is_opened_on_the_app_and_closed_only_with_what_was_learned(tmp_pa
                    recheck_answer=again["id"])["status"] == "error"
 
 
+def test_the_gaps_of_every_query_are_collected_onto_the_app_once(tmp_path):
+    """gap_collect: every answer on the app and its live runs, one gap per kind and subject; what the write-up says is not recorded is a gap;
+    a gap fixed after the answer that showed it is not reopened."""
+    from moirai_agents.core import answers as A, evidence as E, gaps as G
+    run = integrated_app(tmp_path)
+    P.update(run["id"], lambda c: c.update(chat_session="app-chat"))
+    P.record(run["id"], "baseline", outputs={"traces": str(traces(tmp_path))})
+    L = P.new("live", "app-live", parent=run["id"])
+    P.record(L["id"], "live_run", outputs={"traces": P.stage(P.load(run["id"]), "baseline")["outputs"]["traces"]})
+    E.ask(run["id"], "What happened in prep?", [{"op": "activities", "name": "prep"}])
+    E.ask(L["id"], "What happened in prep, live?", [{"op": "activities", "name": "prep"}])
+    said = E.ask(L["id"], "Which prep run failed?", [{"op": "activities", "name": "prep"}],
+                 synthesis="prep ran [S1]. No exit status is recorded for prep, so the traces do not say which run failed.")
+    assert [g["kind"] for g in A.listing(L["id"])[-1]["gaps"]] == ["no_inputs"]       # a structural gap found: the write-up adds none
+    assert E.reported_gaps(said["synthesis"], 1, [])[0]["kind"] == "reported"
+    assert set(G.related(run["id"])) == {run["id"], L["id"]} and G.related(L["id"]) == []
+    r = G.collect(L["id"])                                        # from the live run: kept on its app
+    assert r["app"] == run["id"] and r["chat"] == "app-chat" and r["answers"] == 3 and r["added"] == 1
+    (g,) = r["open"]
+    assert (g["kind"], g["subject"]) == ("no_inputs", "prep") and len(g["seen_in"]) == 2      # three answers, one gap
+    again = G.collect(run["id"])
+    assert again["added"] == 0 and len(again["open"][0]["seen_in"]) == 2                     # collecting twice changes nothing
+    P.update(run["id"], lambda c: c["gaps"][0].update(status="fixed_pending_run", closed=__import__("time").time() + 1))
+    assert G.collect(run["id"])["open"] == []                    # fixed after these answers: not reopened by them
+
+
 
 def test_captured_values_are_properties_of_the_nodes_they_describe(tmp_path):
     """Aggregated: an entity type lists its attribute names, an activity its input names. Instances: the actual values. No captured-value nodes."""

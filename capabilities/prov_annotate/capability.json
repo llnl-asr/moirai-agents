@@ -1,7 +1,7 @@
 {
  "name": "prov_annotate",
  "description": "Add moirai provenance to an application - find data accesses, agree entity types and activities with the user, insert them into a copy (decorate a function, patch or subclass a method, annotate a statement, record a shell step of a Maestro YAML, invalidate, conditional edges), validate, and show the user an entity-type relationship diagram of what was annotated at the gate. Load for the annotate stage, or when a spec needs an inherited method, an inline subprocess step, a delete, a key from a local variable or an optional input, when the work is a shell command in a Maestro YAML `cmd:` step (AlphaFold 3, Rosetta FlexPepDock, BioTox, yaml_step), when a question about the parameters or flags of a step finds none recorded (a no-argument on_finish/run/__call__ hook whose command line was built in the constructor), when a gap says no_outputs or no_attributes (a hook that returns None keeps its result on self: record it with capture.outputs and as attributes; a question about quality, depth, size or counts of a data entity finds no attributes), or when the annotate verdict is inconclusive about PYTHONPATH, moirai_env.sh or maestro_dry.",
- "version": 11,
+ "version": 13,
  "enabled": true,
  "stages": [
   "annotate"
@@ -123,6 +123,20 @@
    "by": "haridev",
    "proposal": "0d18829be0f7",
    "why": "User: \"can u support quality of msas\". Answer said traces give depth but not quality (no coverage, identity or e-value). Add a generic rule: quality is a set of cheap computed metrics recorded as attributes, placed on a worker activity, with the stated limits of the data."
+  },
+  {
+   "version": 12,
+   "ts": 1794438088.2180312,
+   "by": "haridev",
+   "proposal": "182e5a0469b9",
+   "why": "Gap G-450f0964 (no_inputs on statement activity load_inputs, pipeline elmerfold-prov-20261030-125944, answer 3d170edb64): a statement activity has no automatic input capture, so it recorded no .input entities; the rule, explore checklist item and Corrector row were missing."
+  },
+  {
+   "version": 13,
+   "ts": 1794438618.4173846,
+   "by": "haridev",
+   "proposal": "707c85bd39ab",
+   "why": "Generic lessons from a 23-gap batch on the Elmerfold app; user: 'Improve the provenance coverage for all 23 open gaps'. Adds a section on relating an entity in every activity, subprocess failures, environment facts, how-many/which-one values, and reading annotate_apply unresolved."
   }
  ]
 }

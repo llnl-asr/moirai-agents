@@ -327,7 +327,8 @@ def _lineage(s, k, v, cat, outs, ctx):
         frontier = nxt
     ctx.setdefault("acts", {}).update(seen_a)
     has_producer = {x for a in seen_a.values() for x in a[produce]}
-    ends = sorted(i for i in seen_e if i not in start and i not in has_producer)
+    unexpanded = set(frontier)          # reached on the last hop but never looked up: an entity there has an unknown producer, not a missing one
+    ends = sorted(i for i in seen_e if i not in start and i not in has_producer and i not in unexpanded)
     cites = [cat["entities"][i]["ref"] for i in sorted(seen_e) if i in cat["entities"]] + cites
     return {"kind": "lineage", "direction": d, "start": sorted(start), "entities": sorted(seen_e), "activities": sorted(seen_a), "hops": hops, "ends": ends,
             "dangling": sorted(i for i in seen_e if i not in cat["entities"]), "cites": cites[:MAX_CITE], "truncated": bool(frontier)}

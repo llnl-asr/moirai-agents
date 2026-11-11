@@ -593,6 +593,14 @@ def post_route(h, app, life, u, body):
             R.wlog("mcp-restart", server=name, ok={n: c.get("ok") for n, c in (r.get("checks") or {}).items()})
         return send_json(h, {**r, **mcp.state(user["workspace"], sum(1 for t in list(app.turns.values()) if not t.done))},
                          400 if r.get("error") else 200)
+    if u.path == "/api/workbench/gaps/collect":   # every query's gaps, kept on the app, to be worked on in one go
+        _fresh_wb()
+        from ..core import gaps as G
+        try:
+            r = G.collect(body.get("pipeline", ""))
+            return send_json(h, {**r, "open": [{k: g.get(k) for k in ("id", "kind", "subject", "detail", "from", "seen_in")} for g in r["open"]]})
+        except pipeline.PipelineError as e:
+            return send_json(h, {"error": str(e)}, 400)
     if u.path == "/api/workbench/gaps":           # gaps a computed answer showed: kept on the app, to be fixed in its annotation phase
         _fresh_wb()
         from ..core import gaps as G
