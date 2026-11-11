@@ -182,7 +182,12 @@ def listing(pipeline: str, workspace: Optional[str] = None, limit: int = 100) ->
         if k not in last:
             order.append(k)
         last[k] = r
-    return [last[k] for k in order][-limit:]
+    out = [last[k] for k in order][-limit:]
+    from . import evidence as E            # what a computed answer's write-up says is not recorded is a gap too (older records included)
+    for r in out:
+        if r.get("engine") == "traceviewer" and r.get("synthesis") and isinstance(r.get("gaps"), list):
+            r["gaps"] = r["gaps"] + E.reported_gaps(r["synthesis"], len(r.get("steps") or []), r["gaps"])
+    return out
 
 
 def pin(pipeline: str, aid: str, on: bool, workspace: Optional[str] = None) -> bool:

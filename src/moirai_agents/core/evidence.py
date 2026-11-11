@@ -761,6 +761,36 @@ def detect_gaps(steps: List[Dict[str, Any]], outs: List[Dict[str, Any]], cat: Di
     return list(gaps.values())
 
 
+_SAYS_MISSING = re.compile(
+    r"\b(traces?|provenance|annotations?|records?)\s+(do|does|did)\s+not\s+(name|say|record|show|capture|tell|include|identify|list|contain)\b"
+    r"|\bnot\s+(recorded|captured|annotated|in\s+the\s+(traces|provenance))\b"
+    r"|\bno\b[^.;]{0,100}\b(is|are|was|were)\s+recorded\b(?!\s+as\b)"
+    r"|\b(cannot|can't|could\s+not)\s+(be\s+)?(tell|told|determine|determined|identify|identified|show|shown)\b", re.I)
+
+
+def reported_gaps(synthesis: str, n_steps: int, have: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """What the write-up itself says the traces do not show (\"the traces do not name them\"), as 'reported' gaps - only when the structural
+    detection found none for this answer, so a missing thing the answer admits to can still be improved from the Query view."""
+    if not synthesis or any(g.get("kind") != "reported" for g in have if isinstance(g, dict)):
+        return []
+    out, seen = [], set()
+    for sent in re.split(r"(?<=[.!?])\s+(?=[A-Z])|\n+", synthesis):
+        s = re.sub(r"\*\*|[`#>]+|^\s*[-+*]\s+", "", sent).strip()
+        if not s or not _SAYS_MISSING.search(s):
+            continue
+        cite = re.search(r"\[S(\d+)\]", s)
+        detail = re.sub(r"\s*\[[SR]\d+\]", "", s)
+        gid = hashlib.sha1(f"reported|{detail}".encode()).hexdigest()[:8]
+        if gid in seen:
+            continue
+        seen.add(gid)
+        out.append({"id": gid, "kind": "reported", "subject": (detail[:77] + "…") if len(detail) > 80 else detail, "detail": detail,
+                    "step": int(cite.group(1)) if cite else max(1, n_steps)})
+        if len(out) >= 3:
+            break
+    return out
+
+
 # ------------------------------------------------------------------ the whole thing
 def run(traces: str, steps: List[Dict[str, Any]], index_dir: str) -> Dict[str, Any]:
     bad = check_plan(steps)
