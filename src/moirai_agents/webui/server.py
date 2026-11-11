@@ -35,7 +35,7 @@ from .. import workspace
 PKG = Path(__file__).resolve().parents[1]
 WEB = Path(__file__).resolve().parent
 HOT = [moirai_env, pipeline, jobs, provtrace, capstore, learning, workspace, prompts, api]    # in dependency order
-COLD = [WEB / f for f in ("server.py", "runtime.py", "dfdash.py", "accounts.py", "bridge.py", "procs.py")] + [PKG / "env.py", PKG / "core" / "selfrefresh.py"]
+COLD = [WEB / f for f in ("server.py", "runtime.py", "warm.py", "dfdash.py", "accounts.py", "bridge.py", "procs.py")] + [PKG / "env.py", PKG / "core" / "selfrefresh.py"]
 TICK = 2.0
 CONSOLIDATION_S = 300.0
 RESTARTED = "MOIRAI_AGENTS_WEBUI_RESTARTED"     # set across reexec(): the one start that keeps its instance id
@@ -114,6 +114,7 @@ def watch_consolidation(app: "R.App") -> None:
 def reexec(app: "R.App", life: Life, srv) -> None:
     """Replace this process's code, keeping the socket: the browser sees at most a brief pause."""
     print(f"{time.strftime('%F %T')} re-executing for the new code", flush=True)
+    app.warm.stop_all()                             # idle agents of the old code: the new one warms its own
     fd = srv.socket.fileno()
     os.set_inheritable(fd, True)
     os.environ.update(MOIRAI_AGENTS_WEBUI_FD=str(fd), MOIRAI_AGENTS_WEBUI_STARTED=str(life.started), MOIRAI_AGENTS_WEBUI_ACTIVE=str(life.active))
@@ -214,6 +215,7 @@ def shutdown(app: "R.App", instance: str, grace: float = 10.0) -> None:
     for t in running:
         t.emit({"type": "error", "text": "the moirai-agents server is shutting down; this run was stopped"})
         t.stop()
+    app.warm.stop_all()
     end = time.time() + grace
     for t in running:
         with t.cond:
@@ -259,6 +261,9 @@ def main(argv=None) -> int:
         signal.signal(sig, on_signal)
     threading.Thread(target=lifecycle, args=(app, life, srv), daemon=True, name="lifecycle").start()
     threading.Thread(target=watch_consolidation, args=(app,), daemon=True, name="consolidation").start()
+    from . import background
+    app.background = background.Background(app)
+    threading.Thread(target=background.watch, args=(app,), daemon=True, name="background").start()
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

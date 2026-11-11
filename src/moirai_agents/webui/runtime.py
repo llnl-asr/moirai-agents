@@ -102,7 +102,7 @@ class Store:
                 s = json.loads(p.read_text())
             except ValueError:
                 continue
-            row = {k: s.get(k) for k in ("id", "title", "mode", "app_dir", "model", "created", "updated", "archived")}
+            row = {k: s.get(k) for k in ("id", "title", "mode", "app_dir", "model", "created", "updated", "archived", "pinned", "folder")}
             out.append(row)
         return out
 
@@ -116,6 +116,40 @@ class Store:
             else:
                 s.pop("archived", None)
                 s["updated"] = _now()          # restored: the active-chat clock starts again
+            tmp = self.path(sid).with_suffix(".tmp")
+            tmp.write_text(json.dumps(s))
+            os.replace(tmp, self.path(sid))
+        return True
+
+    def rename(self, sid: str, title: str) -> bool:
+        """Give a chat a new name (what the left bar shows). Does not touch its updated time."""
+        title = " ".join((title or "").split())[:120]
+        if not title:
+            return False
+        with self.lock:
+            s = self.get(sid)
+            if s is None:
+                return False
+            s["title"] = title
+            tmp = self.path(sid).with_suffix(".tmp")
+            tmp.write_text(json.dumps(s))
+            os.replace(tmp, self.path(sid))
+        return True
+
+    def set_fields(self, sid: str, **kv) -> bool:
+        """Organise a chat: pinned (a time, or None to unpin) and folder (one level: a name, or None for no folder).
+        Never touches the updated time, so organising is not activity."""
+        with self.lock:
+            s = self.get(sid)
+            if s is None:
+                return False
+            for k, v in kv.items():
+                if k not in ("pinned", "folder"):
+                    continue
+                if v in (None, "", False):
+                    s.pop(k, None)
+                else:
+                    s[k] = v
             tmp = self.path(sid).with_suffix(".tmp")
             tmp.write_text(json.dumps(s))
             os.replace(tmp, self.path(sid))
@@ -626,6 +660,59 @@ REFLECT = ("[Turn check, automatic] This turn ended and no lesson or capability 
            "call lesson_add on capability_builder saying so in one line, with what the turn was about. Then stop; reply with one line.")
 
 
+def turn_spec(session: dict, user: dict, sync_caps: bool = True) -> dict:
+    """Everything about a chat's next `claude -p` process that does not depend on the message: the command
+    (model, system prompt with the approved lessons, --resume, MCP config), its environment and folders.
+    Turn uses it to start a turn; warm.WarmPool uses it to start the same process ahead of the message.
+    sync_caps=False skips the (seconds-long) capability sync: for comparing a warm process with now."""
+    # Messages go in on stdin (stream-json) so the user can steer a running turn: extra messages
+    # are delivered to the agent between tool calls, without interrupting it.
+    cmd = [claude_bin(), "-p", "--input-format", "stream-json", "--replay-user-messages",
+           "--output-format", "stream-json", "--verbose",
+           "--include-partial-messages", "--model", session["model"],
+           "--mcp-config", str(Path(user["workspace"]) / ".mcp.json"), "--strict-mcp-config",
+           "--allowedTools", ",".join(ALL_TOOLS),
+           "--permission-mode", "acceptEdits",
+           "--append-system-prompt", ""]
+    from . import prompts
+    prompt = prompts.system_prompt(session.get("mode", "ask"), session)
+    # approved lessons, read fresh every turn (an approval applies from the next message on)
+    try:
+        from ..core import learning
+        if sync_caps:
+            from ..workspace import sync
+            sync(Path(user["workspace"]))         # new or updated capabilities are there for this turn, with no bootstrap
+        lessons, lessons_meta = learning.context([]), {}
+    except Exception as e:  # never block a turn on this
+        lessons, lessons_meta = "", {"error": str(e)}
+    cmd[cmd.index("--append-system-prompt") + 1] = prompt + lessons
+    if session.get("claude_session"):
+        cmd += ["--resume", session["claude_session"]]
+    if session.get("app_dir"):
+        cmd += ["--add-dir", session["app_dir"]]
+    env = agent_env(user, session["model"])
+    env.setdefault("MCP_TIMEOUT", os.environ.get("MOIRAI_AGENTS_MCP_TIMEOUT_MS", "120000"))   # dftracer's server
+    env["MOIRAI_AGENTS_WEBUI_SESSION"] = session["id"]                                        # can need > Claude Code's 30 s default on a slow FS
+    env["MOIRAI_AGENTS_USER"] = user["name"]
+    env["MOIRAI_AGENTS_USER_WORKSPACE"] = user["workspace"]
+    env["DFTRACER_WORKSPACES"] = str(Path(user["workspace"]) / "workspaces")   # sessions stay here, whatever the shell exported
+    if provider_of(user.get("key")) != "login":   # the owner's own login must stay in its own config dir
+        env["CLAUDE_CONFIG_DIR"] = str(Path(user["workspace"]) / ".claude-home")   # private transcripts
+    live_dir = Path(user["workspace"]) / ".moirai-agents" / "live" / uuid.uuid4().hex[:12]
+    env["MOIRAI_AGENTS_LIVE_DIR"] = str(live_dir)     # hooks/live_log.py writes Bash output here
+    return {"cmd": cmd, "env": env, "cwd": user["workspace"], "live_dir": live_dir, "lessons_meta": lessons_meta,
+            "claude_home": env.get("CLAUDE_CONFIG_DIR") or str(claude_home())}
+
+
+def spec_signature(spec: dict) -> str:
+    """Two specs with the same signature start the same agent (the per-turn live folder aside)."""
+    env = {k: v for k, v in spec["env"].items() if k != "MOIRAI_AGENTS_LIVE_DIR"}
+    return hashlib.sha256(json.dumps([spec["cmd"], sorted(env.items()), spec["cwd"]]).encode()).hexdigest()
+
+
+WARM = None   # warm.WarmPool of this server (set by App): agents started ahead of the next message
+
+
 class Turn:
     """One running `claude -p` process; events are fanned out to listeners."""
 
@@ -637,49 +724,17 @@ class Turn:
         self.cond = threading.Condition()
         self.done = False
         self.proc: Optional[subprocess.Popen] = None
-        claude = claude_bin()
-        mode = session.get("mode", "ask")
-        tools = ALL_TOOLS
-        # Messages go in on stdin (stream-json) so the user can steer a running turn: extra messages
-        # are delivered to the agent between tool calls, without interrupting it.
-        cmd = [claude, "-p", "--input-format", "stream-json", "--replay-user-messages",
-               "--output-format", "stream-json", "--verbose",
-               "--include-partial-messages", "--model", session["model"],
-               "--mcp-config", str(Path(user["workspace"]) / ".mcp.json"), "--strict-mcp-config",
-               "--allowedTools", ",".join(tools),
-               "--permission-mode", "acceptEdits",
-               "--append-system-prompt", ""]
-        from . import prompts
-        prompt = prompts.system_prompt(mode, session)
-        # approved lessons, read fresh every turn (an approval applies from the next message on)
-        chat = "\n".join([session.get("title") or "", session.get("app_dir") or "", message]
-                         + [t.get("text") or "" for t in session.get("turns", []) if t.get("role") == "user"][-10:])
-        try:
-            from ..core import learning
-            from ..workspace import sync
-            sync(Path(user["workspace"]))         # new or updated capabilities are there for this turn, with no bootstrap
-            lessons, self.lessons_meta = learning.context([]), {}
-        except Exception as e:  # never block a turn on this
-            lessons, self.lessons_meta = "", {"error": str(e)}
-        cmd[cmd.index("--append-system-prompt") + 1] = prompt + lessons
-        if session.get("claude_session"):
-            cmd += ["--resume", session["claude_session"]]
-        if session.get("app_dir"):
-            cmd += ["--add-dir", session["app_dir"]]
-        self.cmd = cmd
-        self.env = agent_env(user, session["model"])
-        self.env.setdefault("MCP_TIMEOUT", os.environ.get("MOIRAI_AGENTS_MCP_TIMEOUT_MS", "120000"))   # dftracer's server
-        self.mcp_reported: Dict[str, bool] = {}            # can need > Claude Code's 30 s default on a slow FS
-        self.env["MOIRAI_AGENTS_WEBUI_SESSION"] = session["id"]
-        self.env["MOIRAI_AGENTS_USER"] = user["name"]
-        self.env["MOIRAI_AGENTS_USER_WORKSPACE"] = user["workspace"]
-        self.env["DFTRACER_WORKSPACES"] = str(Path(user["workspace"]) / "workspaces")   # sessions stay here, whatever the shell exported
-        if provider_of(user.get("key")) != "login":   # the owner's own login must stay in its own config dir
-            self.env["CLAUDE_CONFIG_DIR"] = str(Path(user["workspace"]) / ".claude-home")   # private transcripts
-        self.cwd = user["workspace"]
-        self.claude_home = self.env.get("CLAUDE_CONFIG_DIR") or str(claude_home())
-        self.live_dir = Path(user["workspace"]) / ".moirai-agents" / "live" / uuid.uuid4().hex[:12]
-        self.env["MOIRAI_AGENTS_LIVE_DIR"] = str(self.live_dir)     # hooks/live_log.py writes Bash output here
+        # An agent already started for this chat's next message (warm.py) skips the capability sync and the
+        # Claude Code + MCP start-up; it is used only when it was started exactly as this turn would start one.
+        self.warm = WARM.take(user, session) if WARM is not None else None
+        spec = self.warm.spec if self.warm else turn_spec(session, user)
+        self.lessons_meta = spec["lessons_meta"]
+        self.cmd = spec["cmd"]
+        self.env = spec["env"]
+        self.mcp_reported: Dict[str, bool] = {}
+        self.cwd = spec["cwd"]
+        self.claude_home = spec["claude_home"]
+        self.live_dir = spec["live_dir"]
         self.live: Dict[str, dict] = {}                      # running Bash tool_use_id -> {pos, tail}
         # uploads live in the chat's folder of the user's (private) workspace: kept with the chat
         # (MOIRAI_AGENTS_UPLOADS_KEEP=run: a per-run folder deleted when the run ends)
@@ -699,6 +754,7 @@ class Turn:
         self.started = _now()
         self.tools: Dict[str, int] = {}
         self.agents: list = []
+        self.agent_uses: set = set()          # tool_use ids of the helpers (Agent/Task) launched in this turn
         self.prov = PROV
         self.message = message + self.upload_note(meta)
         self.io_lock = threading.Lock()
@@ -715,6 +771,8 @@ class Turn:
         with self.cond:
             self.events.append(ev)
             t = ev.get("type")
+            if t == "tool_use" and ev.get("agent") and not ev.get("parent"):
+                self.agent_uses.add(ev.get("id"))
             if t == "tool_log":                       # live output: streamed, not stored (the result has it)
                 lv = self.live.get(ev["id"])
                 if lv is not None:
@@ -751,6 +809,48 @@ class Turn:
                     self.live[tid]["pos"] = pos + len(chunk)
                 self.emit({"type": "tool_log", "id": tid, "text": chunk.decode("utf-8", "replace")})
         shutil.rmtree(self.live_dir, ignore_errors=True)
+
+    def _tail_agents(self) -> None:
+        """A helper started in the background (Agent with run_in_background) does not stream into the turn: Claude Code writes its
+        transcript live beside the chat's own, <config>/projects/<cwd>/<session>/subagents/agent-<id>.jsonl, with a meta.json naming
+        the tool_use that launched it. Follow those of this turn and emit their steps under that tool_use, as a foreground helper's
+        are, so the chat shows what it is doing; then an agent_done event when it finishes."""
+        home, pos, done, final = Path(self.claude_home) / "projects", {}, set(), False
+        while True:
+            final = self.done
+            sid, ids = self.session.get("claude_session"), set(self.agent_uses)
+            for meta in (home.glob(f"*/{sid}/subagents/agent-*.meta.json") if sid and ids else []):
+                try:
+                    m = json.loads(meta.read_text())
+                except (OSError, ValueError):
+                    continue
+                tid = m.get("toolUseId")
+                if tid not in ids or tid in done or m.get("requestShape") != "background":
+                    continue
+                f = meta.with_name(meta.name[:-len(".meta.json")] + ".jsonl")
+                try:
+                    with open(f, "rb") as fh:
+                        fh.seek(pos.get(f, 0))
+                        chunk = fh.read(4 << 20)
+                except OSError:
+                    continue
+                whole = chunk[:chunk.rfind(b"\n") + 1]            # complete lines only; the rest is read next time
+                pos[f] = pos.get(f, 0) + len(whole)
+                for line in whole.decode("utf-8", "replace").splitlines():
+                    try:
+                        d = json.loads(line)
+                    except ValueError:
+                        continue
+                    if d.get("type") in ("assistant", "user") and isinstance(d.get("message"), dict):
+                        for ev in normalize({"type": d["type"], "message": d["message"], "parent_tool_use_id": tid}):
+                            ev["background"] = True
+                            self.emit(ev)
+                if m.get("finished") and len(whole) == len(chunk):
+                    done.add(tid)
+                    self.emit({"type": "agent_done", "id": tid, "agent": m.get("agentType"), "description": m.get("description")})
+            if final:
+                return
+            time.sleep(2)
 
     def save_uploads(self, files: list) -> list:
         """files: [(name, bytes)] -> metadata only ({name, size, sha256}); content goes to upload_dir."""
@@ -867,7 +967,7 @@ class Turn:
             "app_dir": s.get("app_dir"), "workspace": self.user["workspace"], "owner": self.user.get("owner"),
             "resume": s.get("claude_session"), "message": s["turns"][-2]["text"],
             "files": [{k: f[k] for k in ("name", "size", "sha256")} for f in s["turns"][-2].get("files", [])],
-            "lessons_injected": self.lessons_meta,
+            "lessons_injected": self.lessons_meta, "warm": self.warm is not None,
             "cmd": [c for c in self.cmd]})
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -931,6 +1031,7 @@ class Turn:
     def _run(self) -> None:
         try:
             threading.Thread(target=self._tail_live, daemon=True).start()
+            threading.Thread(target=self._tail_agents, daemon=True).start()
             first, resume = self.message, True
             if self.session.get("claude_session") and self.session.get("claude_home") not in (None, self.claude_home):
                 reason = "moved"                    # sign-in changed (e.g. LivAI -> Claude login): can't resume
@@ -975,9 +1076,17 @@ class Turn:
             except Exception as e:  # pragma: no cover
                 print(f"transcript scrub failed: {e}", file=sys.stderr, flush=True)
             self.drop_uploads()
+            if self.warm is not None:               # not used (e.g. the bridge failed): don't leave it idling
+                self.warm.kill()
+                self.warm = None
             with self.cond:
                 self.done = True
                 self.cond.notify_all()
+            if WARM is not None:
+                try:
+                    WARM.turn_ended(self.user, self.session)   # start the agent for this chat's next message now
+                except Exception as e:  # pragma: no cover  never let warming break a turn
+                    wlog("warm-failed", chat=self.session.get("id"), error=str(e)[:300])
 
     def _attempt(self, first: str, resume: bool) -> Optional[str]:
         """One claude process for this turn. Returns why a fresh session is needed ("overflow": the prompt
@@ -989,16 +1098,23 @@ class Turn:
         self.sent = self.consumed = self.answered = 0
         overflow = False
         learned = reflected = False
-        self.proc = subprocess.Popen(cmd, cwd=self.cwd, env=self.env, stdin=subprocess.PIPE,
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                     bufsize=1, start_new_session=True)
+        w, self.warm = self.warm, None
+        if w is not None and resume and w.proc.poll() is None:       # started ahead with this very command: just hand it the message
+            self.proc, err_lines = w.proc, w.err
+            wlog("turn-warm", user=self.user["name"], chat=self.session["id"], waited=round(_now() - w.started, 1))
+        else:
+            if w is not None:
+                w.kill()
+            self.proc = subprocess.Popen(cmd, cwd=self.cwd, env=self.env, stdin=subprocess.PIPE,
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                         bufsize=1, start_new_session=True)
+            err_lines = []
+            threading.Thread(target=lambda p=self.proc, e=err_lines: e.extend(p.stderr), daemon=True).start()
         if REGISTRY is not None:
             REGISTRY.turn_started(self.proc.pid, self.session["id"], self.user["name"])
         with self.io_lock:
             self.stdin_open = True
             self._write_user(first)
-        err_lines: list = []
-        threading.Thread(target=lambda: err_lines.extend(self.proc.stderr), daemon=True).start()
         for line in self.proc.stdout:
             line = line.strip()
             if not line:
@@ -1026,6 +1142,7 @@ class Turn:
                 with self.io_lock:                      # all input handled -> let claude exit
                     if self.consumed >= self.sent:
                         if (not learned and not reflected and not msg.get("is_error") and not self.stopped_by_user
+                                and not self.session.get("background")
                                 and self.stdin_open and not os.environ.get("MOIRAI_AGENTS_NO_LEARN_CHECK")):
                             # enforced learning: a turn that recorded nothing gets one more step, in the same context
                             reflected = True
@@ -1114,6 +1231,7 @@ class Turn:
         self.prov.index({"kind": "turn", "user": self.user["name"], "uid": self.user["uid"],
                          "session": self.session["id"], "title": self.session.get("title"),
                          "mode": self.session.get("mode"), "model": self.session.get("model"),
+                         "background": self.session.get("background"),
                          "message": self.session["turns"][-2]["text"][:2000],
                          "file": str(self.prov.chat_file(self.user, self.session).relative_to(self.prov.root))}
                         | summary | {"answer": (res.get("text") or "")[:4000]})
@@ -1274,8 +1392,10 @@ class App:
         self.stores: Dict[str, Store] = {}
         self.turns: Dict[str, Turn] = {}
         self.lock = threading.Lock()
-        global BRIDGES
+        global BRIDGES, WARM
         self.bridges = BRIDGES = Bridges(state, REPO)
+        from .warm import WarmPool
+        self.warm = WARM = WarmPool(self)
 
     def store(self, user: dict) -> Store:
         ws = user["workspace"]

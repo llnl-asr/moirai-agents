@@ -123,7 +123,9 @@ log "done: $OUTPUT_ROOT/run.json"
 CHECK = r'''#!/usr/bin/env python3
 """Standalone provenance check: python stdlib only. It needs nothing from the tools that made this package.
     prov_check.py <trace dir> <spec.json> <expected.json> <scale> <run.json>
-Fails on no trace, a dangling id, an undescribed type, an artifact type with no producer, or counts that differ from the original run."""
+Fails on no trace, a dangling id, an undescribed type, an artifact type with no producer, a different number of activities than the original run, or an entity type of the original run
+that is missing (extra types are allowed). Entity and edge counts must equal the original run only when expected.json has no entity types (an old build); when the run captured inputs or
+attributes (an expected type name ends with .input or .attribute) those counts depend on the run, so they are reported with a note and never fail."""
 import glob, gzip, json, os, sys
 traces, spec, expected, scale, out = sys.argv[1:6]
 spec, expected = json.load(open(spec)), json.load(open(expected)).get(scale)
@@ -159,10 +161,18 @@ if dangling:
 fails += [f"type {t} has no description" for t in sorted(seen) if not types.get(t)]
 fails += [f"artifact type {t} was not produced" for t in spec.get("scientific_artifacts", []) if t not in made]
 got = {"activities": acts, "entities": len(ents), "edges": len(edges)}
+exp_types = sorted((expected or {}).get("types") or [])
+run_dependent = any(str(t).endswith((".input", ".attribute")) for t in exp_types)
+note = ""
 if expected:
-    fails += [f"{k}: {got[k]}, the original run had {expected[k]}" for k in got if got[k] != expected.get(k)]
-json.dump({"scale": scale, "counts": got, "expected": expected, "failures": fails, "ok": not fails}, open(out, "w"), indent=1)
-print(json.dumps({"counts": got, "failures": fails}))
+    fails += [f"entity type {t} was not seen, the original run had it" for t in exp_types if t not in seen]
+    keys = ["activities"] if run_dependent else list(got)
+    fails += [f"{k}: {got[k]}, the original run had {expected.get(k)}" for k in keys if got[k] != expected.get(k)]
+    if run_dependent:
+        note = (f"entities {got['entities']} (original run {expected.get('entities')}) and edges {got['edges']} (original run {expected.get('edges')}) are informational: "
+                "the run captures inputs and attributes, so their number depends on the run; activities, entity types and dangling ids are checked")
+json.dump({"scale": scale, "counts": got, "expected": expected, "note": note, "failures": fails, "ok": not fails}, open(out, "w"), indent=1)
+print(json.dumps({"counts": got, "note": note, "failures": fails}))
 sys.exit(1 if fails else 0)
 '''
 
@@ -564,6 +574,7 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 TS_RE = re.compile(r"^\d{8}_\d{6}$")
 SKIP_DIRS = {".chgperm_logs"}
 KINDS = ("baseline", "verification")
+TRACE_KINDS = KINDS + ("live",)      # live: a live pipeline's long run (its publish_data stage); not part of the package publish plan
 PKG_FILES = ("README.md", "config.ini", "scripts/run_all.sh")
 
 
@@ -736,7 +747,7 @@ def render_run_files(kind, app, ts, s, info, meta):
     if "verification" in meta:
         doc["verification"] = meta["verification"]
     graph = {"summary": {k: v for k, v in s.items() if k not in ("types", "relation_kinds")}, "entity_relations": rel, "types": s.get("types", [])}
-    what = "the pipeline's baseline run" if kind == "baseline" else "the in-place verification run of the published package"
+    what = {"baseline": "the pipeline's baseline run", "live": "a live, long run of the annotated app"}.get(kind, "the in-place verification run of the published package")
     L = [f"# {app} provenance trace -- {ts}", "",
          f"{kind.capitalize()} run ({what}), traced with the dftracer entity/relation API. Job {run['jobid']} ({run['queue']}), {run['runtime_s']} s, {run['result']}.", "",
          "## Layout", "", "- `raw/` -- dftracer traces, one `.pfw.gz` per process", "- `run.json` -- everything below, machine-readable", "- `run.sh` -- exact launch script; `graph_summary.json` -- graph summary"]
@@ -755,12 +766,15 @@ def render_run_files(kind, app, ts, s, info, meta):
     return {"README.md": _site("\n".join(L)), "run.json": _site(json.dumps(doc, indent=2)), "graph_summary.json": _site(json.dumps(graph, indent=2))}
 
 
-def publish_traces_core(root, app, run_dir, ts, kind, summary, meta, run_sh=""):
-    """Copy a run's raw traces (+ .dftindex) and write README.md, run.json, run.sh, graph_summary.json into <root>/provenance-traces/<app>/<ts>/ (new dir only).
-    run_sh: the exact launch script; default <run_dir>/run.sh, else <run_dir>/../../work/<scale>/run.sh (the package layout)."""
+def publish_traces_core(root, app, run_dir, ts, kind, summary, meta, run_sh="", indexer=None):
+    """Copy a run's raw traces and write README.md, run.json, run.sh, graph_summary.json into <root>/provenance-traces/<app>/<ts>/ (new dir only), then index the
+    published traces in place (raw/.dftindex, all cores) so queries on the published run start at once.
+    run_sh: the exact launch script; default <run_dir>/run.sh, else <run_dir>/../../work/<scale>/run.sh (the package layout).
+    indexer(raw_dir) -> dict: default index_raw. The run's own .dftindex is not copied: an index is keyed by absolute file path, so a copy would be rebuilt anyway.
+    An index failure does not undo the publish: it is returned as index.error (repro_publish_index builds it later)."""
     _names(app, ts)
-    if kind not in KINDS:
-        raise ValueError(f"kind must be one of {KINDS}")
+    if kind not in TRACE_KINDS:
+        raise ValueError(f"kind must be one of {TRACE_KINDS}")
     root, run_dir = Path(root), Path(run_dir)
     if not root.is_dir():
         raise ValueError(f"publish_root {root} is not a directory")
@@ -783,7 +797,7 @@ def publish_traces_core(root, app, run_dir, ts, kind, summary, meta, run_sh=""):
     shutil.rmtree(tmp, ignore_errors=True)
     (tmp / "raw").mkdir(parents=True)
     try:
-        for f in pf + ([raw / ".dftindex"] if (raw / ".dftindex").exists() else []):
+        for f in pf:
             subprocess.run(["cp", "-a", str(f), str(tmp / "raw" / f.name)], check=True, capture_output=True)
         subprocess.run(["cp", "-a", str(rs), str(tmp / "run.sh")], check=True, capture_output=True)
         if kind == "verification" and rec is not None:
@@ -798,7 +812,69 @@ def publish_traces_core(root, app, run_dir, ts, kind, summary, meta, run_sh=""):
     except Exception:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
-    return {"target": str(tgt), "files": sorted(str(p.relative_to(tgt)) for p in tgt.rglob("*") if p.is_file()), "trace_files": info["files"], "trace_bytes": info["bytes"]}
+    try:
+        idx = (indexer or index_raw)(tgt / "raw")       # after the rename: the index is keyed by the final paths
+    except Exception as e:  # noqa: BLE001  the traces are published; the index can be built later
+        idx = {"error": f"{type(e).__name__}: {e}", "fix": "repro_publish_index(publish_root, app, timestamps=<this timestamp>)"}
+    return {"target": str(tgt), "files": sorted(str(p.relative_to(tgt)) for p in tgt.rglob("*") if p.is_file() and ".dftindex" not in p.parts),
+            "trace_files": info["files"], "trace_bytes": info["bytes"], "index": idx}
+
+
+def index_raw(raw):
+    """Build the TraceViewer index of every *.pfw.gz in raw into raw/.dftindex, on all cores (a no-op when it is complete), then give the group the user's bits on it
+    (g=u, no other) so everyone who can read the traces can query them. Raises when no index appears where it was asked for. Returns {index, files, secs}."""
+    import dftracer.utils as U
+    raw = Path(raw)
+    pf = sorted(str(p) for p in raw.glob("*.pfw.gz"))
+    if not pf:
+        raise ValueError(f"no *.pfw.gz in {raw}")
+    try:
+        U.set_log_level("warning")
+    except Exception:  # noqa: BLE001
+        pass
+    t = time.time()
+    U.Indexer(files=pf, index_dir=str(raw), parallelism=0).ensure_indexed()
+    ix = raw / ".dftindex"
+    if not (ix / "CURRENT").is_file():
+        raise RuntimeError(f"the indexer finished but {ix} holds no index (no CURRENT)")
+    _group_like_user(ix)
+    return {"index": str(ix), "files": len(pf), "secs": round(time.time() - t, 1)}
+
+
+def _group_like_user(top):
+    """chmod g=u,o-rwx on top and everything under it (directories keep setgid): the index is written with the builder's umask."""
+    for p in [Path(top), *Path(top).rglob("*")]:
+        try:
+            m = p.lstat().st_mode
+            if stat.S_ISLNK(m):
+                continue
+            u = (m & 0o700) >> 3
+            p.chmod((m & ~0o077 & 0o7777) | u)
+        except OSError:
+            pass
+
+
+def index_published_core(root, app="", stamps=None, indexer=None):
+    """Index every published run folder under <root>/provenance-traces/<app>/ (every app when app is empty; stamps: only these). Returns [{dir, ...index_raw or error}]."""
+    root = Path(root)
+    base = root / "provenance-traces"
+    if not base.is_dir():
+        raise ValueError(f"{base} is not a directory")
+    apps = [app] if app else sorted(d.name for d in base.iterdir() if d.is_dir() and not d.name.startswith("."))
+    out = []
+    for a in apps:
+        _names(a)
+        for t in stamps or []:
+            _names(a, t)
+        runs = [base / a / t for t in stamps] if stamps else sorted(d for d in (base / a).iterdir() if d.is_dir() and TS_RE.match(d.name)) if (base / a).is_dir() else []
+        for d in runs:
+            if not _inside(root, d) or not list((d / "raw").glob("*.pfw.gz")):
+                continue
+            try:
+                out.append({"dir": str(d), **(indexer or index_raw)(d / "raw")})
+            except Exception as e:  # noqa: BLE001  one bad folder does not stop the others
+                out.append({"dir": str(d), "error": f"{type(e).__name__}: {e}"})
+    return out
 
 
 def perm_check_core(paths, group):
@@ -907,6 +983,8 @@ def publish_checks(src_pkg, root, app, group, counts_of):
             count_bad.append(f"{d.name}: run.json {g}, README has {line in readme}, graph tool {got}")
     out.append(("run_folders_complete", bool(runs) and not incomplete, "; ".join(incomplete), "repro_publish_traces"))
     out.append(("readme_counts", bool(runs) and not count_bad, "; ".join(count_bad)[:380], "regenerate: the README/run.json must come from graph tool counts"))
+    unindexed = [d.name for d in runs if not (d / "raw" / ".dftindex" / "CURRENT").is_file()]
+    out.append(("indexed", bool(runs) and not unindexed, f"no raw/.dftindex in {unindexed}", "repro_publish_index(publish_root, app)"))
     vrec, vdetail = False, "no verification folder with verification.json"
     for d in runs:
         if kinds.get(d.name) == "verification" and (d / "verification.json").is_file():
@@ -987,18 +1065,32 @@ def publish_selftest():
         summary = {"activities": 7, "entities": 9, "edges": 21, "relations": 2, "types": [{"type": "sequence", "role": "input", "description": "a sequence"}, {"type": "out", "role": "output", "description": "an output"}],
                    "records": 123, "other_events": {}, "dangling": 0, "by_type": {"sequence": 4, "out": 5}, "by_store": {"parallel_fs": 9}, "relation_kinds": {"contains": 2}}
         meta = {"job_id": "fFAKE", "queue": "pdebug", "seconds": 12.5, "result": "COMPLETED", "scale": "baseline", "env": {"MOIRAI_PC_BLOCKS": "16"}}
-        r = publish_traces_core(root, "demo", run_dir, "20260101_010101", "baseline", summary, meta)
+        seen_idx = []
+
+        def fake_index(raw):
+            seen_idx.append(Path(raw))
+            (Path(raw) / ".dftindex").mkdir()
+            (Path(raw) / ".dftindex" / "CURRENT").write_text("x")
+            return {"index": str(Path(raw) / ".dftindex"), "files": 2, "secs": 0}
+        r = publish_traces_core(root, "demo", run_dir, "20260101_010101", "baseline", summary, meta, indexer=fake_index)
         tdir = Path(r["target"])
         readme = (tdir / "README.md").read_text()
         rj = json.loads((tdir / "run.json").read_text())
         gj = json.loads((tdir / "graph_summary.json").read_text())
         cases["traces_files_copied"] = sorted(p.name for p in (tdir / "raw").glob("*")) == [".dftindex", "p0.pfw.gz", "p1.pfw.gz"] and (tdir / "run.sh").is_file()
+        cases["index_built_in_published_folder"] = seen_idx == [tdir / "raw"] and r["index"]["index"] == str(tdir / "raw" / ".dftindex") and (tdir / "raw" / ".dftindex").is_dir()
+        cases["run_index_not_copied"] = not (tdir / "raw" / ".dftindex").is_file()
+        root2 = td / "root2"
+        root2.mkdir()
+        r2 = publish_traces_core(root2, "demo", run_dir, "20260101_030303", "baseline", summary, meta, indexer=lambda raw: 1 / 0)
+        cases["index_failure_keeps_publish"] = Path(r2["target"]).is_dir() and "ZeroDivisionError" in r2["index"]["error"]
+        cases["index_published_reports_each"] = [x.get("error", "")[:17] for x in index_published_core(root2, "demo", indexer=lambda raw: 1 / 0)] == ["ZeroDivisionError"]
         cases["traces_readme_from_counts"] = "9 entities, 7 activities, 21 edges" in readme and "| sequence | input | 4 | a sequence |" in readme and "fFAKE" in readme and "12.5 s" in readme
         cases["traces_run_json_from_counts"] = rj["captured"]["graph"]["entities"] == 9 and rj["captured"]["trace_files"] == 2 and rj["run"]["kind"] == "baseline" and rj["captured"]["entities_by_store"] == {"parallel_fs": 9}
         cases["traces_graph_summary_keys"] = set(gj) == {"summary", "entity_relations", "types"} and gj["entity_relations"] == {"contains": 2}
         cases["traces_missing_fact_not_invented"] = "not recorded" in readme
         try:
-            publish_traces_core(root, "demo", run_dir, "20260101_010101", "baseline", summary, meta)
+            publish_traces_core(root, "demo", run_dir, "20260101_010101", "baseline", summary, meta, indexer=fake_index)
             cases["traces_refuses_existing"] = False
         except FileExistsError:
             cases["traces_refuses_existing"] = True
@@ -1006,13 +1098,13 @@ def publish_selftest():
         for label, args in (("bad_timestamp", (run_dir, "../../etc", "baseline")), ("bad_kind", (run_dir, "20260101_010102", "other")),
                             ("no_traces", (td / "empty", "20260101_010103", "baseline")), ("verification_needs_record", (run_dir, "20260101_010104", "verification"))):
             try:
-                publish_traces_core(root, "demo", args[0], args[1], args[2], summary, meta)
+                publish_traces_core(root, "demo", args[0], args[1], args[2], summary, meta, indexer=fake_index)
                 cases["traces_refuses_" + label] = False
             except ValueError:
                 cases["traces_refuses_" + label] = True
         hashes = tree_hashes(root / "provenance-repro" / "demo")
         (run_dir.parent.parent / "verification.json").write_text(json.dumps({"in_place": True, "ok": True, "package_hashes": hashes, "kind": "verification"}))
-        publish_traces_core(root, "demo", run_dir, "20260101_020202", "verification", summary, meta)
+        publish_traces_core(root, "demo", run_dir, "20260101_020202", "verification", summary, meta, indexer=fake_index)
         vdir = root / "provenance-traces" / "demo" / "20260101_020202"
         cases["verification_record_copied"] = (vdir / "verification.json").is_file() and "verification.json" in (vdir / "README.md").read_text() and (vdir / "run.sh").is_file()
         shutil.rmtree(root / "provenance-repro" / "bad")
@@ -1044,7 +1136,8 @@ def publish_selftest():
         cases["permissions_check_catches_missing_setgid"] = any("setgid" in x for x in perm_check_core([root / "provenance-repro" / "demo"], fake_group))
         d0.chmod(0o2770)
         after = {n: ok for n, ok, _, _ in publish_checks(src, root, "demo", fake_group, counts_of)}
-        cases["validate_all_pass_on_good_tree"] = all(after.values()) and len(after) >= 8
+        cases["validate_all_pass_on_good_tree"] = all(after.values()) and len(after) >= 9
+        cases["validate_has_indexed"] = after.get("indexed") is True
         (root / "provenance-repro" / "demo" / "README.md").write_text("changed\n")
         changed = {n: ok for n, ok, _, _ in publish_checks(src, root, "demo", fake_group, counts_of)}
         cases["validate_catches_changed_package"] = not changed["package_equals_source"] and not changed["verification_record"]
@@ -1055,6 +1148,97 @@ def publish_selftest():
     bad = [k for k, v in cases.items() if not v]
     line = "repro publish selftest PASS " + " ".join(f"{k}=ok" for k in cases) if not bad else "repro publish selftest FAIL " + ",".join(bad)
     return {"status": "ok" if not bad else "error", "line": line, "cases": cases}
+
+
+# ------------------------------------------------------------------ what a run is expected to reproduce
+def ref_expected(g):
+    """Pure: the reference of one scale for expected.json, from a trace reader Graph: the three counts and the sorted list of entity TYPES seen (same source as the counts)."""
+    c = g.counts()
+    out = {k: c[k] for k in ("activities", "entities", "edges")}
+    out["types"] = sorted({e.get("type") for e in g.entities.values() if e.get("type")})
+    return out
+
+
+def run_dependent(expected):
+    """Pure: True when the expected types show that the run captured inputs or attributes (a type name ends with '.input' or '.attribute'), so entity and edge counts vary from run to run."""
+    return any(str(t).endswith((".input", ".attribute")) for t in ((expected or {}).get("types") or []))
+
+
+def judge_record(rj):
+    """Pure: (failures, ok) of a package run.json for the verification record. ok = no failures. When the expected types show run-dependent values, 'entities:' and 'edges:' count
+    differences (from an older prov_check.py) are not failures."""
+    fails = list((rj or {}).get("failures") or [])
+    if run_dependent((rj or {}).get("expected")):
+        fails = [f for f in fails if not re.match(r"\s*(entities|edges):", str(f))]
+        return fails, ("failures" in rj) and not fails
+    return fails, bool((rj or {}).get("ok"))
+
+
+def check_selftest():
+    """Sandbox: the generated prov_check.py on traces made here, and the pure helpers. Nothing touches a cluster."""
+    import gzip
+    from types import SimpleNamespace
+    cases = {}
+    ref = {"activities": 2, "entities": 3, "edges": 4}
+    base_types = ("out", "x.input")
+    with tempfile.TemporaryDirectory(prefix="repro_check_selftest_") as td:
+        td = Path(td)
+        (td / "check.py").write_text(CHECK)
+        (td / "spec.json").write_text(json.dumps({"scientific_artifacts": []}))
+
+        def traces(name, n_in, acts=2, types=base_types):
+            d = td / name
+            d.mkdir()
+            recs = [{"name": "ET", "cat": "moirai", "ph": "M", "args": {"type": t, "description": "d " + t}} for t in types]
+            ids = []
+            for t in types:
+                for k in ([0] if t == "out" else range(n_in)):
+                    ids.append((f"{t}-{k}", t))
+            recs += [{"name": "EH", "cat": "moirai", "ph": "M", "args": {"id": i, "type": t}} for i, t in ids]
+            outs = [i for i, t in ids if t == "out"]
+            ins = [i for i, t in ids if t != "out"]
+            for a in range(acts):
+                rel = {"generated": outs, "used": ins} if a == 0 else {"used": outs}
+                recs.append({"name": "act", "cat": "moirai", "ph": "X", "args": {"relations": {k: v for k, v in rel.items() if v}}})
+            with gzip.open(d / "p0.pfw.gz", "wt") as fh:
+                fh.write("[\n" + "\n".join(json.dumps(r) + "," for r in recs) + "\n")
+            return d
+
+        def run(d, exp):
+            (td / "expected.json").write_text(json.dumps({"smoke": exp} if exp is not None else {}))
+            o = td / "out.json"
+            o.unlink(missing_ok=True)
+            r = subprocess.run([sys.executable, str(td / "check.py"), str(d), str(td / "spec.json"), str(td / "expected.json"), "smoke", str(o)], capture_output=True, text=True)
+            return r.returncode, (json.loads(o.read_text()) if o.exists() else {})
+        typed = {**ref, "types": sorted(base_types)}
+        rc1, o1 = run(traces("a", 2), typed)
+        cases["reference_passes"] = rc1 == 0 and o1["counts"] == ref
+        rc2, o2 = run(traces("b", 9), typed)
+        cases["same_types_other_counts_pass"] = rc2 == 0 and o2["counts"]["entities"] != ref["entities"] and o2["counts"]["edges"] != ref["edges"] and o2["failures"] == [] and "informational" in o2["note"]
+        cases["counts_reported_not_failed"] = o2["expected"]["entities"] == 3 and o2["counts"]["entities"] == 10 and not any(f.startswith(("entities", "edges")) for f in o2["failures"])
+        rc3, o3 = run(traces("c", 2, types=base_types + ("y.attribute",)), typed)
+        cases["extra_type_allowed"] = rc3 == 0
+        rc4, o4 = run(traces("d", 2, types=("out",)), typed)
+        cases["missing_type_fails"] = rc4 == 1 and any("x.input" in f for f in o4["failures"])
+        rc5, o5 = run(traces("e", 2, acts=3), typed)
+        cases["activity_count_fails"] = rc5 == 1 and any(f.startswith("activities") for f in o5["failures"])
+        rc6, o6 = run(traces("f", 9), dict(ref))
+        cases["no_types_keeps_exact_counts"] = rc6 == 1 and any(f.startswith("entities") for f in o6["failures"])
+        plain = {**ref, "types": ["out", "seq"]}
+        rc7, o7 = run(traces("g", 9, types=("out", "seq")), plain)
+        rc8, o8 = run(traces("h", 2, types=("out", "seq")), plain)
+        cases["non_input_types_keep_exact_counts"] = rc7 == 1 and any(f.startswith("entities") for f in o7["failures"]) and rc8 == 0
+        rc9, o9 = run(traces("i", 2, acts=0), typed)
+        cases["no_provenance_fails"] = rc9 == 1
+    g = SimpleNamespace(counts=lambda: {"activities": 5, "entities": 3, "edges": 7, "relations": 0}, entities={"a": {"type": "t.input"}, "b": {"type": "out"}, "c": {"type": "out"}})
+    cases["ref_expected_has_types"] = ref_expected(g) == {"activities": 5, "entities": 3, "edges": 7, "types": ["out", "t.input"]}
+    old = {"expected": {"types": ["a.input", "b"]}, "failures": ["entities: 9, the original run had 3", "edges: 1, the original run had 2"], "ok": False}
+    cases["record_ok_without_count_failures"] = judge_record(old) == ([], True)
+    cases["record_fails_on_activities"] = judge_record({**old, "failures": old["failures"] + ["activities: 3, the original run had 2"]})[1] is False
+    cases["record_keeps_exact_without_types"] = judge_record({"expected": {"entities": 3}, "failures": ["entities: 9, the original run had 3"], "ok": False}) == (["entities: 9, the original run had 3"], False)
+    cases["record_empty_is_not_ok"] = judge_record({})[1] is False
+    line = "repro check selftest PASS " + " ".join(f"{k}=ok" for k in cases) if all(cases.values()) else "repro check selftest FAIL " + ",".join(k for k, v in cases.items() if not v)
+    return {"status": "ok" if all(cases.values()) else "error", "line": line, "cases": cases}
 
 
 def _verification_record(pipeline):
@@ -1081,9 +1265,10 @@ def _verification_record(pipeline):
         start = rsh.stat().st_mtime if rsh.exists() else time.time()
         src = "mtime of run.sh (flux unavailable)"
     now = tree_hashes(pkg)
+    fails, run_ok = judge_record(rj)
     rec = {"kind": "verification", "in_place": True, "package": "provenance-repro", "scale": vf["scale"], "job": vf["job"], "flux_job": flux, "job_start": _stamp(start), "job_start_source": src,
-           "seconds": float(secs) if secs else j.get("elapsed"), "exit_codes": {"run_all": j["rc"]}, "counts": rj.get("counts"), "expected": rj.get("expected"), "failures": rj.get("failures"),
-           "ok": bool(rj.get("ok")) and j["rc"] == 0, "overrides": vf.get("overrides", {}), "not_exercised": vf.get("not_exercised", []), "package_hashes_before": vf.get("hashes_before"),
+           "seconds": float(secs) if secs else j.get("elapsed"), "exit_codes": {"run_all": j["rc"]}, "counts": rj.get("counts"), "expected": rj.get("expected"), "note": rj.get("note", ""), "failures": fails,
+           "ok": run_ok and j["rc"] == 0, "overrides": vf.get("overrides", {}), "not_exercised": vf.get("not_exercised", []), "package_hashes_before": vf.get("hashes_before"),
            "package_hashes": now, "package_unchanged": now == vf.get("hashes_before"), "login_shell": "env -i bash -l"}
     rec["ok"] = rec["ok"] and rec["package_unchanged"]
     (out / "verification.json").write_text(json.dumps(rec, indent=2))
@@ -1094,10 +1279,12 @@ def _verification_record(pipeline):
 def register(mcp):
     @mcp.tool()
     def repro_build(pipeline: str, output_root: str = "${HOME}/moirai_repro/${APP}", mode: str = "") -> dict:
-        """Generate final_provenance/ in the session: config.ini, scripts, the provenance patch, the spec, pinned versions and a standalone checker. Use after the query stage, or again after
+        """Generate final_provenance/ in the session: config.ini, scripts, the provenance patch, the spec, pinned versions and a standalone checker. Use after the graph stage, or again after
         a fix: it starts over. output_root: where a reader's run writes; keep ${USER} or ${HOME}, never a literal name. mode: '' detects it (batch when the moirai_smoke or baseline stage ran a
         generated flux batch run.sh: its outputs hold batch_script or submit_command), 'batch' or 'generic' forces it. Batch mode writes a per-chunk wrapper template, a run.sh generator call, a
-        flux batch with a wait and failure checks, and never starts a service on the login node. Returns {status, package, mode, files, source, pins, warnings}."""
+        flux batch with a wait and failure checks, and never starts a service on the login node. inputs/expected.json holds, for the smoke and baseline traces, the activity, entity and edge
+        counts and the sorted entity types (from the trace reader); the checker requires equal activities and every type, and counts entities and edges only when the run captures no inputs or attributes.
+        Returns {status, package, mode, files, source, pins, warnings}."""
         c = P.load(pipeline)
         integ, ann, base = P.stage(c, "integrate")["outputs"], P.stage(c, "annotate")["outputs"], P.stage(c, "baseline")["outputs"]
         smoke_run = P.stage(c, "moirai_smoke")["outputs"]
@@ -1113,9 +1300,9 @@ def register(mcp):
         warnings = []
         (pkg / "patches" / "provenance.patch").write_text(_patch(src, dst, list(ann["files"]) + (["_moirai_prov.py"] if (dst / "_moirai_prov.py").exists() else [])))
         (pkg / "inputs" / "spec.json").write_text(json.dumps(ann["spec"], indent=1))
-        expected = {"smoke": {k: v for k, v in T.read(smoke_run["traces"]).counts().items() if k in ("activities", "entities", "edges")}}
+        expected = {"smoke": ref_expected(T.read(smoke_run["traces"]))}
         if base.get("traces"):
-            expected["baseline"] = {k: v for k, v in T.read(base["traces"]).counts().items() if k in ("activities", "entities", "edges")}
+            expected["baseline"] = ref_expected(T.read(base["traces"]))
         (pkg / "inputs" / "expected.json").write_text(json.dumps(expected, indent=1))
         url, ref = "", ""
         if re.match(r"^(https?://|git@|ssh://)", c["source"]):
@@ -1176,7 +1363,8 @@ bash -l scripts/run_all.sh    # a login shell: it needs the `module` command and
 
 Smoke = the first `SMOKE_LINES` lines of the first chunk of `INCHUNKS`; baseline = all of `INCHUNKS`. Each takes about 8 minutes, dominated by a ~270 s dbcast broadcast (`mpifileutils`).
 `04_run.sh` submits the batch job, waits with `flux watch`, then `scripts/check_batch.py` fails the run when the batch `--output` file holds `exited with exit code <non-zero>` or a line ending
-` failed` (a batch job's own return code does not reflect its chunk jobs), or when `hosts.txt` is empty. `scripts/prov_check.py` then compares the counts with `inputs/expected.json`.
+` failed` (a batch job's own return code does not reflect its chunk jobs), or when `hosts.txt` is empty. `scripts/prov_check.py` then compares the run with `inputs/expected.json`: the number of
+activities and the entity types must match; when the run captures inputs and attributes the entity and edge counts depend on the run and are only reported.
 
 ## The two environments
 
@@ -1208,6 +1396,7 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
 ```
 
 `scripts/run_all.sh` runs the numbered scripts in order, and each can be run alone. The result is judged by `scripts/prov_check.py`, which needs only Python, and written to `$OUTPUT_ROOT/run.json`.
+The number of activities and the entity types must match `inputs/expected.json`; when the run captures inputs and attributes the entity and edge counts depend on the run and are only reported.
 
 | Script | Does |
 |---|---|
@@ -1230,7 +1419,8 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
         Copy mode: isolation_root, a parent folder outside the session on a file system compute nodes can see; the package is copied to a new folder there. In-place mode (in_place = the
         published package folder, e.g. <publish_root>/provenance-repro/<app>): the package is run AS IT IS, no copy; only HOME, USER, TERM and SCALE are passed, plus the venv/limit overrides
         you give (they are written into the record). Its trace output goes to the package's own OUTPUT_ROOT (config.ini). When the job has finished a verification record
-        <OUTPUT_ROOT>/verification.json is written (job ids, scale, seconds, counts vs expected.json, exit codes, the package's file hashes before and after, whether unchanged); call again
+        <OUTPUT_ROOT>/verification.json is written (job ids, scale, seconds, counts vs expected.json, exit codes, the package's file hashes before and after, whether unchanged); its ok means no
+        failures, and entity/edge count differences are never failures when expected.json shows the run captures inputs or attributes (activities, entity types and dangling ids decide). Call again
         with the same in_place after a timeout to complete the record. scale: smoke or baseline. reuse_venv: a venv to reuse instead of building one (batch mode: the app's own venv).
         moirai_venv: batch mode only, the moirai venv to reuse (needed with reuse_venv). limit: seconds for the whole run; in batch mode the flux batch time limit is derived from it.
         wait: seconds to wait now; the run goes on in the background (a batch run takes ~8 min) and repro_validate judges it later. Batch mode never starts a service on the login node.
@@ -1310,7 +1500,8 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
     @mcp.tool()
     def repro_validate(pipeline: str) -> dict:
         """Validate the package: it holds no user, workspace or job path, its scripts parse and source the loader, a batch package starts no service in 04_run.sh, and an isolated run passed with the
-        original counts. When the package was published (repro_publish_package recorded publish_root) the published tree is checked too, as repro_publish_validate does (group moirai).
+        original activities and entity types (entity and edge counts only when the run captures no inputs or attributes). When the package was published (repro_publish_package recorded
+        publish_root) the published tree is checked too, as repro_publish_validate does (group moirai).
         Use before the last gate. Returns the verdict {status, failed, unknown, passed, total}."""
         c = P.load(pipeline)
         o = P.stage(c, STAGE)["outputs"]
@@ -1335,7 +1526,8 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
             return P.finish_validation(pipeline, v)
         v.check("isolated_run", j["rc"] == 0, f"rc={j['rc']}: {j.get('log_tail', '')[-300:]}", "read the log: something the session provided is missing from the package")
         run = (Path(vf["output_root"]) if vf.get("in_place") else Path(vf["iso_dir"]) / "out") / "run.json"
-        if v.check("reproduced", run.exists() and json.loads(run.read_text()).get("ok"), run.read_text()[:300] if run.exists() else "no run.json", "the counts differ: is the app deterministic? Is the input the same?"):
+        if v.check("reproduced", run.exists() and json.loads(run.read_text()).get("ok"), run.read_text()[:300] if run.exists() else "no run.json",
+                   "activities or an entity type differ: is the app deterministic? Is the input the same? (entity and edge counts vary when the run captures inputs or attributes: rebuild so expected.json holds the types)"):
             note = f"; NOT exercised: {', '.join(vf['not_exercised'])}" if vf.get("not_exercised") else ""
             P.record(pipeline, STAGE, outputs={"summary": f"reproduced in a clean shell ({vf.get('scale')}): {json.loads(run.read_text())['counts']}{note}"})
         if o.get("publish_root"):
@@ -1348,6 +1540,14 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
         """Check the batch mode on pure renders, with no cluster: the per-chunk wrapper template, the 04_run text (both scales), the chunk-failure patterns on the real failing run.out text and a clean
         one, the command parse and config render, and that no script holds a user, workspace, session or job path. Use after changing repro_package. Returns {status, line, cases, notes}."""
         return _selftest()
+
+    @mcp.tool()
+    def repro_check_selftest() -> dict:
+        """Sandbox test of the generated prov_check.py and the verification record logic, no cluster: trace sets made on the spot. Covers: the same entity types with different entity and edge counts
+        pass (counts are reported with a note) when the types end in .input/.attribute; extra types pass; a missing type fails; a different activity count fails; an expected.json without types, or
+        with other types, keeps the exact count comparison; expected.json types come from the trace reader; the verification record keeps ok = no failures and drops entity/edge count differences
+        when the run captures inputs or attributes. Use after any change to the checker or expected.json. Returns {status, line, cases}: line is 'repro check selftest PASS ...' or 'FAIL <cases>'."""
+        return check_selftest()
 
     @mcp.tool()
     def repro_publish_selftest() -> dict:
@@ -1409,7 +1609,7 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
         return {"status": "ok" if r["ok"] else "error", **r}
 
     @mcp.tool()
-    def repro_publish_traces(pipeline: str, publish_root: str, app: str, run_dir: str = "", timestamp: str = "", kind: str = "baseline", flux_job: str = "", run_sh: str = "") -> dict:
+    def repro_publish_traces(pipeline: str, publish_root: str = "", app: str = "", run_dir: str = "", timestamp: str = "", kind: str = "baseline", flux_job: str = "", run_sh: str = "") -> dict:
         """Copy a run's raw traces (+ .dftindex) and write README.md, run.json, run.sh, graph_summary.json into <publish_root>/provenance-traces/<app>/<timestamp>/ (new dir only). Every
         count comes from the graph tools (moirai trace reader), never typed; a missing fact reads 'not recorded'. kind=baseline: the pipeline's baseline run (run_dir default: the folder
         holding the baseline stage's raw traces; run.sh: the baseline stage's run script; timestamp default: its flux job start, as repro_publish_plan). kind=verification: the in-place run of the
@@ -1417,8 +1617,28 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
         first if the job has finished; verification.json is copied along). flux_job: the flux id of the run, for job id / runtime / start. run_sh: the exact launch script when the stage did not record one (BioTox: provenance/runs/baseline/launch.sh). Returns {status, target, files, trace_files, trace_bytes, counts}."""
         c = P.load(pipeline)
         meta, wrapper = {}, None
+        stage_name = STAGE
+        if c["kind"] == "live":           # the publish_data stage of a live run: where and as what come from the parent's published package
+            kind, stage_name = "live", "publish_data"
+            po = P.stage(P.origin(c), STAGE)["outputs"]
+            publish_root, app = publish_root or po.get("publish_root", ""), app or po.get("publish_app", "")
+        if not publish_root or not app:
+            return {"status": "error", "error": "give publish_root and app (a live run takes them from its parent's repro_publish_package)"}
         try:
-            if kind == "baseline":
+            if kind == "live":
+                lo = P.stage(c, "live_run")["outputs"]
+                if not lo.get("traces"):
+                    return {"status": "error", "error": "the live run has no traces: run moirai_live_run first"}
+                rd = Path(run_dir) if run_dir else Path(lo["traces"]).parent
+                job = J.get(pipeline, lo["job"], 40000) if lo.get("job") else {}
+                fid = flux_job or _find_flux_id(job.get("log_tail", ""))
+                meta.update(queue=lo.get("queue"), scale="live")
+                run_sh = run_sh or lo.get("run_script") or lo.get("batch_script") or job.get("script") or ""
+                wrapper = lo.get("wrapper")
+                started = P.stage(c, "live_run").get("started") or job.get("started")
+                if not timestamp and not fid and started:
+                    timestamp = _stamp(float(started))
+            elif kind == "baseline":
                 base = P.stage(c, "baseline")["outputs"]
                 rd = Path(run_dir) if run_dir else Path(base["traces"]).parent
                 fid = flux_job or (_find_flux_id(J.get(pipeline, base["job"], 40000).get("log_tail", "")) if base.get("job") else "")
@@ -1459,8 +1679,30 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
             r = publish_traces_core(publish_root, app, rd, timestamp, kind, summary, meta, run_sh)
         except (ValueError, FileExistsError, OSError, KeyError, subprocess.CalledProcessError) as e:
             return {"status": "error", "error": f"{type(e).__name__}: {e}"}
-        P.record(pipeline, STAGE, outputs={f"published_{kind}": r["target"]}, note=f"{kind} traces published to {r['target']}")
+        P.record(pipeline, stage_name, outputs={f"published_{kind}": r["target"], "published_counts": g.counts()}, note=f"{kind} traces published to {r['target']}")
         return {"status": "ok", **r, "counts": g.counts()}
+
+    @mcp.tool()
+    def repro_publish_data_validate(pipeline: str) -> dict:
+        """Validator of a live run's publish_data stage: the run's traces were published (repro_publish_traces on the live pipeline), the published folder holds every raw trace
+        file, run.sh, README.md and run.json, and the published traces read to the same counts as the run's own. Use after repro_publish_traces on a live pipeline, before its gate.
+        Returns the verdict {status, failed, unknown, passed, total}."""
+        c = P.load(pipeline)
+        if c["kind"] != "live":
+            return {"status": "error", "error": "publish_data is the stage of a live pipeline"}
+        o, lo = P.stage(c, "publish_data")["outputs"], P.stage(c, "live_run")["outputs"]
+        v = P.Verdict("publish_data")
+        tgt = Path(o.get("published_live") or "")
+        if v.check("published", bool(o.get("published_live")) and tgt.is_dir(), f"not published: {o.get('published_live') or 'no target recorded'}", "repro_publish_traces(pipeline=<this live pipeline>)"):
+            src = T.expand(lo.get("traces", ""))
+            pub = sorted((tgt / "raw").glob("*.pfw.gz"))
+            v.check("all_files", len(pub) == len([f for f in src if f.endswith(".pfw.gz")]), f"{len(pub)} published vs {len(src)} in the run", "publish again into a new folder: a file was added after publishing, or the copy failed")
+            v.check("run_files", all((tgt / n).is_file() for n in ("run.sh", "README.md", "run.json")), "run.sh, README.md or run.json missing", "repro_publish_traces writes them: publish again")
+            a, b = T.read(str(tgt / "raw")).counts(), T.read(lo["traces"]).counts()
+            keys = ("entities", "activities", "edges", "relations")
+            v.check("same_counts", all(a[k] == b[k] for k in keys), f"published {[a[k] for k in keys]} vs run {[b[k] for k in keys]} ({', '.join(keys)})", "the run was still writing when it was published: publish after it ends")
+            v.check("indexed", (tgt / "raw" / ".dftindex" / "CURRENT").is_file(), f"no index in {tgt / 'raw'}", "repro_publish_index(publish_root, app, timestamps=<its timestamp>)")
+        return P.finish_validation(pipeline, v)
 
     @mcp.tool()
     def repro_publish_permissions(publish_root: str, group_script: str, group: str = "moirai", app: str = "elmerfold", timestamps: str = "") -> dict:
@@ -1473,6 +1715,18 @@ bash scripts/run_all.sh       # SCALE=baseline for the full run
         except (ValueError, OSError, subprocess.TimeoutExpired) as e:
             return {"status": "error", "error": f"{type(e).__name__}: {e}"}
         return {"status": "ok" if r["ok"] else "error", **r}
+
+    @mcp.tool()
+    def repro_publish_index(publish_root: str, app: str = "", timestamps: str = "") -> dict:
+        """Build the TraceViewer index (raw/.dftindex, all cores) of published run folders under <publish_root>/provenance-traces/<app>/ so queries on them start at once; app empty:
+        every app; timestamps: a comma list (default every run folder). A complete index is left as it is. repro_publish_traces already indexes what it publishes: use this for runs
+        published before it did, or when it returned index.error. Writes only raw/.dftindex of those folders (group bits = user bits). Returns {status, indexed, failed, runs}."""
+        try:
+            runs = index_published_core(publish_root, app, [t.strip() for t in timestamps.split(",") if t.strip()] or None)
+        except (ValueError, OSError) as e:
+            return {"status": "error", "error": f"{type(e).__name__}: {e}"}
+        bad = [r for r in runs if r.get("error")]
+        return {"status": "ok" if not bad else "error", "indexed": len(runs) - len(bad), "failed": len(bad), "runs": runs}
 
     @mcp.tool()
     def repro_publish_validate(pipeline: str, publish_root: str, app: str = "elmerfold", group: str = "moirai") -> dict:

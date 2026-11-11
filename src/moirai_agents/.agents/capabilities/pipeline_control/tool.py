@@ -67,11 +67,13 @@ def _safe(fn, *a, **k):
 
 def register(mcp):
     @mcp.tool()
-    def pipeline_new(kind: str, name: str, source: str = "", command: str = "", traces: str = "", notes: str = "", ref: str = "") -> dict:
-        """Create a pipeline. Use once, at the start. kind: run (needs source: app directory or git URL, command: a small test run) or analysis (needs traces: the directory or
-        glob the user gave). A run pipeline gets a dftracer session, which holds all its work; ref: git ref of a URL. Returns {id, kind, stages, current, session}, with session_error if the session failed."""
+    def pipeline_new(kind: str, name: str, source: str = "", command: str = "", traces: str = "", notes: str = "", ref: str = "", parent: str = "") -> dict:
+        """Create a pipeline. Use once, at the start. kind: run (annotate an app: needs source: app directory or git URL, command: a small test run), live (a long, multi-hour
+        run of an app that a run pipeline already annotated: needs parent: that run pipeline's id; command: the real run, default the parent's) or analysis (needs traces:
+        the directory or glob the user gave). A run pipeline gets a dftracer session, which holds all its work; a live run shares its parent's. ref: git ref of a URL.
+        Returns {id, kind, stages, current, session}, with session_error if the session failed."""
         def go():
-            c = P.new(kind, name, source, command, traces, notes)
+            c = P.new(kind, name, source, command, traces, notes, parent)
             if kind != "run" or not B.available():
                 return P.summary(c)
             s = B.start_session(name, source, ref, f"moirai pipeline {c['id']}")

@@ -209,7 +209,7 @@ def _dir(c):
 def register(mcp):
     @mcp.tool()
     def repro_build(pipeline: str, output_root: str = "${HOME}/moirai_repro/${APP}") -> dict:
-        """Generate final_provenance/ in the session: config.ini, scripts, the provenance patch, the spec, pinned versions and a standalone checker. Use after the query stage, or again after
+        """Generate final_provenance/ in the session: config.ini, scripts, the provenance patch, the spec, pinned versions and a standalone checker. Use after the graph stage, or again after
         a fix: it starts over. output_root: where a reader's run writes; keep ${USER} or ${HOME}, never a literal name. Returns {status, package, files, source, pins, warnings}."""
         c = P.load(pipeline)
         integ, ann, base = P.stage(c, "integrate")["outputs"], P.stage(c, "annotate")["outputs"], P.stage(c, "baseline")["outputs"]

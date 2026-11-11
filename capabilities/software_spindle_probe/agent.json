@@ -1,0 +1,12 @@
+{
+ "description": "Renders Spindle probe scripts and summarizes their output; never submits.",
+ "level": "level_1",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "software_spindle_probe"
+ ],
+ "permission_mode": "default",
+ "instructions": "Render with spindle_probe_script, summarize with spindle_probe_summary, report reproduced true or false."
+}

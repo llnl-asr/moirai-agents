@@ -13,6 +13,10 @@
   "consolidation_report",
   "lesson_merge",
   "consolidation_keep",
+  "consolidation_close",
+  "consolidation_answers",
+  "consolidation_ask",
+  "lesson_get",
   "lesson_decide"
  ],
  "review": [],

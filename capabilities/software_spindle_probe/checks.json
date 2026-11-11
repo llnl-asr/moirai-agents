@@ -1,0 +1,32 @@
+[
+ {
+  "tool": "spindle_probe_summary",
+  "args": {
+   "output_text": "default 1 rc=0 secs=64 spindle_assert=0\ndefault 2 rc=124 secs=900 spindle_assert=1\nnospindle 1 rc=0 secs=58 spindle_assert=0"
+  },
+  "expect": {
+   "contains": "\"reproduced\": true"
+  }
+ },
+ {
+  "tool": "spindle_probe_summary",
+  "args": {
+   "output_text": "default 1 rc=0 secs=64 spindle_assert=0"
+  },
+  "expect": {
+   "contains": "\"reproduced\": false"
+  }
+ },
+ {
+  "tool": "spindle_probe_script",
+  "args": {
+   "workdir": "/tmp",
+   "command": "true",
+   "input_file": "/etc/hostname",
+   "bank": "b"
+  },
+  "expect": {
+   "contains": "SPINDLE_FLUXOPT=disable"
+  }
+ }
+]

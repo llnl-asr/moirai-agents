@@ -1,0 +1,13 @@
+{
+ "description": "Explains the plan part of a computed answer.",
+ "level": "level_1",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "explain_plan"
+ ],
+ "permission_mode": "plan",
+ "background": true,
+ "instructions": "explain_plan on the answer, then explain_plan_check. Return the explanation and the verdict."
+}

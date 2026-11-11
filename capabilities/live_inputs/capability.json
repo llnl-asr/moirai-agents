@@ -1,0 +1,37 @@
+{
+ "name": "live_inputs",
+ "description": "Detect and write the inputs of an app's live runs - what a scientist tunes when starting one - in the annotation phase; the Live Run view shows them as dropdowns. Load when exploring or annotating an app, before package, and when starting a live run.",
+ "version": 2,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "live_inputs_detect",
+  "live_inputs_write",
+  "live_inputs_render",
+  "live_inputs_validate"
+ ],
+ "pvc": {
+  "predictor": [
+   "live_inputs_detect",
+   "live_inputs_write"
+  ],
+  "validator": [
+   "live_inputs_validate"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1794191681.7,
+   "why": "Live Run view: the inputs a scientist tunes, detected and written in the annotation phase"
+  },
+  {
+   "version": 2,
+   "ts": 1794196208.2360094,
+   "by": "haridev",
+   "proposal": "3a8a01eb7a32",
+   "why": "BioTox turn (chat ba842d34e37f): live_inputs_validate passed 3/3 while PEP_NSTRUCT and PEP_RADIUS slots would not take effect and the template lacked the baseline's environment. The user asked to 'write the command template from the baseline's real launch' and to 'ask me before changing anything else'. Skill-only change: add rules that make the agent check this."
+  }
+ ]
+}

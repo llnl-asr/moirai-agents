@@ -9,6 +9,13 @@
   }
  },
  {
+  "tool": "repro_check_selftest",
+  "args": {},
+  "expect": {
+   "contains": "repro check selftest PASS"
+  }
+ },
+ {
   "tool": "repro_batch_selftest",
   "args": {},
   "expect": {

@@ -1,0 +1,202 @@
+[
+ {
+  "tool": "query_explain",
+  "args": {
+   "answer": {
+    "id": "a1",
+    "question": "What were the filter parameters of the MSA filter?",
+    "engine": "traceviewer",
+    "plan": {
+     "steps": [
+      {
+       "op": "inputs",
+       "activity": "filter_msa"
+      }
+     ],
+     "chosen_by": "agent"
+    },
+    "steps": [
+     {
+      "step": 1,
+      "op": "inputs",
+      "args": {
+       "activity": "filter_msa"
+      },
+      "resolved": {
+       "activity": "filter_msa",
+       "time": null
+      },
+      "queries": [
+       1,
+       2
+      ],
+      "computed_from": null,
+      "headline": "filter_msa ran 3 time(s); its parameters: --qid = 0.0,0.5,1.0; --min = 16000",
+      "table": "| name | value(s) | runs |\n|---|---|---|\n| --qid | 0.0,0.5,1.0 | 3 |\n| --min | 16000 | 3 |",
+      "cites": [
+       {
+        "file": "p.pfw.gz",
+        "rec": "filter_msa",
+        "pid": 7,
+        "ts": 1794203908575400
+       }
+      ],
+      "cited": 3
+     }
+    ],
+    "queries": [
+     {
+      "n": 1,
+      "why": "catalog",
+      "query": "TraceViewer(<file>).phase(\"any\")",
+      "rows": 38,
+      "secs": 0.4
+     },
+     {
+      "n": 2,
+      "why": "step 1: the runs",
+      "query": ".filter(col(\"name\") == \"filter_msa\")",
+      "rows": 3,
+      "secs": 0.1
+     }
+    ],
+    "reads": [
+     {
+      "file": "p.pfw.gz",
+      "bytes": 1603108,
+      "mtime": 1794203939.6,
+      "sha256_ends": "a41f"
+     }
+    ],
+    "engine_info": {
+     "name": "dftracer-utils TraceViewer",
+     "version": "0.0.14"
+    },
+    "result": {
+     "headline": "filter_msa ran 3 time(s); its parameters: --qid = 0.0,0.5,1.0; --min = 16000",
+     "table": "| name | value(s) | runs |\n|---|---|---|\n| --qid | 0.0,0.5,1.0 | 3 |\n| --min | 16000 | 3 |"
+    },
+    "synthesis": "",
+    "synthesis_check": {
+     "ok": true,
+     "problems": []
+    },
+    "result_hash": "e6c7",
+    "stats": {
+     "rows_read": 41,
+     "cited": 3
+    },
+    "gaps": []
+   }
+  },
+  "expect": {
+   "contains": "\"part\": \"evidence\""
+  }
+ },
+ {
+  "tool": "query_explain_validate",
+  "args": {
+   "answer": {
+    "id": "a1",
+    "question": "What were the filter parameters of the MSA filter?",
+    "engine": "traceviewer",
+    "plan": {
+     "steps": [
+      {
+       "op": "inputs",
+       "activity": "filter_msa"
+      }
+     ],
+     "chosen_by": "agent"
+    },
+    "steps": [
+     {
+      "step": 1,
+      "op": "inputs",
+      "args": {
+       "activity": "filter_msa"
+      },
+      "resolved": {
+       "activity": "filter_msa",
+       "time": null
+      },
+      "queries": [
+       1,
+       2
+      ],
+      "computed_from": null,
+      "headline": "filter_msa ran 3 time(s); its parameters: --qid = 0.0,0.5,1.0; --min = 16000",
+      "table": "| name | value(s) | runs |\n|---|---|---|\n| --qid | 0.0,0.5,1.0 | 3 |\n| --min | 16000 | 3 |",
+      "cites": [
+       {
+        "file": "p.pfw.gz",
+        "rec": "filter_msa",
+        "pid": 7,
+        "ts": 1794203908575400
+       }
+      ],
+      "cited": 3
+     }
+    ],
+    "queries": [
+     {
+      "n": 1,
+      "why": "catalog",
+      "query": "TraceViewer(<file>).phase(\"any\")",
+      "rows": 38,
+      "secs": 0.4
+     },
+     {
+      "n": 2,
+      "why": "step 1: the runs",
+      "query": ".filter(col(\"name\") == \"filter_msa\")",
+      "rows": 3,
+      "secs": 0.1
+     }
+    ],
+    "reads": [
+     {
+      "file": "p.pfw.gz",
+      "bytes": 1603108,
+      "mtime": 1794203939.6,
+      "sha256_ends": "a41f"
+     }
+    ],
+    "engine_info": {
+     "name": "dftracer-utils TraceViewer",
+     "version": "0.0.14"
+    },
+    "result": {
+     "headline": "filter_msa ran 3 time(s); its parameters: --qid = 0.0,0.5,1.0; --min = 16000",
+     "table": "| name | value(s) | runs |\n|---|---|---|\n| --qid | 0.0,0.5,1.0 | 3 |\n| --min | 16000 | 3 |"
+    },
+    "synthesis": "",
+    "synthesis_check": {
+     "ok": true,
+     "problems": []
+    },
+    "result_hash": "e6c7",
+    "stats": {
+     "rows_read": 41,
+     "cited": 3
+    },
+    "gaps": []
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "pass"
+   }
+  }
+ },
+ {
+  "tool": "query_explain",
+  "args": {
+   "pipeline": "nope-1",
+   "answer_id": "x"
+  },
+  "expect": {
+   "raises": true
+  }
+ }
+]

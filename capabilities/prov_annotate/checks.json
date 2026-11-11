@@ -1910,5 +1910,371 @@
    },
    "contains": "yaml_step: step af3_infer"
   }
+ },
+ {
+  "tool": "annotate_validate_preview",
+  "args": {
+   "maestro": "/bin/sh",
+   "files": {
+    "mini.yaml": "env:\n    variables:\n        OUT: outputs\n\nstudy:\n    - name: af3_msa\n      description: msa step\n      run:\n          cmd: |\n            mkdir -p $(OUT)/$(SEQ)\n            echo msa > $(OUT)/$(SEQ)/$(SEQ)_data.json\n          depends: []\n",
+    "run": "if [ -f _moirai_prov.py ]; then case \":$PYTHONPATH:\" in *\"/tree:\"*) ;; *) echo \"ModuleNotFoundError: No module named 'imp'\" >&2; exit 1;; esac; fi\nexit 0\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "msa_input"
+    ],
+    "entity_types": [
+     {
+      "type": "msa_input",
+      "role": "output",
+      "description": "the data json with the MSAs AlphaFold 3 made for one target",
+      "id_scheme": "target sequence id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "af3_msa",
+      "name": "af3_msa",
+      "generated": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "$(OUT)/$(SEQ)/$(SEQ)_data.json",
+        "store": "parallel_fs"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "pass",
+    "failed": [],
+    "unknown": []
+   }
+  }
+ },
+ {
+  "tool": "annotate_validate_preview",
+  "args": {
+   "maestro": "/bin/sh",
+   "env_text": "export PYTHONPATH={annotated}/moirai_shim:{annotated}\"${PYTHONPATH:+:$PYTHONPATH}\"\n",
+   "files": {
+    "mini.yaml": "env:\n    variables:\n        OUT: outputs\n\nstudy:\n    - name: af3_msa\n      description: msa step\n      run:\n          cmd: |\n            mkdir -p $(OUT)/$(SEQ)\n            echo msa > $(OUT)/$(SEQ)/$(SEQ)_data.json\n          depends: []\n",
+    "moirai_shim/moirai": "",
+    "run": "if [ -f _moirai_prov.py ]; then\n  shim=0; tree=0; IFS=:\n  for p in $PYTHONPATH; do\n    [ -e \"$p/moirai\" ] && shim=1\n    [ -f \"$p/_moirai_prov.py\" ] && tree=1\n  done\n  if [ $shim = 0 ] || [ $tree = 0 ]; then\n    echo \"ModuleNotFoundError: No module named 'moirai'\" >&2\n    echo \"ModuleNotFoundError: No module named 'imp'\" >&2\n    exit 1\n  fi\nfi\nexit 0\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "msa_input"
+    ],
+    "entity_types": [
+     {
+      "type": "msa_input",
+      "role": "output",
+      "description": "the data json with the MSAs AlphaFold 3 made for one target",
+      "id_scheme": "target sequence id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "af3_msa",
+      "name": "af3_msa",
+      "generated": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "$(OUT)/$(SEQ)/$(SEQ)_data.json",
+        "store": "parallel_fs"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "pass",
+    "failed": [],
+    "unknown": []
+   }
+  }
+ },
+ {
+  "tool": "annotate_validate_preview",
+  "args": {
+   "maestro": "/bin/sh",
+   "files": {
+    "mini.yaml": "env:\n    variables:\n        OUT: outputs\n\nstudy:\n    - name: af3_msa\n      description: msa step\n      run:\n          cmd: |\n            mkdir -p $(OUT)/$(SEQ)\n            echo msa > $(OUT)/$(SEQ)/$(SEQ)_data.json\n          depends: []\n",
+    "run": "echo \"ModuleNotFoundError: No module named 'moirai'\" >&2\ni=0\nwhile [ $i -lt 20 ]; do echo \"  File \\\"/x/maestrowf/y.py\\\", line $i, in z\" >&2; i=$((i+1)); done\necho \"ModuleNotFoundError: No module named 'imp'\" >&2\nexit 1\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "msa_input"
+    ],
+    "entity_types": [
+     {
+      "type": "msa_input",
+      "role": "output",
+      "description": "the data json with the MSAs AlphaFold 3 made for one target",
+      "id_scheme": "target sequence id"
+     }
+    ],
+    "activities": [
+     {
+      "file": "mini.yaml",
+      "mode": "yaml_step",
+      "step": "af3_msa",
+      "name": "af3_msa",
+      "generated": [
+       {
+        "type": "msa_input",
+        "key": "$(SEQ)",
+        "uri": "$(OUT)/$(SEQ)/$(SEQ)_data.json",
+        "store": "parallel_fs"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "contains": "first error: ModuleNotFoundError: No module named 'moirai'"
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "class FilterTask:\n    def __init__(self):\n        self.run_str = 'mmseqs filtera3m in.a3m out.a3m --qid 0.2 --diff 3000'\n\n    def on_finish(self):\n        return None\n\n\nif __name__ == '__main__':\n    FilterTask().on_finish()\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "filtered_msa"
+    ],
+    "entity_types": [
+     {
+      "type": "filtered_msa",
+      "role": "output",
+      "description": "the filtered alignment of one sequence",
+      "id_scheme": "sequence"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "FilterTask.on_finish",
+      "name": "filter_msa",
+      "generated": [
+       {
+        "type": "filtered_msa",
+        "key": "s1",
+        "store": "memory"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "contains": "--qid=0.2"
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "class FilterTask:\n    def __init__(self):\n        self.run_str = 'mmseqs filtera3m in.a3m out.a3m --qid 0.2 --diff 3000'\n\n    def on_finish(self):\n        return None\n\n\nif __name__ == '__main__':\n    FilterTask().on_finish()\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "filtered_msa"
+    ],
+    "entity_types": [
+     {
+      "type": "filtered_msa",
+      "role": "output",
+      "description": "the filtered alignment of one sequence",
+      "id_scheme": "sequence"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "FilterTask.on_finish",
+      "name": "filter_msa",
+      "generated": [
+       {
+        "type": "filtered_msa",
+        "key": "s1",
+        "store": "memory"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "contains": "--diff=3000"
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "class FilterTask:\n    def on_finish(self):\n        self.stdout = 'Initial number of alignments: 10\\nFinal number of alignments: 4\\n'\n        return None\n\n\nif __name__ == '__main__':\n    FilterTask().on_finish()\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "filtered_msa"
+    ],
+    "entity_types": [
+     {
+      "type": "filtered_msa",
+      "role": "output",
+      "description": "the filtered alignment of one sequence",
+      "id_scheme": "sequence"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "FilterTask.on_finish",
+      "name": "filter_msa",
+      "generated": [
+       {
+        "type": "filtered_msa",
+        "key": "s1",
+        "store": "memory"
+       }
+      ],
+      "capture": {
+       "outputs": {
+        "final": "int(self.stdout.split(':')[-1])"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "unresolved": [],
+    "rc": 0,
+    "captured": [
+     {
+      "activity": "filter_msa",
+      "relation": "GENERATED",
+      "type": "filter_msa.output",
+      "value": "final=4"
+     }
+    ]
+   },
+   "contains": "final=4"
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "class FilterTask:\n    def on_finish(self):\n        self.stdout = 'Initial number of alignments: 10\\nFinal number of alignments: 4\\n'\n        return None\n\n\nif __name__ == '__main__':\n    FilterTask().on_finish()\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "filtered_msa"
+    ],
+    "entity_types": [
+     {
+      "type": "filtered_msa",
+      "role": "output",
+      "description": "the filtered alignment of one sequence",
+      "id_scheme": "sequence"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "function": "FilterTask.on_finish",
+      "name": "filter_msa",
+      "generated": [
+       {
+        "type": "filtered_msa",
+        "key": "s1",
+        "store": "memory"
+       }
+      ]
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "rc": 0,
+    "captured": []
+   }
+  }
+ },
+ {
+  "tool": "annotate_preview",
+  "args": {
+   "run": "app.py",
+   "files": {
+    "app.py": "def pipeline():\n    text = 'Final number of alignments: 4'\n    return text\n\n\nif __name__ == '__main__':\n    pipeline()\n"
+   },
+   "spec": {
+    "scientific_artifacts": [
+     "marker"
+    ],
+    "entity_types": [
+     {
+      "type": "marker",
+      "role": "output",
+      "description": "a marker entity generated at a statement",
+      "id_scheme": "name"
+     }
+    ],
+    "activities": [
+     {
+      "file": "app.py",
+      "mode": "statement",
+      "in": "pipeline",
+      "anchor": "text = 'Final",
+      "at": "after",
+      "name": "count_step",
+      "generated": [
+       {
+        "type": "marker",
+        "key": "m1",
+        "store": "memory"
+       }
+      ],
+      "capture": {
+       "outputs": {
+        "final": "int(text.split(':')[-1])"
+       }
+      }
+     }
+    ]
+   }
+  },
+  "expect": {
+   "json": {
+    "status": "ok",
+    "unresolved": [],
+    "rc": 0
+   },
+   "contains": "final=4"
+  }
  }
 ]

@@ -1,0 +1,27 @@
+{
+ "name": "answer_confidence",
+ "description": "The confidence of an answer, 0-100: how much of it was calculated by TraceViewer queries on the traces versus inferred by the LLM (or missing: a gap), with every LLM-inferred part flagged. Load when showing, judging or improving an answer, and when the user asks how sure an answer is.",
+ "version": 1,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "confidence_score",
+  "confidence_validate"
+ ],
+ "pvc": {
+  "predictor": [
+   "confidence_score"
+  ],
+  "validator": [
+   "confidence_validate"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1794243868.3,
+   "why": "Every answer shows how much was calculated versus inferred, LLM inference flagged"
+  }
+ ]
+}

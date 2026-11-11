@@ -132,6 +132,21 @@ def revise(lid: str, text: str, capability: str = "", note: str = "", approve: b
     return decide(lid, True, by) if approve else {"status": "ok", "id": lid, "applied": False}
 
 
+def retire(ids: List[str], by: str = "", winner: str = "", note: str = "") -> dict:
+    """Take lessons out of force on a person's decision: replaced by `winner`, or dropped as wrong. Their history stays."""
+    rows, done = all_lessons(), []
+    for lid in ids:
+        o = rows.get(lid)
+        if not o or o["status"] not in ("applied", "pending") or lid == winner:
+            continue
+        if o["status"] == "applied":
+            _unwrite(o["capability"], lid)
+        _append({"id": lid, "status": "superseded" if winner else "rejected", **({"superseded_by": winner} if winner else {}),
+                 "decided_by": by, "decided": round(time.time(), 1), "revisions": o.get("revisions", []) + [{"by": by or "user", "note": note, "ts": round(time.time(), 1)}]})
+        done.append(lid)
+    return {"status": "ok", "retired": done}
+
+
 def listing(status: Optional[str] = None, limit: int = 200) -> List[dict]:
     rows = sorted(all_lessons().values(), key=lambda r: -r.get("ts", 0))
     return [r for r in rows if not status or r.get("status") == status][:limit]

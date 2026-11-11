@@ -1,0 +1,46 @@
+{
+ "name": "explain_answer",
+ "description": "Explain the answer of a computed answer - the write-up led by its first sentence, its check, the gaps - as a plain summary and folded details. Used by query_explain for the Query view.",
+ "version": 4,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "explain_answer",
+  "explain_answer_check"
+ ],
+ "pvc": {
+  "predictor": [
+   "explain_answer"
+  ],
+  "validator": [
+   "explain_answer_check"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1794241935.4,
+   "why": "Query view: the answer part told high level first, details folded and formatted"
+  },
+  {
+   "version": 2,
+   "ts": 1794262519.86727,
+   "by": "haridev",
+   "proposal": "9d21cb4a91cb",
+   "why": "Consolidation: shared rules now live in query_explain; keep only what is specific to the answer part."
+  },
+  {
+   "version": 3,
+   "ts": 1794270403.852202,
+   "by": "haridev",
+   "why": "Restore the code, checks and agent of the current version: approving the consolidation proposal (made before the trace validators) had put back the older code. The consolidated SKILL.md stays."
+  },
+  {
+   "version": 4,
+   "ts": 1794283526.0,
+   "by": "haridev",
+   "why": "answer the question directly: a verdict from known quality measures (how many reach the level, said in the text), each measure's median and range, then each item's own values best first; no model"
+  }
+ ]
+}

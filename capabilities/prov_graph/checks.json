@@ -12,7 +12,14 @@
   "tool": "graph_compare_selftest",
   "args": {},
   "expect": {
-   "contains": "\"compared_members\": 3"
+   "contains": "\"states\": {\"identical\": \"pass\", \"timestamp_only\": \"inconclusive\", \"different\": \"fail\", \"nothing_compared\": \"inconclusive\", \"self_compare\": \"inconclusive\", \"zero_members\": \"inconclusive\", \"timestamp_only_accepted\": \"pass\"}"
+  }
+ },
+ {
+  "tool": "graph_compare_selftest",
+  "args": {},
+  "expect": {
+   "contains": "\"acceptance\": {\"user_words\": true, \"too_short\": false, \"with_difference\": false}"
   }
  },
  {
@@ -33,14 +40,14 @@
   "tool": "graph_compare_selftest",
   "args": {},
   "expect": {
-   "contains": "\"missing\": [\"t4.tar\"]"
+   "contains": "\"self_compare\": {\"identical\": [], \"timestamp_only\": [], \"different\": [], \"missing\": [\"t1.tar (same file as plain: not compared)\"], \"compared_members\": 0}"
   }
  },
  {
   "tool": "graph_compare_selftest",
   "args": {},
   "expect": {
-   "contains": "\"states\": {\"identical\": \"pass\", \"timestamp_only\": \"inconclusive\", \"different\": \"fail\"}"
+   "contains": "\"files_argument\": {\"identical\": [\"t1.tar\"], \"timestamp_only\": [], \"different\": [\"t3.tar::0/x.txt\"], \"missing\": [], \"compared_members\": 2}"
   }
  }
 ]

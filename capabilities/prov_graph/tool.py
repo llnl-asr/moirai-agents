@@ -19,6 +19,9 @@ from moirai_agents.core import provtrace as T
 STAGE = "graph"
 ROOT_ROLES = {"input", "parameter", "reference"}
 MAX_VOLATILE_LINES = 8
+MAX_COMPARE_FILES = 500
+MIN_ACCEPT_CHARS = 10
+SELF_NOTE = " (same file as plain: not compared)"
 VOLATILE_DEFAULT = [
     r"^\s*(Date|Command)\b",
     r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?",
@@ -57,7 +60,7 @@ def _health(g, spec):
                         stack.append(u)
         types = {g.entities.get(r, {}).get("type", "?") for r in roots}
         lineage[eid] = {"type": e["type"], "uri": e.get("uri", ""), "ancestors": len(seen), "root_types": sorted(types)}
-        wrong = sorted(t for t in types if declared.get(t, {}).get("role") not in ROOT_ROLES)
+        wrong = sorted(t for t in types if (declared.get(t, {}).get("role") or (g.types.get(t) or {}).get("role")) not in ROOT_ROLES)   # captured inputs: role parameter, from the trace
         if wrong:
             bad_roots[eid] = wrong
     return {"records": g.counts()["records"], "activities": len(g.activities), "entities": len(g.entities), "entities_by_type": dict(by_type), "dangling": len(g.dangling()),
@@ -130,8 +133,19 @@ def _members(path):
     return out
 
 
+def _member_count(path):
+    """Number of regular members of a tar, else 1 (a plain file hashed whole counts as one compared unit)."""
+    try:
+        if tarfile.is_tarfile(path):
+            return max(1, len(_members(path)))
+    except (OSError, tarfile.TarError):
+        pass
+    return 1
+
+
 def compare_files(a, b, rel, patterns=None):
-    """Pure comparison of one relative file under dirs a and b. Returns a result dict with identical, timestamp_only, different, missing, compared_members."""
+    """Pure comparison of one relative file under dirs a and b. Returns a result dict with identical, timestamp_only, different, missing, compared_members.
+    A file that resolves to the same path under a and b is never compared with itself: it is reported under missing with a note and compared_members stays 0."""
     patterns = patterns or VOLATILE_DEFAULT
     res = {"identical": [], "timestamp_only": [], "different": [], "missing": [], "compared_members": 0}
     pa, pb = Path(a) / rel, Path(b) / rel
@@ -140,10 +154,13 @@ def compare_files(a, b, rel, patterns=None):
         return res
     if not pa.is_file():
         return res
+    if pa.resolve() == pb.resolve():
+        res["missing"].append(rel + SELF_NOTE)
+        return res
     is_tar = False
     if _digest(pa) == _digest(pb):
         res["identical"].append(rel)
-        res["compared_members"] = 0
+        res["compared_members"] = _member_count(pa)
         return res
     try:
         is_tar = tarfile.is_tarfile(pa) and tarfile.is_tarfile(pb)
@@ -185,19 +202,80 @@ def compare_tree(a, b, rels, patterns=None):
     for rel in rels:
         r = compare_files(a, b, rel, patterns)
         for k in out:
-            out[k] = out[k] + r[k] if k != "compared_members" else out[k] + r[k]
+            out[k] = out[k] + r[k]
     return out
+
+
+def default_files(plain, limit=2000):
+    """Pure: files worth comparing under a plain study dir: AlphaFold outputs-af3 trees and *_cut50.pdb. Rosetta outputs are unseeded, so never defaulted."""
+    root = Path(plain)
+    if not root.is_dir():
+        return []
+    rels = [p.relative_to(root).as_posix() for p in sorted(root.rglob("*")) if p.is_file() and ("outputs-af3" in p.parts or p.name.endswith("_cut50.pdb"))]
+    return rels[:limit]
+
+
+def all_files(plain, limit=MAX_COMPARE_FILES):
+    """Pure: every regular file under plain, relative posix paths, sorted. Returns (rels[:limit], capped)."""
+    root = Path(plain)
+    if not root.is_dir():
+        return [], False
+    rels = [p.relative_to(root).as_posix() for p in sorted(root.rglob("*")) if p.is_file()]
+    return rels[:limit], len(rels) > limit
+
+
+def relativize_outputs(plain, outs):
+    """Pure: outputs_created entries as paths relative to plain. Absolute entries under plain are made relative; absolute entries elsewhere are ignored with a note.
+    Returns (rels, notes)."""
+    root, rels, notes = Path(plain), [], []
+    for o in outs or []:
+        p = Path(str(o))
+        if not p.is_absolute():
+            rels.append(p.as_posix())
+            continue
+        try:
+            rels.append(p.relative_to(root).as_posix())
+        except ValueError:
+            try:
+                rels.append(p.resolve().relative_to(root.resolve()).as_posix())
+            except ValueError:
+                notes.append(f"ignored absolute output outside plain_dir: {o}")
+    return rels, notes
+
+
+def acceptance_ok(out, text):
+    """Pure: may the user's words accept the timestamp-only members of comparison result out? Only when the text has at least MIN_ACCEPT_CHARS characters,
+    something was compared, there is at least one timestamp_only member, and nothing is different or missing. Returns (ok, reason)."""
+    if len((text or "").strip()) < MIN_ACCEPT_CHARS:
+        return False, f"accept_timestamp_only must hold the user's own words, at least {MIN_ACCEPT_CHARS} characters"
+    if out.get("different") or out.get("missing"):
+        return False, "never accepted: some member is different or missing"
+    if not out.get("compared_members"):
+        return False, "never accepted: compared_members is 0"
+    if not out.get("timestamp_only"):
+        return False, "nothing to accept: no timestamp_only member"
+    return True, ""
 
 
 def science_status(o):
     """Pure: map recorded compare outputs to (state, message). state in pass|fail|inconclusive."""
     if "compare" not in o:
         return "inconclusive", "graph_compare has not run"
+    if not o.get("compare_files"):
+        return "inconclusive", "graph_compare compared no file (empty, missing or self-compared list): pass is vacuous, give plain_dir, traced_dir of two different runs and files"
     if o.get("compare_differs"):
         return "fail", f"outputs differ in content from the plain run: {o['compare_differs'][:5]}"
+    if o.get("compare_missing"):
+        return "inconclusive", f"files not compared (missing in the traced run or the same file as plain): {o['compare_missing'][:5]}"
+    cmp_ = o.get("compare") or {}
+    if "compared_members" in cmp_ and not cmp_["compared_members"]:
+        return "inconclusive", "compared_members is 0: nothing was really compared (same file on both sides?); compare plain against traced outputs of two different runs"
     if o.get("compare_timestamp_only"):
         names = [f"{t['file']}::{t['member']}" if t.get("member") else t["file"] for t in o["compare_timestamp_only"]][:10]
-        return "inconclusive", f"only timestamp/command-line differences (user's call): {names}"
+        said = str(o.get("compare_timestamp_only_accepted") or "").strip()
+        if len(said) >= MIN_ACCEPT_CHARS:
+            return "pass", f"timestamp-only differences accepted by the user: {said}, members: {names}"
+        return "inconclusive", f"only timestamp/command-line differences (user's call: show the members, then rerun graph_compare with accept_timestamp_only=<their words>): {names}"
     return "pass", ""
 
 
@@ -219,7 +297,17 @@ def _selftest():
         mk(b / "t2.tar", {"0/x.txt": same, "0/h.hhr": b"Date:   Sat Oct 31 11:11:11 2026\nCommand: hhsearch /mnt/nnf/9999ffff-1111/in\nscore 5\n"})
         mk(a / "t3.tar", {"0/x.txt": b"score 5\n"})
         mk(b / "t3.tar", {"0/x.txt": b"score 6\n"})
-        return compare_tree(a, b, ["t1.tar", "t2.tar", "t3.tar", "t4.tar"])
+        res = compare_tree(a, b, ["t1.tar", "t2.tar", "t3.tar", "t4.tar"])
+        # the defect: absolute outputs_created of the plain run, joined under both dirs, resolve to the same plain file
+        abs_outs = [str(a / "t1.tar"), str(a / "t2.tar")]
+        res["self_compare"] = compare_tree(a, a, ["t1.tar"])
+        res["self_compare_abs_join"] = compare_tree(a, b, abs_outs)
+        rels, notes = relativize_outputs(a, abs_outs + ["/elsewhere/x.tar", "t3.tar"])
+        res["resolved"] = {"from_outputs": rels, "notes": notes}
+        res["files_argument"] = compare_tree(a, b, ["t1.tar", "t3.tar"])
+        res["ts_only"] = compare_tree(a, b, ["t1.tar", "t2.tar"])
+        res["walk"] = all_files(a)[0]
+        return res
 
 
 def register(mcp):
@@ -239,43 +327,91 @@ def register(mcp):
         return h
 
     @mcp.tool()
-    def graph_compare(pipeline: str, plain_dir: str = "", traced_dir: str = "", volatile_patterns: list = None) -> dict:
+    def graph_compare(pipeline: str, plain_dir: str = "", traced_dir: str = "", volatile_patterns: list = None, files: list = None, accept_timestamp_only: str = "") -> dict:
         """Check the run did not change the science: compare the files the plain run wrote with the same files from the traced run, by sha256 of content.
         Tar archives are opened and compared member by member; .zst members are decompressed (zstandard module, else the zstd CLI, else compared as bytes).
         A member whose only differing lines match volatile_patterns (default: Date/Command header lines, timestamps, /mnt/nnf/<uuid> paths; at most 8 lines) is timestamp_only, not different.
-        Use after graph_check. plain_dir: default where smoke ran. traced_dir: default the annotated tree. volatile_patterns: optional list of regexes replacing the default.
-        Returns {identical, timestamp_only: [{file, member, lines}], different, missing, compared_members}; timestamp_only is for the user to judge."""
+        Use after graph_check. Compare plain against traced outputs of two DIFFERENT runs (e.g. runs/smoke/output vs runs/moirai-baseline-N/output); a path never gets compared with itself.
+        plain_dir: default runs/baseline_plain/study when it and runs/baseline/study exist, else where smoke ran. traced_dir: default runs/baseline/study, else the annotated tree.
+        files: optional list of paths relative to plain_dir/traced_dir (tars are opened); used before any default. Without files: when plain_dir and traced_dir are both given and exist, every regular file under plain_dir (cap 500, reported in notes);
+        else the AlphaFold outputs-af3 tree and *_cut50.pdb of a study dir; else smoke's outputs_created (absolute entries under plain_dir are made relative, others ignored with a note).
+        A file resolving to the same path on both sides is reported under missing and not compared. Zero files or compared_members 0 make science_unchanged inconclusive, never a pass.
+        volatile_patterns: optional list of regexes replacing the default.
+        accept_timestamp_only: the USER'S OWN WORDS (at least 10 characters) accepting the named timestamp_only members; never write it yourself. Use only after showing the user the members.
+        Honoured only when the result has no different, no missing, compared_members > 0 and at least one timestamp_only member: it is then recorded as compare_timestamp_only_accepted and science_unchanged passes with the text quoted.
+        Empty (default) or refused: nothing is accepted, the verdict stays inconclusive, and the refusal is in notes. Each call overwrites the earlier acceptance.
+        Returns {identical, timestamp_only: [{file, member, lines}], different, missing, compared_members, notes, timestamp_only_accepted}; timestamp_only is for the user to judge."""
         c = P.load(pipeline)
         smoke = P.stage(c, "smoke")["outputs"]
+        runs = P.work(c) / "runs"
+        explicit = bool(plain_dir and traced_dir)
+        if not plain_dir and (runs / "baseline_plain" / "study").is_dir() and (runs / "baseline" / "study").is_dir():
+            plain_dir, traced_dir = str(runs / "baseline_plain" / "study"), traced_dir or str(runs / "baseline" / "study")
         a, b = Path(plain_dir or smoke.get("cwd") or P.source_of(c)), Path(traced_dir or P.stage(c, "integrate")["outputs"].get("annotated", ""))
-        out = compare_tree(a, b, smoke.get("outputs_created", []), volatile_patterns)
-        P.record(pipeline, STAGE, outputs={"compare": {k: (len(v) if isinstance(v, list) else v) for k, v in out.items()}, "compare_differs": out["different"][:20],
-                                           "compare_timestamp_only": out["timestamp_only"][:20]}, note="outputs compared")
+        notes = []
+        if files:
+            rels = [str(f) for f in files]
+        else:
+            rels = default_files(a) if a.name == "study" else []
+            if not rels and explicit and a.is_dir() and b.is_dir():
+                rels, capped = all_files(a)
+                if capped:
+                    notes.append(f"capped at {MAX_COMPARE_FILES} files; pass files= to compare the rest")
+            if not rels:
+                rels, n2 = relativize_outputs(a, smoke.get("outputs_created", []))
+                notes += n2
+        if a.exists() and b.exists() and a.resolve() == b.resolve():
+            notes.append("plain_dir and traced_dir are the same directory: nothing can be compared; pass the outputs of two different runs")
+        out = compare_tree(a, b, rels, volatile_patterns)
+        nfiles = len(out["identical"]) + len(out["timestamp_only"]) + len(out["different"])
+        accepted = ""
+        if (accept_timestamp_only or "").strip():
+            ok, why = acceptance_ok(out, accept_timestamp_only)
+            if ok:
+                accepted = accept_timestamp_only.strip()
+            else:
+                notes.append(why)
+        P.record(pipeline, STAGE, outputs={"compare_files": nfiles, "compare": {k: (len(v) if isinstance(v, list) else v) for k, v in out.items()}, "compare_differs": out["different"][:20],
+                                           "compare_missing": out["missing"][:20], "compare_timestamp_only": out["timestamp_only"][:20],
+                                           "compare_timestamp_only_accepted": accepted}, note="outputs compared")
+        out["notes"] = notes
+        out["timestamp_only_accepted"] = accepted
         return out
 
     @mcp.tool()
     def graph_compare_dirs(plain_dir: str, traced_dir: str, files: list, volatile_patterns: list = None) -> dict:
         """Same comparison as graph_compare but on two directories and a list of relative file paths, with no pipeline and nothing recorded. Use to re-check two runs by hand.
-        plain_dir, traced_dir: roots; files: relative paths (tars are opened); volatile_patterns: optional regexes.
+        plain_dir, traced_dir: roots; files: relative paths (tars are opened); volatile_patterns: optional regexes. A file that is the same path on both sides is reported under missing.
         Returns {identical, timestamp_only, different, missing, compared_members}."""
         return compare_tree(plain_dir, traced_dir, files, volatile_patterns)
 
     @mcp.tool()
     def graph_compare_selftest() -> dict:
-        """Build two small tar sets in a temp dir (identical, Date/Command-header-only difference, real difference, missing) and compare them. Use to confirm graph_compare logic.
-        Returns the comparison plus science_state for each case."""
+        """Build two small tar sets in a temp dir (identical, Date/Command-header-only difference, real difference, missing), the self-compare defect (absolute paths, same dir) and the files argument, and compare them. Use to confirm graph_compare logic.
+        Returns the comparison plus science_state for each case, including timestamp_only_accepted (the user's words accepted) and refusals of too-short text or a real difference."""
         r = _selftest()
+        ts = r["ts_only"]
+        ok, _ = acceptance_ok(ts, "I accept the Date/Command header diffs")
+        bad_short, _ = acceptance_ok(ts, "ok")
+        bad_diff, _ = acceptance_ok(r, "I accept the Date/Command header diffs")
+        words = "I accept the Date/Command header diffs" if ok else ""
         r["states"] = {
-            "identical": science_status({"compare": {}})[0],
-            "timestamp_only": science_status({"compare": {}, "compare_timestamp_only": r["timestamp_only"]})[0],
-            "different": science_status({"compare": {}, "compare_differs": r["different"]})[0],
+            "identical": science_status({"compare": {}, "compare_files": 1})[0],
+            "timestamp_only": science_status({"compare": {}, "compare_files": 1, "compare_timestamp_only": r["timestamp_only"]})[0],
+            "different": science_status({"compare": {}, "compare_files": 1, "compare_differs": r["different"]})[0],
+            "nothing_compared": science_status({"compare": {}})[0],
+            "self_compare": science_status({"compare": {"compared_members": 0}, "compare_files": 0, "compare_missing": r["self_compare"]["missing"]})[0],
+            "zero_members": science_status({"compare": {"compared_members": 0}, "compare_files": 1})[0],
+            "timestamp_only_accepted": science_status({"compare": {"compared_members": 3}, "compare_files": 2, "compare_timestamp_only": ts["timestamp_only"], "compare_timestamp_only_accepted": words})[0],
         }
+        r["acceptance"] = {"user_words": ok, "too_short": bad_short, "with_difference": bad_diff}
         return r
 
     @mcp.tool()
     def graph_validate(pipeline: str) -> dict:
         """The health gate: provenance was recorded, no dangling id, every artifact type present with a producer, every root a real input, every type described. Use before the gate.
-        science_unchanged: pass when outputs are identical, inconclusive when only timestamp differences exist (named), fail on real content differences. Returns the verdict {status, failed, unknown, passed, total}."""
+        science_unchanged: pass when outputs are identical, or when only timestamp differences exist and the user's words accepted them (graph_compare accept_timestamp_only); inconclusive when only timestamp differences exist without that acceptance (named),
+        nothing was compared, files were missing or self-compared, or compared_members is 0; fail on real content differences. Returns the verdict {status, failed, unknown, passed, total}."""
         o = P.stage(P.load(pipeline), STAGE)["outputs"]
         v = P.Verdict(STAGE)
         h = o.get("health")

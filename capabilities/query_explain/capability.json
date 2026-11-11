@@ -1,0 +1,40 @@
+{
+ "name": "query_explain",
+ "description": "Explain a computed answer for the Query view in four parts - plan, result, answer, evidence - each a high-level summary first with details folded and formatted (tables, queries, records, numbers); each part is its own capability (explain_plan, explain_result, explain_answer, explain_evidence). Load when the user finds an answer hard to read or asks how an answer was explained.",
+ "version": 3,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "query_explain",
+  "query_explain_validate"
+ ],
+ "pvc": {
+  "predictor": [
+   "query_explain"
+  ],
+  "validator": [
+   "query_explain_validate"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1794241935.4,
+   "why": "Query view: plan, result, answer and evidence high level first, details folded and formatted"
+  },
+  {
+   "version": 2,
+   "ts": 1794262514.656656,
+   "by": "haridev",
+   "proposal": "0b33ab93c78e",
+   "why": "Consolidation: the four explain_<part> skills repeated the same rules, constraints, corner cases and corrector table; move them here, the parent, as the single home."
+  },
+  {
+   "version": 3,
+   "ts": 1794270403.9056482,
+   "by": "haridev",
+   "why": "Restore the code, checks and agent of the current version: approving the consolidation proposal (made before the trace validators) had put back the older code. The consolidated SKILL.md stays."
+  }
+ ]
+}

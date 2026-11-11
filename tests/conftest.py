@@ -110,7 +110,8 @@ class Web:
         self.pkg = self.root / "src" / "moirai_agents"
         e = {**os.environ, "PYTHONPATH": str(self.root / "src"), "HOME": str(tmp / "home"), "PYTHONUNBUFFERED": "1",
              "MOIRAI_AGENTS_WEBUI_RUNDIR": str(tmp / "run"), "MOIRAI_AGENTS_WORKSPACE": str(tmp / "ws"), "MOIRAI_AGENTS_WEBUI_STATE": str(tmp / "state"),
-             "MOIRAI_AGENTS_WEBUI_TOKEN": "test-token", **env}
+             "MOIRAI_AGENTS_WEBUI_TOKEN": "test-token", "MOIRAI_AGENTS_AUTO_LEARN": "0", "MOIRAI_AGENTS_AUTO_CONSOLIDATE": "0",
+             "MOIRAI_AGENTS_PROVENANCE_DIR": str(tmp / "provenance"), **env}
         e.pop("MOIRAI_AGENTS_PIPELINES_DIR", None)
         self.log = open(tmp / "web.log", "wb")
         self.logp = tmp / "web.log"

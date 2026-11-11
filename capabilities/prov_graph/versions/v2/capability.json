@@ -1,0 +1,42 @@
+{
+ "name": "prov_graph",
+ "description": "Build the provenance graph of the baseline run and gate on its health - every artifact produced and rooted in real inputs; compare plain vs traced outputs by content (tar members, zstd) and tell timestamp-only differences from real ones. Load for the graph stage.",
+ "version": 2,
+ "enabled": true,
+ "stages": [
+  "graph"
+ ],
+ "tools": [
+  "graph_check",
+  "graph_compare",
+  "graph_compare_dirs",
+  "graph_compare_selftest",
+  "graph_validate"
+ ],
+ "pvc": {
+  "predictor": [
+   "graph_check",
+   "graph_compare"
+  ],
+  "validator": [
+   "graph_validate"
+  ]
+ },
+ "review": [
+  "imports subprocess: runs commands",
+  "line 237: writes or deletes files (write_text)"
+ ],
+ "history": [
+  {
+   "version": 1,
+   "why": "moved from dftracer-agents' provenance mode"
+  },
+  {
+   "version": 2,
+   "ts": 1793430439.6406653,
+   "by": "haridev",
+   "proposal": "7d35fbcd5fc6",
+   "why": "graph_compare reported 10 differing tars as identical (SHA1 on whole files was fine in theory, but the 2026-10-31 run showed identical verdicts for tars with different md5 - size-level comparison). Now compares by sha256, descends into tar members and zstd members, and classifies timestamp-only differences so the validator reports them inconclusive."
+  }
+ ]
+}

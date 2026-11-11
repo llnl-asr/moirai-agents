@@ -182,3 +182,66 @@ def test_workspace_renders_scoped_agents(tmp_path):
     S.disable("app_smoke")
     workspace.sync(ws)
     assert not (ws / ".claude/agents/app_smoke.md").exists()
+
+
+def test_a_lesson_only_copy_follows_the_bundled_code_and_keeps_its_lessons():
+    """A user-layer copy made to hold lessons must not hide a newer bundled capability; a copy changed on purpose is left alone."""
+    import json as _json
+    import shutil as _sh
+    user = S.layer_dir("user")
+    for name in ("prov_query", "pipeline_control"):
+        _sh.copytree(S.BUNDLED / name, user / name, ignore=_sh.ignore_patterns("__pycache__"))
+    old = user / "prov_query"
+    (old / "tool.py").write_text("def register(mcp):\n    pass\n")                       # the frozen, older code
+    (old / "LESSONS.md").write_text("# Lessons: prov_query\\n\\n- [L-1] keep me\\n")
+    mine = user / "pipeline_control"
+    m = _json.loads((mine / "capability.json").read_text())
+    m["history"].append({"version": 9, "why": "changed on purpose"})
+    (mine / "capability.json").write_text(_json.dumps(m))
+    (mine / "tool.py").write_text("def register(mcp):\n    pass\n")
+    assert S.sync_shadows() == ["prov_query"]
+    assert (old / "tool.py").read_text() == (S.BUNDLED / "prov_query/tool.py").read_text() and "keep me" in (old / "LESSONS.md").read_text()
+    assert list((old / "versions").glob("shadow-v*/tool.py"))
+    assert (mine / "tool.py").read_text() == "def register(mcp):\n    pass\n"
+    assert S.sync_shadows() == []
+
+
+NEWER = TOOL.replace("return {\"y\": x + 1}", "return {\"y\": x + 1}  # newer")
+
+
+def _bump_code(code):
+    """The capability's code changes after a proposal was made (another approval, or a bundled update)."""
+    d = S.all_caps()["demo_cap"][1]
+    (d / "tool.py").write_text(code)
+
+
+def test_approving_an_old_skill_proposal_keeps_the_newer_code():
+    S.apply(new()["id"], True)
+    r = S.revise("demo_cap", SKILL.replace("r\n", "shared rules moved\n", 1), note="consolidation")
+    _bump_code(NEWER)
+    a = S.apply(r["id"], True)
+    assert a["status"] == "ok" and a["kept_newer"] == ["tool.py"]
+    d = S.all_caps()["demo_cap"][1]
+    assert "# newer" in (d / "tool.py").read_text() and "shared rules moved" in (d / "SKILL.md").read_text()
+
+
+def test_approving_an_old_code_proposal_over_newer_code_is_refused():
+    S.apply(new()["id"], True)
+    r = S.revise("demo_cap", tool_code=TOOL.replace("x + 1", "1 + x"), note="reorder")
+    _bump_code(NEWER)
+    a = S.apply(r["id"], True)
+    assert a["status"] == "error" and a["conflicts"] == ["tool.py"]
+    assert "# newer" in (S.all_caps()["demo_cap"][1] / "tool.py").read_text()
+
+
+def test_an_out_of_date_proposal_is_shown_as_such_and_redone_on_the_current_version():
+    S.apply(new()["id"], True)
+    r = S.revise("demo_cap", tool_code=TOOL.replace("x + 1", "1 + x"), note="reorder")
+    _bump_code(NEWER)
+    p = next(x for x in S.list_capabilities()["pending"] if x["id"] == r["id"])
+    assert p["stale"]["files"] == ["tool.py"] and "undo the newer version" in p["stale"]["why"]
+    redo = S.refine(r["id"], tool_code=NEWER.replace("x + 1", "1 + x"), note="redone on the newer code", on_current=True)
+    assert redo["status"] == "ok"
+    assert "stale" not in next(x for x in S.list_capabilities()["pending"] if x["id"] == redo["id"])
+    a = S.apply(redo["id"], True)
+    assert a["status"] == "ok" and "# newer" in (S.all_caps()["demo_cap"][1] / "tool.py").read_text() and "1 + x" in (S.all_caps()["demo_cap"][1] / "tool.py").read_text()

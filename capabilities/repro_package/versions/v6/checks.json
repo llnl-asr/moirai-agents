@@ -1,0 +1,45 @@
+[
+ {
+  "tool": "repro_validate",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "repro_batch_selftest",
+  "args": {},
+  "expect": {
+   "contains": "repro batch selftest PASS"
+  }
+ },
+ {
+  "tool": "repro_publish_selftest",
+  "args": {},
+  "expect": {
+   "contains": "repro publish selftest PASS"
+  }
+ },
+ {
+  "tool": "repro_publish_plan",
+  "args": {
+   "pipeline": "nope-1",
+   "publish_root": "/nonexistent"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "repro_publish_validate",
+  "args": {
+   "pipeline": "nope-1",
+   "publish_root": "/nonexistent"
+  },
+  "expect": {
+   "raises": true
+  }
+ }
+]

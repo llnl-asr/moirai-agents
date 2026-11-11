@@ -11,7 +11,7 @@ description: Record and find lessons. Load before recording anything, and before
 - `knowledge_search` comes before acting on anything unfamiliar. `lesson_search` searches lessons only, through the graph: use it with the error text the moment something fails, before exploring on your own.
 - A failed tool result already carries `known_lessons`: read them first; a graph row opens with `knowledge_read`.
 
-- Consolidating: `consolidation_report`, then read each group's members. Overlapping lessons: `lesson_merge` into one, in the single best home, keeping every fact. Lessons that contradict each other: ask the user which holds, before proposing anything. Overlapping capabilities: `capability_update` the better home, then ask the user whether to `capability_disable` the other. A group that is different on purpose: `consolidation_keep` with why.
+- Consolidating: `consolidation_report`, then read each group's members. Overlapping lessons: `lesson_merge` into one, in the single best home, keeping every fact. Read every member in full with `lesson_get` first. Lessons that contradict each other, or a merge that would drop a fact: `consolidation_ask` the user, with 2-4 concrete options (keep, supersede, merge, drop) and your recommended one with its evidence; never leave a conflict only in your report. Start each consolidation with `consolidation_answers`: act on what the user wrote, then `consolidation_close` it. Overlapping capabilities: `capability_update` the better home, then ask the user whether to `capability_disable` the other. A group that is different on purpose: `consolidation_keep` with why.
 - Consolidation is reading and proposing: it runs on the web server's node, and never needs a job or a compute node.
 
 ## Constraints

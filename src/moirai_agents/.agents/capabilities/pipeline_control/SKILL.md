@@ -5,7 +5,7 @@ description: Drive the run and analysis pipelines stage by stage with a user gat
 
 # Pipeline control
 
-`run`: plan, explore, smoke, discover, annotate, integrate, moirai_smoke, baseline, graph, query, package. `analysis`: plan, ingest, dashboard, query. Each stage is owned by one
+`run` (the Annotate view): plan, explore, smoke, discover, annotate, integrate, moirai_smoke, baseline, graph (the expected-vs-runtime diff), package (publish the code). `live` (the Live Run view; `parent` = the run pipeline): live_run, publish_data. `analysis`: plan, ingest, dashboard, query. Each stage is owned by one
 capability; read its skill before running it.
 
 ## Rules

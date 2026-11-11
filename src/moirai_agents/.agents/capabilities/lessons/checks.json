@@ -1,1 +1,1 @@
-[{"tool":"lesson_list","args":{},"expect":{"contains":"lessons"}},{"tool":"lesson_search","args":{"query":"annotate provenance"},"expect":{"contains":"results"}}]
+[{"tool": "lesson_list", "args": {}, "expect": {"contains": "lessons"}}, {"tool": "lesson_search", "args": {"query": "annotate provenance"}, "expect": {"contains": "results"}}, {"tool": "consolidation_answers", "args": {}, "expect": {"contains": "questions"}}]

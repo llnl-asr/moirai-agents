@@ -62,9 +62,38 @@ def register(mcp):
         return L.merge(ids, text, capability, note)
 
     @mcp.tool()
-    def consolidation_keep(ids: list, why: str) -> dict:
+    def consolidation_keep(ids: list, why: str = "", reason: str = "") -> dict:
         """Record that a reported group is different on purpose, so it is not reported again. Use after reading its members. ids: the group's ids. why: what makes them distinct. Returns {status, kept}."""
-        return Q.keep(ids, why)
+        return Q.keep(ids, why or reason)
+
+    @mcp.tool()
+    def lesson_get(ids: list) -> dict:
+        """The whole text, capability, evidence and status of each lesson: consolidation_report shows only their opening. Read every member of a group before acting on it.
+        Returns {lessons: [{id, capability, text, evidence, status, source}]}."""
+        rows = L.all_lessons()
+        return {"lessons": [{k: rows[i].get(k) for k in ("id", "capability", "text", "evidence", "status", "source", "ts")} for i in ids if i in rows],
+                "unknown": [i for i in ids if i not in rows]}
+
+    @mcp.tool()
+    def consolidation_ask(ids: list, question: str, options: list, recommended: int, why: str) -> dict:
+        """Ask the user to settle a group you cannot settle alone - a conflict, or a merge that would drop a fact. It appears in the Lessons panel with your
+        recommendation preselected; the option they pick is applied at once, and the group is not reported again meanwhile. Never leave a conflict only in your report.
+        ids: the group's lessons. question: one plain question naming what they disagree on. options: 2-4, each {label: what it means in a few words,
+        do: keep (both hold: different on purpose) | supersede (winner: the id that holds; the others are retired) | merge (text: the whole merged lesson,
+        capability: its home) | drop (drop: the ids that are wrong)}. recommended: index of the option you recommend. why: the evidence for it.
+        Returns {status, id}."""
+        return Q.ask(ids, question, options, recommended, why)
+
+    @mcp.tool()
+    def consolidation_answers() -> dict:
+        """Questions the user answered in their own words instead of picking an option: act on each (lesson_merge, lesson_revise, consolidation_keep...),
+        then consolidation_close it. Also lists the questions still open. Returns {questions: [{id, ids, question, answer: {note}}], open: [...]}."""
+        return {"questions": Q.questions("for_agent"), "open": Q.questions("open")}
+
+    @mcp.tool()
+    def consolidation_close(id: str, what: str) -> dict:
+        """Close a question from consolidation_answers once its answer is acted on. what: what you did. Returns {status, id}."""
+        return Q.close(id, what)
 
     @mcp.tool()
     def lesson_decide(id: str, approve: bool) -> dict:

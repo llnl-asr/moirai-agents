@@ -35,10 +35,13 @@ def test_tail_waits_at_a_hole_left_by_an_earlier_member(tmp_path):
     a, b = member(act(1)), member(act(2))
     f.write_bytes(b"\0" * len(a) + b)
     t = T.Tail(str(tmp_path))
-    assert t.poll() == []
+    first = [r["ts"] for r in t.poll()]               # TraceViewer skips the hole: the complete later member may come first, never a misread one
+    assert first in ([], [2])
     with open(f, "r+b") as fh:
         fh.write(a)
-    assert [r["ts"] for r in t.poll()] == [1, 2]
+    second = [r["ts"] for r in t.poll()]
+    assert sorted(first + second) == [1, 2]            # every record once, none twice
+    assert t.poll() == []
 
 
 def test_new_files_are_found_while_tailing(tmp_path):

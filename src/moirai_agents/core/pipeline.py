@@ -1,7 +1,11 @@
 """Pipelines: ordered, user-gated stages, one JSON file per pipeline.
 
-    run:       plan -> explore -> smoke -> discover -> annotate -> integrate -> moirai_smoke -> baseline -> graph -> query -> package
+    run:       plan -> explore -> smoke -> discover -> annotate -> integrate -> moirai_smoke -> baseline -> graph -> package
     analysis:  plan -> ingest -> dashboard -> query
+    live:      live_run -> publish_data      (a long run of an annotated app: ``parent`` is the run pipeline that annotated it)
+
+Questions about a run's provenance are not a run stage: they are asked in the Workbench's Query view (prov_query's tools and
+evidence_answer), during the campaign and after it. A run pipeline saved with a query stage keeps it in its file; it is ignored.
 
 Each stage is owned by one capability. A stage passes only through :func:`advance`: its validator verdict must
 cover the current outputs, the user must have answered its gate, and all their feedback must be resolved. Feedback
@@ -28,12 +32,14 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 KINDS: Dict[str, List[str]] = {
-    "run": ["plan", "explore", "smoke", "discover", "annotate", "integrate", "moirai_smoke", "baseline", "graph", "query", "package"],
+    "run": ["plan", "explore", "smoke", "discover", "annotate", "integrate", "moirai_smoke", "baseline", "graph", "package"],
     "analysis": ["plan", "ingest", "dashboard", "query"],
+    "live": ["live_run", "publish_data"],
 }
 OWNERS: Dict[str, str] = {"plan": "run_planner", "package": "repro_package", "explore": "app_explore", "smoke": "app_smoke", "discover": "prov_discover", "annotate": "prov_annotate", "graph": "prov_graph",
                           "integrate": "moirai_integrate", "moirai_smoke": "moirai_run", "baseline": "moirai_run",
-                          "ingest": "trace_ingest", "dashboard": "prov_dashboard", "query": "prov_query"}
+                          "ingest": "trace_ingest", "dashboard": "prov_dashboard", "query": "prov_query",
+                          "live_run": "moirai_run", "publish_data": "repro_package"}
 STATUSES = ("pending", "running", "needs_user", "failed", "passed", "skipped")
 FEEDBACK_KINDS = ("process", "remember")
 NO_REV = {"progress", "dashboard", "diagrams"}          # presentation only: does not invalidate a stage's verdict
@@ -76,9 +82,14 @@ def load(pid: str, workspace: Optional[str] = None) -> Dict[str, Any]:
 
 
 def _migrate(c: Dict[str, Any]) -> Dict[str, Any]:
-    """A pipeline saved before a stage existed gets that stage, pending, so old pipelines keep loading."""
-    for name in KINDS.get(c.get("kind"), []):
+    """A pipeline saved before a stage existed gets that stage, pending, so old pipelines keep loading. A stage the kind no longer has
+    (a run's query stage, now the Query view) is retired: skipped, so a status it was left in (running) no longer counts."""
+    kind = KINDS.get(c.get("kind"), [])
+    for name in kind:
         c["stages"].setdefault(name, _blank(name))
+    for name, s in c["stages"].items():
+        if kind and name not in kind and isinstance(s, dict) and s.get("status") not in ("passed", "skipped"):
+            s["status"], s["retired"] = "skipped", True
     return c
 
 
@@ -180,7 +191,7 @@ def _blank(name: str) -> Dict[str, Any]:
             "gate": None, "feedback": [], "history": [], "rev": 0}
 
 
-def new(kind: str, name: str, source: str = "", command: str = "", traces: str = "", notes: str = "") -> Dict[str, Any]:
+def new(kind: str, name: str, source: str = "", command: str = "", traces: str = "", notes: str = "", parent: str = "") -> Dict[str, Any]:
     if kind not in KINDS:
         raise PipelineError(f"kind must be one of {sorted(KINDS)}")
     if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$", name or ""):
@@ -189,11 +200,24 @@ def new(kind: str, name: str, source: str = "", command: str = "", traces: str =
         raise PipelineError("a run pipeline needs the app source directory and a small test command")
     if kind == "analysis" and not traces.strip():
         raise PipelineError("an analysis pipeline needs the trace directory or glob from the user")
+    par = None
+    if kind == "live":
+        if not parent:
+            raise PipelineError("a live run needs parent: the run pipeline that annotated the app")
+        par = load(parent)
+        if par["kind"] != "run":
+            raise PipelineError(f"parent {parent} is a {par['kind']} pipeline; a live run's parent is a run pipeline")
+        if par["stages"]["integrate"]["status"] != "passed" or not par["stages"]["integrate"]["outputs"].get("env"):
+            raise PipelineError(f"parent {parent} has no integrated (annotated, moirai-enabled) tree yet: finish its integrate stage first")
+        source = source or par.get("source", "")
+        command = command or par.get("command", "")
     pid = f"{name.lower()}-{time.strftime('%Y%m%d-%H%M%S')}"
     c = {"id": pid, "kind": kind, "name": name, "created": round(time.time(), 1), "source": source.strip(),
          "command": command.strip(), "traces": traces.strip(), "notes": notes, "dashboard": None,
          "chat_session": os.environ.get("MOIRAI_AGENTS_WEBUI_SESSION", ""), "user": os.environ.get("MOIRAI_AGENTS_USER", ""),
          "decisions": [], "stages": {s: _blank(s) for s in KINDS[kind]}}
+    if par is not None:
+        c["parent"], c["session"] = par["id"], par.get("session")
     with _locked(pid) as d:
         if (d / "pipeline.json").exists():
             raise PipelineError(f"pipeline {pid} already exists")
@@ -239,6 +263,16 @@ def record(pid: str, name: str, status: Optional[str] = None, outputs: Optional[
 
     def fn(c):
         s = stage(c, name)
+        if status == "running" and s["status"] != "running":
+            if s["status"] in ("passed", "failed", "needs_user"):
+                s["started"] = round(time.time(), 1)           # a re-run starts now
+            # the stages after it were built on the run being replaced: they go back to pending (their outputs stay, for reference)
+            order = KINDS.get(c["kind"], [])
+            for later in order[order.index(name) + 1:] if name in order else []:
+                ls = c["stages"].get(later)
+                if ls and ls["status"] != "pending":
+                    ls.update(status="pending", validation=None, gate=None)
+                    ls["history"].append({"ts": round(time.time(), 1), "note": f"reset: {name} is running again, so this stage must run again on its result"})
         if status:
             s["status"] = status
             s.setdefault("started", round(time.time(), 1))
@@ -481,8 +515,23 @@ def set_session(pid: str, session: Dict[str, Any]) -> Dict[str, Any]:
     return update(pid, fn)
 
 
+def origin(c: Dict[str, Any]) -> Dict[str, Any]:
+    """The run pipeline that annotated the app: the pipeline itself, or a live run's parent."""
+    return load(c["parent"]) if c.get("kind") == "live" and c.get("parent") else c
+
+
+def children(pid: str, workspace: Optional[str] = None) -> List[Dict[str, Any]]:
+    """The live runs of an annotated app, newest first."""
+    return [x for x in list_all("", workspace) if x.get("kind") == "live" and x.get("parent") == pid]
+
+
 def work(c: Dict[str, Any]) -> Path:
-    """Where this pipeline writes: <session>/provenance beside the session's own folders, or the pipeline folder when there is no session."""
+    """Where this pipeline writes: <session>/provenance beside the session's own folders, or the pipeline folder when there is no session.
+    A live run writes under its parent's: <parent work>/live/<id>, so many runs of one app never collide."""
+    if c.get("kind") == "live" and c.get("parent"):
+        d = work(load(c["parent"])) / "live" / c["id"]
+        d.mkdir(parents=True, exist_ok=True)
+        return d
     s = c.get("session")
     d = Path(s["workspace"]) / "provenance" if s else pdir(c["id"])
     d.mkdir(parents=True, exist_ok=True)
@@ -524,5 +573,5 @@ def summary(c: Dict[str, Any]) -> Dict[str, Any]:
                      "feedback_open": len([x for x in s["feedback"] if not x.get("resolution")]),
                      "progress": s["outputs"].get("progress")})
     current = next((r["name"] for r in rows if r["status"] not in ("passed", "skipped")), None)
-    return {"id": c["id"], "kind": c["kind"], "name": c["name"], "created": c["created"], "updated": c.get("updated"),
+    return {"id": c["id"], "kind": c["kind"], "name": c["name"], "created": c["created"], "updated": c.get("updated"), "parent": c.get("parent"),
             "chat_session": c.get("chat_session"), "current": current, "stages": rows, "dashboard": c.get("dashboard"), "session": c.get("session"), "goal": (c.get("plan") or {}).get("goal", "")}

@@ -409,12 +409,56 @@ def propose(name: str, tool_code: str, skill_md: str, agent: dict, checks: List[
         diff = "".join(difflib.unified_diff(old.splitlines(True), tool_code.splitlines(True), f"v{ex[2]['version']}", "proposed", n=2))[:6000]
     pid = uuid.uuid4().hex[:12]
     _append({"id": pid, "ts": time.time(), "status": "pending", "kind": kind, "name": name, "layer": layer, "description": description,
-             "why": why, "pvc": pvc, "code": tool_code, "skill": skill_md, "agent": agent, "checks": checks, "stages": stages or (ex[2].get("stages", []) if ex else []),
+             "base": _hashes(_current(ex[1])) if ex else None, "why": why, "pvc": pvc, "code": tool_code, "skill": skill_md, "agent": agent, "checks": checks, "stages": stages or (ex[2].get("stages", []) if ex else []),
              "tools": v["analysis"]["tools"], "review": v["analysis"]["review"], "warnings": v["analysis"]["warnings"], "diff": diff,
              "proposed_by": user or os.environ.get("MOIRAI_AGENTS_USER", ""), "check_results": chk["results"]})
     return {"status": "ok", "id": pid, "name": name, "kind": kind, "tools": v["analysis"]["tools"], "review": v["analysis"]["review"],
             "warnings": v["analysis"]["warnings"], "checks_passed": len(chk["results"]), "diff": diff or None,
             "next": "the user approves in the Capabilities panel (or ask_user, then capability_apply with confirmed=true); nothing runs until then"}
+
+
+BUNDLE_FILES = {"code": "tool.py", "skill": "SKILL.md", "agent": "agent.json", "checks": "checks.json"}
+
+
+def _current(d: Path) -> dict:
+    """A capability's files as a proposal holds them: {code, skill, agent, checks}."""
+    out = {}
+    for k, f in BUNDLE_FILES.items():
+        try:
+            t = (d / f).read_text()
+            out[k] = json.loads(t) if f.endswith(".json") else t
+        except (OSError, ValueError):
+            out[k] = None
+    return out
+
+
+def _hash(v) -> str:
+    return hashlib.sha256((v if isinstance(v, str) else json.dumps(v, sort_keys=True)).encode()).hexdigest()[:16]
+
+
+def _hashes(files: dict) -> dict:
+    return {k: _hash(v) for k, v in files.items()}
+
+
+def _rebase(p: dict, d: Path):
+    """A proposal approved after its capability changed: a file the proposal did not touch keeps the newer version, so approving an old
+    proposal never rolls back what changed meanwhile; a file both changed is a conflict. Returns (files, conflicts, carried)."""
+    files = {k: p[k] for k in BUNDLE_FILES}
+    base = p.get("base")
+    if not base:
+        return files, [], []
+    cur = _current(d)
+    conflicts, carried = [], []
+    for k, f in BUNDLE_FILES.items():
+        now = _hash(cur[k]) if cur[k] is not None else None
+        if now is None or now == base.get(k):
+            continue                                  # unchanged since the proposal
+        if _hash(p[k]) == base.get(k):
+            files[k] = cur[k]                         # the proposal left it alone: keep the newer one
+            carried.append(f)
+        elif _hash(p[k]) != now:
+            conflicts.append(f)
+    return files, conflicts, carried
 
 
 def _snapshot(d: Path, version: int) -> None:
@@ -453,11 +497,20 @@ def apply(pid: str, confirmed: bool, by: str = "") -> dict:
         return _err(f"unknown proposal {pid}")
     if p["status"] != "pending":
         return _err(f"proposal {pid} is already {p['status']}")
+    ex = all_caps().get(p["name"])
+    carried = []
+    if ex:
+        files, conflicts, carried = _rebase(p, ex[1])
+        if conflicts:
+            return _err(f"{p['name']} changed since this proposal in {', '.join(conflicts)}, which the proposal changes too: approving it would undo "
+                        "the newer version. Refine the proposal against the current version (capability_get), or reject it.", conflicts=conflicts)
+        p = {**p, **files}
     v = validate_bundle(p["name"], p["code"], p["skill"], p["agent"], p["checks"], p.get("pvc"))
     chk = run_checks(p["code"], p["checks"])
     if v["problems"] or not chk.get("all_passed"):
         return _err("re-verification at approval time failed; not activated", problems=v["problems"], checks=chk)
-    ex = all_caps().get(p["name"])
+    if carried:
+        p["tools"] = v["analysis"]["tools"]
     version = ex[2]["version"] + 1 if ex else 1
     who = by or os.environ.get("MOIRAI_AGENTS_USER", "")
     hist = (ex[2].get("history", []) if ex else []) + [{"version": version, "ts": time.time(), "by": who, "proposal": pid, "why": p["why"]}]
@@ -475,7 +528,7 @@ def apply(pid: str, confirmed: bool, by: str = "") -> dict:
     _append({"id": pid, "status": "applied", "applied_by": who, "ts": time.time(), "version": version})
     _State.notify = True
     return {"status": "ok", "name": p["name"], "version": version, "tools": p["tools"], "layer": layer, "active": True,
-            "note": "live now: the MCP servers and every open chat refresh by themselves"}
+            **({"kept_newer": carried} if carried else {}), "note": "live now: the MCP servers and every open chat refresh by themselves"}
 
 
 def reject(pid: str, note: str = "", by: str = "") -> dict:
@@ -488,18 +541,26 @@ def reject(pid: str, note: str = "", by: str = "") -> dict:
     return {"status": "ok", "id": pid, "rejected": True}
 
 
-def refine(pid: str, skill_md: str = "", tool_code: str = "", note: str = "", by: str = "") -> dict:
-    """Replace a pending proposal with an edit of it, validated like any proposal. Refused: the old one stays pending. Returns the new proposal's id."""
+def refine(pid: str, skill_md: str = "", tool_code: str = "", note: str = "", by: str = "", on_current: bool = False) -> dict:
+    """Replace a pending proposal with an edit of it, validated like any proposal. Refused: the old one stays pending. Returns the new proposal's id.
+    on_current: the edit was redone on the capability as it is now (an out-of-date proposal): the files it leaves out come from the current
+    version and it is an edit of that version, so it is no longer out of date."""
     p = _proposals().get(pid)
     if not p:
         return _err(f"unknown proposal {pid}")
     if p["status"] != "pending":
         return _err(f"proposal {pid} is already {p['status']}")
-    r = propose(p["name"], tool_code or p["code"], skill_md or p["skill"], p["agent"], p["checks"], p["description"], p["why"], p.get("stages"), p["layer"], p["kind"],
-                p.get("proposed_by", ""), p.get("pvc"))
+    ex = all_caps().get(p["name"]) if on_current else None
+    cur = _current(ex[1]) if ex else {}
+    if on_current and not ex:
+        return _err(f"{p['name']} is not live: there is no current version to redo it on")
+    keep = lambda k: cur[k] if ex and cur.get(k) is not None else p[k]          # noqa: E731
+    r = propose(p["name"], tool_code or keep("code"), skill_md or keep("skill"), keep("agent"), keep("checks"),
+                (ex[2].get("description") if ex else None) or p["description"], p["why"], p.get("stages"), p["layer"], p["kind"], p.get("proposed_by", ""), p.get("pvc"))
     if r["status"] == "ok":
         _append({"id": pid, "status": "refined", "refined_into": r["id"], "ts": time.time()})
-        _append({"id": r["id"], "revisions": p.get("revisions", []) + [{"by": by or "agent", "note": note, "ts": time.time()}]})
+        _append({"id": r["id"], **({} if ex else {"base": p.get("base")}),    # an edit of the first proposal's base, unless redone on the current version
+                 "revisions": p.get("revisions", []) + [{"by": by or "agent", "note": note + (f" (redone on v{ex[2].get('version')})" if ex else ""), "ts": time.time()}]})
     return r
 
 
@@ -524,6 +585,40 @@ def shadow(name: str) -> Path:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(d, dest, ignore=shutil.ignore_patterns("__pycache__"))
     return dest
+
+
+CODE_FILES = ("tool.py", "SKILL.md", "agent.json", "checks.json", "capability.json")
+
+
+def sync_shadows() -> List[str]:
+    """A user-layer copy made only to hold lessons (``shadow``) must not freeze the bundled capability it copied: when its history has nothing
+    of its own (every entry is also in the bundled history), its code follows the bundled one - files replaced, its LESSONS.md kept, what it
+    replaced kept under versions/. A copy changed on purpose (capability_update: an entry the bundled history lacks) is never touched.
+    Returns the names synced."""
+    out = []
+    user = layer_dir("user")
+    for d in sorted(user.glob("*/capability.json")) if user.exists() else []:
+        name, src = d.parent.name, BUNDLED / d.parent.name
+        if not (src / "capability.json").is_file():
+            continue
+        try:
+            um, bm = json.loads(d.read_text()), json.loads((src / "capability.json").read_text())
+        except ValueError:
+            continue
+        key = lambda h: (h.get("version"), (h.get("why") or "")[:200])     # noqa: E731
+        if {key(h) for h in um.get("history", [])} - {key(h) for h in bm.get("history", [])}:
+            continue                                                     # changed on purpose: the user layer is the truth
+        differ = [f for f in CODE_FILES if (src / f).is_file() and (not (d.parent / f).is_file() or (src / f).read_bytes() != (d.parent / f).read_bytes())]
+        if not differ:
+            continue
+        keep = d.parent / "versions" / f"shadow-v{um.get('version', 0)}-{int(time.time())}"
+        keep.mkdir(parents=True, exist_ok=True)
+        for f in differ:
+            if (d.parent / f).is_file():
+                shutil.copy2(d.parent / f, keep / f)
+            shutil.copy2(src / f, d.parent / f)
+        out.append(name)
+    return out
 
 
 def _set_enabled(name: str, on: bool) -> dict:
@@ -579,7 +674,23 @@ def list_capabilities() -> dict:
                        "error": (_State.loaded.get(n) or {}).get("error"),
                        "lessons": lessons.read_text().count("\n- ") if lessons.exists() else 0})
     keys = ("id", "kind", "name", "layer", "description", "why", "tools", "review", "warnings", "proposed_by", "ts", "diff", "skill", "code", "revisions")
-    pend = [{k: p.get(k) for k in keys} for p in _proposals().values() if p.get("status") == "pending"]
+    caps = all_caps()
+    pend = []
+    for p in _proposals().values():
+        if p.get("status") != "pending":
+            continue
+        row = {k: p.get(k) for k in keys}
+        ex = caps.get(p.get("name"))
+        if p.get("kind") == "update" and ex:                     # out of date: the capability changed in a file this proposal changes too
+            try:
+                conflicts = _rebase(p, ex[1])[1]
+            except (KeyError, OSError):
+                conflicts = []
+            if conflicts:
+                row["stale"] = {"files": conflicts, "version": ex[2].get("version"),
+                                "why": f"{p['name']} is at v{ex[2].get('version')} now, and its {', '.join(conflicts)} changed after this was proposed: "
+                                       "approving would undo the newer version."}
+        pend.append(row)
     return {"active": active, "pending": pend}
 
 
@@ -629,6 +740,10 @@ def _fingerprint() -> str:
 def refresh(tools: Dict[str, dict], force: bool = False) -> dict:
     """Make the tool table match the store. A capability that does not load keeps its last working tools, and the
     error is shown in the Capabilities panel: a broken edit never takes the server down."""
+    try:
+        sync_shadows()                     # lesson-only copies follow the bundled code (they would hide its upgrades)
+    except OSError:
+        pass
     fp = _fingerprint()
     if fp == _State.fingerprint and not force:
         return {"changed": False}
