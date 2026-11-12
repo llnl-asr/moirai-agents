@@ -1,7 +1,7 @@
 {
  "name": "repro_package",
  "description": "Generate final_provenance/, the folder that reproduces a run for someone else, and prove it in a clean shell; generic apps and flux-batch apps (Elmerfold) with a per-chunk moirai wrapper; then publish the verified package and its traces (baseline + in-place verification) to a shared group root with group permissions. The standalone prov_check.py verifies activities, entity types and dangling ids, and counts entities/edges only informationally when the run captures run-dependent values. Load for the package stage, for 'publish', 'provenance-repro', 'provenance-traces', 'chgperm', '/p/vast1/moirai', 'prov_check', 'entities: N, the original run had M', or when a package ran the service on the login node, the batch job was never waited for, or a chunk job failed unnoticed.",
- "version": 10,
+ "version": 11,
  "enabled": true,
  "stages": [
   "package",
@@ -151,6 +151,13 @@
    "by": "haridev",
    "proposal": "44b46c1ac553",
    "why": "Queries on a published run were slow: nothing indexed the published traces, so the first query built a TraceViewer index file by file (minutes for a 31-file, 2.8 GB live run). repro_publish_traces now builds raw/.dftindex in the published folder on all cores, after the final rename (the index is keyed by absolute path: the run's own .dftindex is no longer copied, it would be rebuilt anyway), with group bits = user bits; an index failure is returned as index.error without undoing the publish. New repro_publish_index backfills folders published before (every app when app is empty). publish_checks and repro_publish_data_validate require the index. Selftest: index built in the published folder, run index not copied, index failure keeps the publish, per-folder errors reported."
+  },
+  {
+   "version": 11,
+   "ts": 1794446681.353058,
+   "by": "haridev",
+   "proposal": "584648521a76",
+   "why": "User feedback (process): \"verification should never happen on home. It should happen on lustre or workspace\". repro_verify(in_place=<elmerfold-v10>) failed 4 times with OSError Errno 122 Disk quota exceeded writing <OUTPUT_ROOT>/verification.json: OUTPUT_ROOT came from repro_build's default ${HOME}/moirai_repro/${APP} and /g/g92 (24 GB quota) was full; a failed pip build left a 41 MB half-built moirai-venv. Step 1 of 2: the rule in the skill; the tool change follows by capability_refine."
   }
  ]
 }
