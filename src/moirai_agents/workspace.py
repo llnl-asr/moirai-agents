@@ -24,12 +24,13 @@ import sys
 from pathlib import Path
 
 from .core import capstore
+from .env import VENV_SH, venv_dir, venv_python
 
 PKG = Path(__file__).resolve().parent
 REPO = PKG.parents[1]
 DEFAULT_WS = REPO / "workspace"
 HOOKS = PKG / ".agents" / "hooks"
-WORKSPACE_VERSION = 7
+WORKSPACE_VERSION = 8      # 8: MCP servers and hooks start through scripts/venv.sh (one venv per system)
 
 CLAUDE_MD = """# moirai-agents workspace
 
@@ -64,14 +65,20 @@ Rules
 """
 
 def _python() -> str:
-    py = REPO / ".venv" / "bin" / "python"
-    return str(py if py.exists() else sys.executable)
+    """This system's venv python, for work done now on this node."""
+    return venv_python()
+
+
+def _launch(prog: str) -> list:
+    """A command for files the workspace keeps (.mcp.json, settings.json). The workspace is shared by every system that mounts the
+    checkout, so it names no venv: scripts/venv.sh picks the venv of the system the chat runs on."""
+    return [str(VENV_SH), prog]
 
 
 SETTINGS = {
     "env": {"REQUESTS_CA_BUNDLE": "/etc/pki/tls/cert.pem", "SSL_CERT_FILE": "/etc/pki/tls/cert.pem"},
     "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f"python3 {HOOKS / 'live_log.py'}", "timeout": 10}]}],
-              "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"/usr/bin/env PYTHONPATH={REPO / 'src'} {_python()} {HOOKS / 'context.py'}", "timeout": 20}]}]},
+              "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{VENV_SH} python {HOOKS / 'context.py'}", "timeout": 20}]}]},
     "permissions": {"deny": ["Bash(sudo *)", "Bash(sudo)", "Bash(rm -rf /*)", "Bash(rm -rf ~*)", "Write(/etc/*)", "Write(/var/*)",
                              f"Edit({PKG}/**)", f"Write({PKG}/**)", f"MultiEdit({PKG}/**)",
                              f"Edit({REPO}/capabilities/**)", f"Write({REPO}/capabilities/**)"]},
@@ -113,12 +120,13 @@ def inherit_models(ws: Path) -> None:
 
 
 def mcp_servers() -> dict:
-    servers = {"moirai": {"command": _python(), "args": ["-m", "moirai_agents.mcp_server"], "env": {"PYTHONPATH": str(REPO / "src")}}}
-    dft = REPO / ".venv" / "bin" / "dftracer-mcp-server"
+    py = _launch("python")
+    servers = {"moirai": {"command": py[0], "args": py[1:] + ["-m", "moirai_agents.mcp_server"], "env": {"PYTHONPATH": str(REPO / "src")}}}
+    dft = _launch("dftracer-mcp-server")
     if os.environ.get("MOIRAI_AGENTS_DFTRACER_MCP_URL"):
         servers["dftracer"] = {"type": "http", "url": os.environ["MOIRAI_AGENTS_DFTRACER_MCP_URL"]}
-    elif dft.exists():
-        servers["dftracer"] = {"command": str(dft), "args": ["run", "--transport", "stdio", "--skip-setup"], "env": {"PATH": f"{dft.parent}:/usr/bin:/bin"}}
+    elif (venv_dir() / "bin" / "dftracer-mcp-server").exists():
+        servers["dftracer"] = {"command": dft[0], "args": dft[1:] + ["run", "--transport", "stdio", "--skip-setup"], "env": {"PATH": "/usr/bin:/bin"}}
     return servers
 
 

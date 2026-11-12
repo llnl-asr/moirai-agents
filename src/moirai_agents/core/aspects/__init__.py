@@ -123,7 +123,7 @@ def summary(aspect: str, pipeline: str = "", traces: str = "") -> Dict[str, Any]
     tr, idx = _traces(pipeline, traces)
     out = []
     for plan in SUMMARY[aspect]:
-        r = E.run(tr, plan, idx)
+        r = E.run(tr, plan, idx, pipeline, "aspect")
         st = r["steps"][-1]
         out.append({"plan": plan, "headline": st["headline"], "table": st["table"], "gaps": r["gaps"], "_o": r["outs"][-1]})
     return {"aspect": aspect, "label": ASPECTS[aspect].LABEL, "scope": ASPECTS[aspect].SCOPE, "traces": tr,

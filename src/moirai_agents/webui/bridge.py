@@ -4,7 +4,7 @@ OpenAI runs Claude Code against a private LiteLLM proxy that translates to OpenA
 One proxy per (key, base URL), started on first use and reused: bound to 127.0.0.1 on a free port and locked with a
 random master key, so nobody else on a shared login node can use it (or the key behind it). The key reaches only
 the proxy's environment; its config file (mode 600) names it by environment variable. LiteLLM lives in its own
-venv (<repo>/.venv-bridge, or MOIRAI_AGENTS_LITELLM) because its proxy extras pin packages the agent's venv needs newer.
+venv (<repo>/.venv-bridge-<system>, or MOIRAI_AGENTS_LITELLM) because its proxy extras pin packages the agent's venv needs newer.
 """
 from __future__ import annotations
 
@@ -28,7 +28,8 @@ _SKIP = ("embed", "tts", "whisper", "dall-e", "image", "audio", "realtime", "mod
 
 
 def litellm_bin(repo: Path) -> Optional[str]:
-    for c in (os.environ.get("MOIRAI_AGENTS_LITELLM"), str(repo / ".venv-bridge" / "bin" / "litellm"), shutil.which("litellm")):
+    from ..env import system_name
+    for c in (os.environ.get("MOIRAI_AGENTS_LITELLM"), str(repo / f".venv-bridge-{system_name()}" / "bin" / "litellm"), shutil.which("litellm")):
         if c and os.access(c, os.X_OK):
             return c
     return None

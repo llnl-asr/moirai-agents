@@ -6,8 +6,11 @@ dist/
 .pytest_cache/
 workspace/
 .venv/
+.venv-*/
 .venv-bridge/
 .env
+.env.*
+!.env.example
 logs/
 *.core
 *.tmp

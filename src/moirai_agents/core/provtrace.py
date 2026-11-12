@@ -8,13 +8,20 @@ gzip member at the end of a file, so a member still being written is never misre
 """
 from __future__ import annotations
 
+import fcntl
 import glob
 import hashlib
+import json
 import os
+import sys
 import tempfile
+import threading
 import time
 from collections import Counter
+from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from . import readprogress as RP
 
 ROLES = ["unknown", "input", "output", "intermediate", "parameter", "reference"]
 STORES = ["memory", "gpu_memory", "local_disk", "parallel_fs", "burst_buffer", "object_store", "database", "network", "other"]
@@ -34,6 +41,16 @@ def expand(traces: str) -> List[str]:
     if os.path.isdir(t):
         return sorted({os.path.realpath(f) for f in glob.glob(os.path.join(t, "**", "*.pfw*"), recursive=True)})
     return sorted({os.path.realpath(f) for f in glob.glob(t, recursive=True)})
+
+
+def find(traces: str) -> List[str]:
+    """expand(), marked as the read's first step (with the size of what it found) for the progress popup."""
+    with RP.step("find files") as s:
+        files = expand(traces)
+        nbytes = sum((_stamp(f) or (0, 0))[0] for f in files)
+        s.advance(len(files), f"{len(files)} file(s), {nbytes / 1e6:.0f} MB")
+    RP.set_size(len(files), nbytes)
+    return files
 
 
 def index_dir(files: List[str]) -> str:
@@ -64,14 +81,210 @@ def _tv():
     return U
 
 
-def ensure_index(files: List[str], idx: str = "", force: bool = False) -> str:
-    """Index what is missing or stale, on all cores (a no-op for a fresh index); force: rebuild these files' index (a file whose content
-    changed in place, at the same size: a member written into a reserved hole). Returns the index directory."""
-    idx = idx or index_dir(files)
-    if files:
+STAMPS = ".dftindex.moirai.json"     # beside <idx>/.dftindex: {file: {stamp: [size, mtime_ns], young, at}} of what the index was built from
+LOCK = ".dftindex.moirai.lock"
+
+
+@contextmanager
+def _index_lock(idx: str):
+    """One indexer at a time on an index, across threads and processes (the web UI's keeper, the MCP server's queries): a query that arrives
+    while a live run's index is being rebuilt waits for it, then reads the fresh index. flock is per open file, so threads exclude each other
+    too. A filesystem without flock runs unlocked."""
+    try:
+        fh = open(os.path.join(idx, LOCK), "a+")
+    except OSError:
+        yield
+        return
+    try:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        except OSError:
+            pass
+        yield
+    finally:
+        fh.close()
+
+
+def _load_stamps(idx: str) -> Dict[str, Dict[str, Any]]:
+    try:
+        with open(os.path.join(idx, STAMPS)) as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_stamps(idx: str, kept: Dict[str, Dict[str, Any]]) -> None:
+    p = os.path.join(idx, STAMPS)
+    try:
+        with open(p + f".{os.getpid()}.tmp", "w") as fh:
+            json.dump(kept, fh)
+        os.replace(p + f".{os.getpid()}.tmp", p)
+    except OSError:
+        pass                                 # read-only: every call checks with the indexer instead
+
+
+def _build(files: List[str], idx: str, force: bool) -> Tuple[List[str], List[str]]:
+    """Index files on all cores: (indexed, failed). A file that cannot be indexed (being created, a member half written) fails alone."""
+    if not files:
+        return [], []
+    try:
         ix = _tv().Indexer(files=list(files), index_dir=idx, parallelism=0, force_rebuild=force)
         ix.build() if force else ix.ensure_indexed()      # ensure_indexed() keeps an index it thinks fresh, even with force_rebuild
+        return list(files), []
+    except Exception:  # noqa: BLE001
+        if len(files) == 1:
+            return [], list(files)
+        done: List[str] = []
+        failed: List[str] = []
+        for f in files:
+            d, x = _build([f], idx, force)
+            done += d
+            failed += x
+        return done, failed
+
+
+def _build_waves(files: List[str], idx: str, force: bool, cur: Dict[str, Tuple[int, int]]) -> Tuple[List[str], List[str]]:
+    """_build in waves of at most one file per core, largest first, so the progress shows files done (a file is indexed by one worker, so a
+    wave of a core's worth loses no parallelism); one wave when they all fit."""
+    if not files:
+        return [], []
+    files = sorted(files, key=lambda f: -cur[f][0])
+    n = max(1, int(os.environ.get("MOIRAI_TV_INDEX_WAVE", "0")) or (os.cpu_count() or 8))
+    total = sum(cur[f][0] for f in files)
+    done: List[str] = []
+    failed: List[str] = []
+    with RP.step("rebuild index" if force else "index", total=len(files), nbytes=total,
+                 detail=f"{len(files)} file(s), {total / 1e6:.0f} MB, {-(-len(files) // n)} wave(s)") as s:
+        for i in range(0, len(files), n):
+            wave = files[i:i + n]
+            s.note(f"wave {i // n + 1}: {len(wave)} file(s), {sum(cur[f][0] for f in wave) / 1e6:.0f} MB, e.g. {os.path.basename(wave[0])}")
+            d, x = _build(wave, idx, force)
+            done += d
+            failed += x
+            s.advance(len(wave), nbytes=sum(cur[f][0] for f in wave))
+    return done, failed
+
+
+def stale(files: List[str], idx: str = "") -> List[str]:
+    """The files whose index is missing or older than the file (what ensure_index would rebuild), from the stamps alone."""
+    idx = idx or index_dir(files)
+    kept = _load_stamps(idx) if os.path.isdir(os.path.join(idx, ".dftindex")) else {}
+    out = []
+    for f in files:
+        st, k = _stamp(f), kept.get(f) or {}
+        if st and st[0] > 0 and (tuple(k.get("stamp") or ()) != st or k.get("young")):
+            out.append(f)
+    return out
+
+
+def ensure_index(files: List[str], idx: str = "", force: bool = False) -> str:
+    """Index the files before they are read, so every query reads an index that matches the trace: what is missing or changed since it was
+    indexed (a live run still writing) is (re)built on all cores, the rest is left alone. With the stamps of the last build this is one stat per
+    file when nothing changed; the indexer is not even opened. A file indexed within YOUNG_S of its last write is rebuilt once more on the next
+    call, unchanged stamp or not: an mtime is only as fine as the filesystem's clock (a second on Lustre), so a member written into a reserved
+    hole in that tick changes neither size nor mtime. force: rebuild these files' index regardless. A file that cannot be indexed yet is left for
+    the next call. Serialized per index (``_index_lock``). Returns the index directory."""
+    idx = idx or index_dir(files)
+    if not files:
+        return idx
+    with RP.step("wait for the index", detail="another reader may be indexing these traces"):
+        lock = _index_lock(idx)
+        lock.__enter__()
+    try:
+        with RP.step("check index", total=len(files)) as s:
+            kept = _load_stamps(idx) if os.path.isdir(os.path.join(idx, ".dftindex")) else {}
+            cur = {f: st for f in files if (st := _stamp(f)) and st[0] > 0}    # an empty file is being created: nothing to index yet
+            rebuild, update = [], []
+            for f, st in cur.items():
+                k = kept.get(f) or {}
+                if force or (k.get("young") and tuple(k.get("stamp") or ()) == st):
+                    rebuild.append(f)
+                elif tuple(k.get("stamp") or ()) != st:
+                    update.append(f)
+            s.advance(len(files), f"{len(rebuild) + len(update)} of {len(files)} file(s) to (re)index")
+        if not rebuild and not update:
+            return idx
+        again = [f for f in update if f in kept]      # indexed before and changed since: the indexer's own check can miss an in-place write
+        if again:
+            with RP.step("ask the indexer what changed", total=len(again)):
+                try:
+                    sees = set(_tv().Indexer(files=again, index_dir=idx, parallelism=0).resolve().needs_work)
+                except Exception:  # noqa: BLE001
+                    sees = set()
+            missed = [f for f in again if f not in sees]
+            rebuild += missed
+            update = [f for f in update if f not in missed]
+        now = time.time()
+        d1, x1 = _build_waves(update, idx, False, cur)
+        d2, x2 = _build_waves(rebuild, idx, True, cur)
+        for f in d1 + d2:
+            kept[f] = {"stamp": list(cur[f]), "young": now - cur[f][1] / 1e9 < YOUNG_S, "at": round(now, 3)}
+        for f in x1 + x2:
+            kept.pop(f, None)
+        _save_stamps(idx, kept)
+        if x1 or x2:
+            print(f"trace index: {len(x1 + x2)} file(s) not indexable yet, retried on the next read: {[os.path.basename(f) for f in x1 + x2][:5]}",
+                  file=sys.stderr, flush=True)
+    finally:
+        lock.__exit__(None, None, None)
     return idx
+
+
+# ------------------------------------------------------------------ live runs: keep the index current between queries
+KEEP_EVERY_S = float(os.environ.get("MOIRAI_TV_KEEP_EVERY_S", "3"))     # how often a live run's traces are checked for changes
+KEEP_IDLE_S = float(os.environ.get("MOIRAI_TV_KEEP_IDLE_S", "600"))     # the keeper stops once nobody has asked for this long
+
+
+class IndexKeeper(threading.Thread):
+    """Re-indexes a live run's traces as they change, in the background, so a query finds the index already built instead of building it
+    (minutes on a multi-GB run). Each round is ensure_index: one stat per file when nothing changed. It stops after KEEP_IDLE_S without a
+    touch(); keep_indexed() starts or touches the one keeper per set of traces."""
+
+    def __init__(self, traces: str, every: float = KEEP_EVERY_S, idle: float = KEEP_IDLE_S, pipeline: str = "") -> None:
+        super().__init__(daemon=True, name="trace-index-keeper")
+        self.traces, self.every, self.idle, self.pipeline = traces, every, idle, pipeline
+        self.touched = time.time()
+        self.rounds = 0
+        self.error = ""
+
+    def touch(self) -> None:
+        self.touched = time.time()
+
+    def run(self) -> None:
+        try:
+            while time.time() - self.touched < self.idle:
+                try:
+                    with RP.op(self.pipeline, "index", self.traces):      # shown and logged only when it (re)indexed something
+                        files = find(self.traces)
+                        if files:
+                            ensure_index(files)
+                    self.rounds += 1
+                    self.error = ""
+                except Exception as e:  # noqa: BLE001  a bad round must not end the keeper
+                    self.error = f"{type(e).__name__}: {e}"
+                time.sleep(self.every)
+        finally:
+            with _KEEP_LOCK:
+                if _KEEPERS.get(self.traces) is self:
+                    _KEEPERS.pop(self.traces, None)
+
+
+_KEEPERS: Dict[str, IndexKeeper] = {}
+_KEEP_LOCK = threading.Lock()
+
+
+def keep_indexed(traces: str, pipeline: str = "") -> IndexKeeper:
+    """Keep the index of these traces current while a live run writes them (see IndexKeeper): call it whenever a live run is loaded or polled
+    for queries. Returns its keeper."""
+    with _KEEP_LOCK:
+        k = _KEEPERS.get(traces)
+        if k is not None and k.is_alive():
+            k.touch()
+            return k
+        k = _KEEPERS[traces] = IndexKeeper(traces, pipeline=pipeline)
+        k.start()
+        return k
 
 
 def _rec(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -115,18 +328,20 @@ def row_counts(traces: str) -> Dict[str, int]:
     """Row counts of the traces by TraceViewer group-by only, no row is turned into a Python record: {"<cat>:<name>": rows} for the provenance
     names (ET/EH/ER) and the activity categories, plus "files". Seconds where ``read(...).counts()`` takes minutes on a multi-GB run; two sets of
     traces that hold the same records (a byte-for-byte published copy) give the same table."""
-    files = expand(traces)
+    files = find(traces)
     out: Counter = Counter()
     if not files:
         return {"files": 0}
     idx = ensure_index(files)
     U = _tv()
-    for f in files:
-        tv = U.TraceViewer(f, idx).phase("any")
-        sel = U.col("name").is_in(list(PROV_NAMES)) | U.col("cat").is_in(list(ACTIVITY_CATS))
-        for r in tv.filter(sel).group_by("cat", "name").agg(U.col("ts").count()).collect().to_dicts():
-            n = next((v for k, v in r.items() if k not in ("cat", "name")), 0)
-            out[f"{r.get('cat')}:{r.get('name')}"] += int(n or 0)
+    with RP.step("count provenance rows", total=len(files)) as s:
+        for f in files:
+            tv = U.TraceViewer(f, idx).phase("any")
+            sel = U.col("name").is_in(list(PROV_NAMES)) | U.col("cat").is_in(list(ACTIVITY_CATS))
+            for r in tv.filter(sel).group_by("cat", "name").agg(U.col("ts").count()).collect().to_dicts():
+                n = next((v for k, v in r.items() if k not in ("cat", "name")), 0)
+                out[f"{r.get('cat')}:{r.get('name')}"] += int(n or 0)
+            s.advance(1, os.path.basename(f), (_stamp(f) or (0, 0))[0])
     return {**out, "files": len(files)}
 
 
@@ -153,18 +368,13 @@ class Tail:
         self.young: set = set()              # files modified within YOUNG_S of their last read: read again (and re-indexed) until they settle
 
     def poll(self) -> List[Dict[str, Any]]:
-        files = expand(self.traces)
+        files = find(self.traces)
         changed = {f: st for f in files if (st := _stamp(f)) and st[0] > 0 and st != self.seen.get(f)}
         if not changed:
             return []
         idx = index_dir(files)
         try:
-            again = [f for f in changed if f in self.seen or f in self.young]   # read before: rebuilt, the index may not see an in-place write
-            fresh = [f for f in changed if f not in again]
-            if fresh:
-                ensure_index(fresh, idx)
-            if again:
-                ensure_index(again, idx, force=True)
+            ensure_index(list(changed), idx)     # rebuilds what changed since it was indexed, and once more what was indexed while young
         except Exception:  # noqa: BLE001  a file being created: try again on the next poll
             self.stalled += 1
             return []
@@ -213,6 +423,15 @@ def _read_one(a: Tuple[str, str]):
 
 
 def _read_many(files: List[str], idx: str, workers: int = 0):
+    """read_file over many files, as the read's "read records" step: one result per file as it completes."""
+    nbytes = {f: (_stamp(f) or (0, 0))[0] for f in files}
+    with RP.step("read records", total=len(files), nbytes=sum(nbytes.values()), detail=f"{len(files)} file(s) through TraceViewer") as s:
+        for f, res in _read_many_raw(files, idx, workers):
+            s.advance(1, os.path.basename(f) + ("" if res is not None else ": not readable yet"), nbytes.get(f, 0))
+            yield f, res
+
+
+def _read_many_raw(files: List[str], idx: str, workers: int = 0):
     """read_file over many files: one process per file (all cores) when there are several, as TraceViewer's rows become Python records."""
     # capped (MOIRAI_READ_WORKERS, default 16): one process per core on a 100+ file, multi-GB run was killed (BrokenProcessPool)
     n = workers or min(len(files), os.cpu_count() or 4, int(os.environ.get("MOIRAI_READ_WORKERS", "16")))
@@ -416,7 +635,7 @@ def _merge(g: Graph, o: Graph) -> None:
 def read(traces: str, workers: int = 0) -> Graph:
     """The whole graph of the traces, through TraceViewer: every file is indexed on all cores, then read one file per process and merged
     (the same dedup as one reader)."""
-    files = expand(traces)
+    files = find(traces)
     if not files:
         return Graph()
     idx = ensure_index(files)

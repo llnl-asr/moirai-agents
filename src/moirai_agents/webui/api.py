@@ -345,6 +345,13 @@ def get_route(h, app, life, u, q):
             if u.path == "/api/workbench":
                 busy = {t.session.get("id") for t in list(app.turns.values()) if not t.done}     # chats whose agent is working now
                 return send_json(h, W.items(user["workspace"], busy))
+            if u.path == "/api/workbench/progress":        # the reads of this pipeline's traces running now (any process), and where reads spend time
+                from ..core import readprogress as RP
+                pipeline.load(pid, user["workspace"])      # only a pipeline this user can open
+                out = {"active": RP.active(pid), "last": RP.last(pid)}
+                if q.get("stats", [""])[0]:
+                    out["stats"] = RP.stats(pid if q.get("stats", [""])[0] != "all" else "")
+                return send_json(h, out)
             if u.path == "/api/workbench/card":
                 return send_json(h, W.card(user["workspace"], pid))
             if u.path == "/api/workbench/live":

@@ -12,7 +12,8 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HOST="$(hostname -s)"
 RUN="$REPO/logs/webui"
 mkdir -p "$RUN" && chmod 700 "$REPO/logs" "$RUN" 2>/dev/null
-PY="$REPO/.venv/bin/python"; [ -x "$PY" ] || PY="$(command -v python3)"
+source "$REPO/scripts/venv.sh"; PY="$MOIRAI_PY"     # this system's venv (scripts/venv.sh)
+[ -x "$MOIRAI_VENV/bin/python" ] || echo "note: no venv for system $MOIRAI_SYSTEM at $MOIRAI_VENV (run scripts/setup_env.sh here); using $PY" >&2
 procs() { (cd "$REPO" && PYTHONPATH="$REPO/src" "$PY" -m moirai_agents.webui.procs "$@"); }
 restart=0; args=()
 for a in "$@"; do case "$a" in --restart) restart=1 ;; -h|--help) sed -n '2,9p' "$0"; exit 0 ;; *) args+=("$a") ;; esac; done
@@ -28,6 +29,6 @@ MOIRAI_AGENTS_WEBUI_LOG="$LOG" PYTHONUNBUFFERED=1 nohup setsid "$REPO/scripts/we
 spid=$!
 for _ in $(seq 1 120); do grep -q "stops after" "$LOG" && break; kill -0 "$spid" 2>/dev/null || break; sleep 0.5; done
 grep -q "stops after" "$LOG" || { echo "the web UI did not start; last lines of $LOG:" >&2; tail -20 "$LOG" >&2; exit 1; }
-grep -E "web UI:|tunnel:|stops after" "$LOG"
+grep -E "web UI:|tunnel:|system:|stops after" "$LOG"
 echo "  log:  $RUN/latest-$HOST.log"
 echo "  stop: scripts/webui_stop.sh"

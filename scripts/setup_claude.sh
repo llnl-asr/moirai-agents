@@ -6,12 +6,13 @@
 #   scripts/setup_claude.sh --path /p/claude   # use this binary
 #   scripts/setup_claude.sh --check         # only report what the server would use; change nothing
 #
-# Records MOIRAI_AGENTS_CLAUDE_BIN=<full path> in moirai-agents/.env (mode 600). The web UI reads .env fresh: no restart.
+# Records MOIRAI_AGENTS_CLAUDE_BIN=<full path> in moirai-agents/.env.<system> (mode 600): each system has its own binary. The web UI reads .env fresh: no restart.
 # The model behind it (LivAI, Anthropic, OpenAI) is chosen per user in the web UI (⚙ Model settings);
 # for OpenAI also run scripts/setup_openai_bridge.sh once.
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENVF="${MOIRAI_AGENTS_LIVAI_ENV:-$REPO/.env}"
+source "$REPO/scripts/venv.sh"
+ENVF="${MOIRAI_AGENTS_LIVAI_ENV:-$MOIRAI_SYSTEM_ENV}"
 yes=0 check=0 path=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,7 +29,8 @@ works() { [ -x "$1" ] && [ -f "$1" ] && "$1" --version 2>/dev/null | grep -qi cl
 
 find_claude() {
   local configured=""
-  [ -f "$ENVF" ] && configured=$(sed -n 's/^\s*\(export \)\?MOIRAI_AGENTS_CLAUDE_BIN=//p' "$ENVF" | tail -1 | tr -d "\"'")
+  configured="$(_mv_value "$ENVF" MOIRAI_AGENTS_CLAUDE_BIN)"
+  [ -n "$configured" ] || configured="$(_mv_value "$REPO/.env" MOIRAI_AGENTS_CLAUDE_BIN)"
   for c in "$configured" "${MOIRAI_AGENTS_CLAUDE_BIN:-}" "$(command -v claude 2>/dev/null)" "$HOME/.local/bin/claude" \
            "$HOME/.claude/local/claude" "$HOME/.npm-global/bin/claude" /usr/local/bin/claude; do
     [ -n "$c" ] && works "$c" && { echo "$c"; return 0; }

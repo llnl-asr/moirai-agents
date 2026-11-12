@@ -70,3 +70,88 @@ def test_older_prov_category_reads_the_same():
     g = T.Graph()
     g.add({"name": "x", "cat": "PROV", "ph": 1, "pid": 1, "ts": 1, "args": {"relations": {"used": ["a"]}}})
     assert g.counts()["activities"] == 1
+
+
+def _count(f):
+    return T.row_counts(str(f)).get("moirai:step", 0)
+
+
+def test_index_follows_a_growing_trace_and_skips_unchanged_files(tmp_path, monkeypatch):
+    """A live run's trace grows: each read first rebuilds the index for what changed, and an unchanged trace does not open the indexer."""
+    f = tmp_path / "t.pfw.gz"
+    f.write_bytes(member(act(1)))
+    assert _count(tmp_path) == 1
+    with open(f, "ab") as fh:
+        fh.write(member(act(2), act(3)))
+    assert T.stale([str(f)]) == [str(f)]
+    assert _count(tmp_path) == 3
+    kept = T._load_stamps(T.index_dir([str(f)]))
+    kept[str(f)]["young"] = False                      # settled: nothing left to rebuild
+    T._save_stamps(T.index_dir([str(f)]), kept)
+    assert T.stale([str(f)]) == []
+    opened = []
+    monkeypatch.setattr(T, "_build", lambda *a: opened.append(a) or ([], []))
+    T.ensure_index([str(f)])
+    assert opened == []
+
+
+def test_a_same_size_rewrite_in_the_same_clock_tick_is_reindexed(tmp_path):
+    """A member written into a reserved hole changes neither size nor (within the filesystem's mtime tick) mtime: a file indexed while young
+    is rebuilt once more on the next read."""
+    f = tmp_path / "t.pfw.gz"
+    a, b = member(act(1)), member(act(2))
+    f.write_bytes(a + b"\0" * len(b))
+    st = f.stat()
+    assert _count(tmp_path) == 1
+    with open(f, "r+b") as fh:
+        fh.seek(len(a))
+        fh.write(b)
+    import os
+    os.utime(f, ns=(st.st_atime_ns, st.st_mtime_ns))  # the same stamp as when it was indexed
+    assert T.stale([str(f)]) == [str(f)]               # indexed while young
+    assert _count(tmp_path) == 2
+
+
+def test_a_file_that_cannot_be_indexed_does_not_stop_the_others(tmp_path, monkeypatch):
+    good, bad = tmp_path / "a.pfw.gz", tmp_path / "b.pfw.gz"
+    good.write_bytes(member(act(1)))
+    bad.write_bytes(member(act(2)))
+    U = T._tv()
+    real = U.Indexer
+
+    def indexer(files, **kw):                           # b.pfw.gz is "being written": indexing it fails
+        if str(bad) in files:
+            raise RuntimeError("truncated member")
+        return real(files=files, **kw)
+    monkeypatch.setattr(U, "Indexer", indexer)
+    T.ensure_index(T.expand(str(tmp_path)))
+    kept = T._load_stamps(T.index_dir([str(good)]))
+    assert str(good) in kept and str(bad) not in kept    # the good file is indexed; the bad one has no stamp, so it is retried
+    assert str(bad) in T.stale([str(bad)])
+    monkeypatch.setattr(U, "Indexer", real)
+    T.ensure_index(T.expand(str(tmp_path)))
+    assert str(bad) in T._load_stamps(T.index_dir([str(bad)]))
+
+
+def test_keeper_reindexes_a_live_trace_in_the_background(tmp_path, monkeypatch):
+    monkeypatch.setattr(T, "KEEP_EVERY_S", 0.05)
+    f = tmp_path / "t.pfw.gz"
+    f.write_bytes(member(act(1)))
+    k = T.keep_indexed(str(tmp_path))
+    k.every = 0.05
+    assert T.keep_indexed(str(tmp_path)) is k           # one keeper per traces, touched
+    import time
+    deadline = time.time() + 20
+    while T.stale([str(f)]) and time.time() < deadline:
+        T._save_stamps(T.index_dir([str(f)]), {p: {**v, "young": False} for p, v in T._load_stamps(T.index_dir([str(f)])).items()})
+        time.sleep(0.1)
+    assert str(f) in T._load_stamps(T.index_dir([str(f)]))
+    with open(f, "ab") as fh:
+        fh.write(member(act(2)))
+    deadline = time.time() + 20
+    while T._load_stamps(T.index_dir([str(f)]))[str(f)]["stamp"][0] != f.stat().st_size and time.time() < deadline:
+        time.sleep(0.05)
+    assert T._load_stamps(T.index_dir([str(f)]))[str(f)]["stamp"][0] == f.stat().st_size
+    k.idle = 0                                          # nobody watching: it stops and leaves the registry
+    k.join(timeout=5)
+    assert not k.is_alive() and str(tmp_path) not in T._KEEPERS

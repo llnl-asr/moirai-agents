@@ -248,7 +248,7 @@ def fresh(pipeline: str, answer: Dict[str, Any]) -> Dict[str, Any]:
     hit = _FRESH.get(key)
     if hit and time.time() - hit[0] < FRESH_S:
         return hit[1]
-    r = EV.run(src["traces"], (answer.get("plan") or {}).get("steps") or [], EV.index_dir_of(pipeline))
+    r = EV.run(src["traces"], (answer.get("plan") or {}).get("steps") or [], EV.index_dir_of(pipeline), pipeline, "explain")
     last = r["steps"][-1] if r["steps"] else {}
     out = {"result_hash": r["result_hash"], "steps": r["steps"], "result": {"headline": last.get("headline", ""), "table": last.get("table", "")},
            "reads": r["reads"], "queries": r["queries"], "stats": r["stats"], "source": src}

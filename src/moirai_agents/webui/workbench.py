@@ -20,7 +20,7 @@ from collections import Counter, deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..core import jobs, pipeline as P, provtrace as T
+from ..core import jobs, pipeline as P, provtrace as T, readprogress as RP
 
 STALL_S = float(os.environ.get("MOIRAI_AGENTS_STALL_S", "900"))     # no new provenance for this long while running: stalled
 LIVE_EVERY_S = 10.0       # a watched campaign's traces are read this often, in the background
@@ -261,19 +261,31 @@ _CARDS: Dict[str, tuple] = {}
 
 
 def _stamp(traces: str) -> tuple:
+    """(file, size, mtime) of every trace file: a same-size rewrite (a member written into a reserved hole) changes it too."""
     fs = T.expand(traces)
-    return tuple(sorted((f, os.path.getsize(f)) for f in fs if os.path.exists(f)))
+    return tuple(sorted((f, *st) for f in fs if (st := T._stamp(f))))
+
+
+def _keep_index(c: Dict[str, Any], ws: str, state: str = "") -> None:
+    """A live run loaded for queries: keep its trace index current in the background (provtrace.keep_indexed), so each query reads an index
+    already rebuilt for what the run wrote since, instead of rebuilding it first. A finished run is indexed once, by its first read."""
+    t = _traces(c)
+    if t and (c["kind"] == "live" or (state or _state(c, jobs.list_jobs(c["id"], ws))) == "running"):
+        T.keep_indexed(t, c["id"])
 
 
 def card(ws: str, pid: str) -> Dict[str, Any]:
     c = P.load(pid, ws)
     t = _traces(c)
+    _keep_index(c, ws)
     stamp = _stamp(t)
     hit = _CARDS.get(pid)
     if hit and hit[0] == stamp:
         return hit[1]
-    g = T.read(t)
-    s = g.summary()
+    with RP.op(pid, "open", t):
+        g = T.read(t)
+        with RP.step("summarize"):
+            s = g.summary()
     ts = [a["ts"] for a in g.activities if isinstance(a.get("ts"), (int, float))]
     span = (max(a["ts"] + (a.get("dur") or 0) for a in g.activities if isinstance(a.get("ts"), (int, float))) - min(ts)) / 1e6 if ts else 0
     roles = {x["type"]: x.get("role", "") for x in s["types"]}
@@ -293,6 +305,7 @@ def card(ws: str, pid: str) -> Dict[str, Any]:
         q.append(f"What did {acts[1]} use and what did it generate?")
     q.append("Is anything incomplete: entities that were used but never produced, or activities without outputs?")
     out = {"id": pid, "name": c["name"], "traces": c.get("traces"), "files": len(stamp), "bytes": sum(x[1] for x in stamp),
+           "index": {"stale_files": len(T.stale([x[0] for x in stamp])) if stamp else 0},
            "counts": {**{k: s[k] for k in ("activities", "entities", "edges", "relations", "dangling")}, "types": len(s["types"])},
            "span_s": round(span, 1), "by_type": s["by_type"], "types": s["types"],
            "activity_kinds": [{"name": a["name"], "count": a["count"], "seconds": round(a["total_us"] / 1e6, 1)} for a in s["activity_kinds"][:20]],
@@ -303,8 +316,8 @@ def card(ws: str, pid: str) -> Dict[str, Any]:
 
 # ------------------------------------------------------------------ live campaign
 class _Live:
-    def __init__(self, traces: str) -> None:
-        self.traces = traces
+    def __init__(self, traces: str, pid: str = "") -> None:
+        self.traces, self.pid = traces, pid
         self.tail = T.Tail(traces)
         self.g = T.Graph()
         self.feed: deque = deque(maxlen=40)      # newest artifacts, with what produced them
@@ -319,7 +332,8 @@ class _Live:
         while time.time() - self.seen < LIVE_IDLE_S:
             caught = True
             try:
-                caught = self.poll()
+                with RP.op(self.pid, "live" if self.ready else "live catch-up", self.traces, log_min_s=0 if not self.ready else 2.0):
+                    caught = self.poll()
             except Exception as e:  # noqa: BLE001  a bad member must not end the reader
                 print(f"live provenance read failed: {e}", flush=True)
             self.ready = self.ready or caught
@@ -361,7 +375,7 @@ _LIVE: Dict[str, _Live] = {}
 def _reader(pid: str, traces: str) -> _Live:
     lv = _LIVE.get(pid)
     if lv is None or lv.traces != traces:
-        lv = _LIVE[pid] = _Live(traces)
+        lv = _LIVE[pid] = _Live(traces, pid)
     return lv
 
 
@@ -372,7 +386,8 @@ def live(ws: str, pid: str) -> Dict[str, Any]:
         return {"id": pid, "status": "no traces yet", "counts": {}, "feed": []}
     js = jobs.list_jobs(pid, ws)
     state = _state(c, js)
-    if state != "running":                    # finished: the counts come from TraceViewer (cached), no reader keeps the graph in Python
+    _keep_index(c, ws, state)
+    if state != "running":                 # finished: the counts come from TraceViewer (cached), no reader keeps the graph in Python
         agg = _tv_aggregate(c, ws)
         n = agg["counts"] if agg else {}
         by_type = Counter({x["label"]: x.get("count", 0) for x in (agg or {}).get("nodes", []) if x.get("kind") == "type"})
@@ -490,7 +505,8 @@ def _tv_aggregate(c: Dict[str, Any], ws: str) -> Optional[Dict[str, Any]]:
     if t is None or not t.is_alive():
         def work():
             try:
-                run = G.tv_runtime(traces)
+                with RP.op(c["id"], "aggregate", traces):
+                    run = G.tv_runtime(traces)
                 tmp = path.with_suffix(".tmp")
                 tmp.write_text(json.dumps({"key": key, "run": run, "ts": round(time.time(), 1)}))
                 os.replace(tmp, path)
@@ -509,6 +525,7 @@ def graph(ws: str, pid: str, since: str = "") -> Dict[str, Any]:
     A campaign being watched uses its live reader; otherwise the graph is read in the background (``reading`` until done).
     ``since``: the signature the page already has; the same one returns {same: true}, so a poll costs nothing."""
     c = P.load(pid, ws)
+    _keep_index(c, ws)
     agg = _tv_aggregate(c, ws)            # TraceViewer counts (cached): a graph too big to draw is never built in Python
     if agg is None:
         return {"id": pid, "reading": True}

@@ -45,12 +45,16 @@ At a gate the user can approve, give **process** feedback (becomes a new or upda
 ## Web UI
 
 ```bash
-scripts/setup_env.sh          # .venv, with dftracer-agents editable
-$EDITOR .env                  # MOIRAI_AGENTS_MOIRAI_PYTHON, model access
+scripts/setup_env.sh          # this system's venv (.venv-<system>), with dftracer-agents editable
+$EDITOR .env                  # model access, shared by every system
+$EDITOR .env.<system>         # this system only: MOIRAI_AGENTS_MOIRAI_PYTHON, MOIRAI_AGENTS_CLAUDE_BIN, MOIRAI_AGENTS_VENV
 scripts/webui_start.sh        # prints your link and the tunnel command
 scripts/webui_stop.sh         # stops it and everything it started
 scripts/webui_kill.sh         # stops your servers on every login node; --list only shows them
+scripts/venv.sh               # shows the system, venv and settings file this node resolves to
 ```
+
+**Several systems, one checkout.** The checkout (and its `workspace/`) can sit on a file system several systems mount. Each system gets its own venv: the system is the short hostname without its node number (`mammoth34` → `mammoth`, `tuolumne1009` → `tuolumne`; `MOIRAI_AGENTS_SYSTEM` overrides it), and its venv is `.venv-<system>` unless `MOIRAI_AGENTS_VENV` names another. Run `scripts/setup_env.sh` once on each system. Settings come from `.env.<system>` first, then `.env`. The workspace's MCP servers and hooks start through `scripts/venv.sh`, so a chat started on any system uses that system's venv.
 
 You run it yourself, as yourself: there are no accounts and no sign-in. Open the printed link; its private token only keeps other people on a shared login node out of an agent running as you.
 

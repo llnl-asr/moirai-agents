@@ -784,3 +784,59 @@ setInterval(async()=>{if(!me||document.visibilityState!=='visible')return;if(doc
 function nowCard(it){const j=it.jobs||[],cur=STEP_L[it.current]||it.current;if(!j.length&&!agentBusy(it))return '';
  return `<div class="wb-now"><b>▶ Now:</b> ${cur?esc(cur):''}${j.map(y=>`<div>job <code>${esc(y.name)}</code> running for ${dur(y.elapsed||0)}${y.last?` <span class="sub">· ${esc(y.last)}</span>`:''}</div>`).join('')}
   <div class="sub">${agentBusy(it)?'The agent is working on it in the chat on the left.':'The agent is not watching the job right now: ask in the chat on the left (“how is it going?”) and it checks it.'}</div></div>`}
+
+// ---- reading the traces: a popup with the steps of every read of the selected pipeline's traces (any process: the web UI's views, an
+// answer's queries in the chat, a live run's re-index), how far each is and how long it has taken; and, from the timings log, where reads
+// usually spend their time (to optimize them). Opens by itself when a read runs longer than a moment; closed, a pill reopens it.
+const RD={pid:null,data:null,closed:{},open:false,tab:'now',stats:null,doneAt:0,busy:false};
+const RD_KIND={open:'Opening the data',aggregate:'The aggregated diagram',graph:'The Query view graph',live:'Live run update','live catch-up':'Reading the live run so far',
+ index:'Re-indexing what the run wrote',query:'Answering a question',rerun:'Re-running an answer',explain:'Explaining an answer',aspect:'Summary questions'};
+function rdEl(){let el=$('#rdpop');if(!el){el=document.createElement('div');el.id='rdpop';el.hidden=true;document.body.appendChild(el);
+  el.onclick=e=>{const b=e.target.closest('[data-rd]');if(!b)return;const a=b.dataset.rd;
+   if(a==='close'){RD.open=false;(RD.data&&RD.data.active||[]).forEach(o=>RD.closed[o.id]=1);rdDraw()}
+   else if(a==='now'||a==='time'){RD.tab=a;if(a==='time')rdStats();rdDraw()}}}
+ let pill=$('#rdpill');if(!pill){pill=document.createElement('button');pill.id='rdpill';pill.hidden=true;document.body.appendChild(pill);pill.onclick=()=>rdOpen()}
+ return el}
+function rdOpen(tab){RD.open=true;RD.closed={};if(tab)RD.tab=tab;if(RD.tab==='time')rdStats();rdDraw();rdPoll()}
+async function rdStats(){if(!RD.pid)return;const d=await api('api/workbench/progress?stats=1&pipeline='+encodeURIComponent(RD.pid));if(d&&!d.error){RD.stats=d.stats;rdDraw()}}
+function rdBar(s){const t=s.total,p=t?Math.min(100,100*s.done/t):s.bytes?Math.min(100,100*(s.bytes_done||0)/s.bytes):null;
+ return p==null?(s.status==='running'?'<div class="rd-bar ind"><i></i></div>':''):`<div class="rd-bar"><i style="width:${p.toFixed(1)}%"></i></div>`}
+function rdStep(s){const ic=s.status==='done'?'✓':s.status==='failed'?'✗':'◌';
+ const cnt=s.total!=null?`${s.done}/${s.total} ${esc(s.unit||'')}`:s.done?`${s.done} ${esc(s.unit||'')}`:'';
+ const by=s.bytes?` · ${fmtBytes(s.bytes_done||0)} of ${fmtBytes(s.bytes)}`:'';
+ const eta=s.status==='running'&&s.eta_s!=null?` · ≈${dur(s.eta_s)} left at the usual ${s.rate_mb_s} MB/s`:'';
+ return `<li class="rd-s ${s.status}" style="margin-left:${(s.depth||0)*14}px"><div class="rd-l"><span class="rd-i">${ic}</span><b>${esc(s.name)}</b><span class="rd-t">${dur(s.secs||0)}</span></div>
+  ${s.status==='running'?rdBar(s):''}<div class="sub">${cnt}${by}${eta}${s.detail?` · ${esc(s.detail)}`:''}</div></li>`}
+function rdOp(o){const run=o.status==='running',stuck=run&&o.since_update>60;
+ return `<div class="rd-op"><div class="rd-h"><b>${esc(RD_KIND[o.kind]||o.kind)}</b><span class="sub">${o.files?`${o.files} file(s), ${fmtBytes(o.bytes)} · `:''}${run?'running for ':'took '}${dur(o.secs||0)}</span></div>
+  ${stuck?`<div class="rd-warn">No progress reported for ${dur(o.since_update)}: the step marked ◌ is where it is.</div>`:''}
+  ${o.error?`<div class="rd-warn">${esc(o.error)}</div>`:''}<ol class="rd-steps">${(o.steps||[]).map(rdStep).join('')}</ol></div>`}
+function rdTime(){const s=RD.stats;if(!s)return '<div class="sub">loading…</div>';if(!s.reads)return '<div class="sub">No read of these traces has been timed yet.</div>';
+ const k=Object.entries(s.kinds).map(([n,v])=>`<span class="pill">${esc(RD_KIND[n]||n)}: ${v.count}× · median ${dur(v.median_s)} · worst ${dur(v.max_s)}</span>`).join(' ');
+ const rows=s.steps.slice(0,25).map(r=>`<tr><td>${esc(RD_KIND[r.kind]||r.kind)}</td><td>${esc(r.step)}</td><td>${r.count}</td><td>${dur(r.median_s)}</td><td>${dur(r.max_s)}</td><td><span class="rd-share" style="--w:${(r.share*100).toFixed(0)}%"></span>${(r.share*100).toFixed(0)}%</td><td>${r.mb_s??''}</td></tr>`).join('');
+ return `<div class="sub">The last ${s.reads} read(s) of these traces: where the time went, most first.</div><div class="pills" style="margin:6px 0">${k}</div>
+  <div class="rd-tw"><table class="rd-tab"><thead><tr><th>read</th><th>step</th><th>n</th><th>median</th><th>worst</th><th>share</th><th>MB/s</th></tr></thead><tbody>${rows}</tbody></table></div>
+  <div class="sub">Every read is logged with its steps in <code>${esc(s.log.split('/').slice(-3).join('/'))}</code>.</div>`}
+function rdDraw(){const el=rdEl(),pill=$('#rdpill'),d=RD.data||{},act=d.active||[];
+ const fresh=act.filter(o=>!RD.closed[o.id]);
+ if(!RD.open&&fresh.length&&fresh.some(o=>o.secs>1.5))RD.open=true;                 // a read longer than a moment: show it
+ const recent=RD.doneAt&&Date.now()-RD.doneAt<5000;
+ el.hidden=!RD.pid||!RD.open;pill.hidden=!RD.pid||RD.open||!act.length;
+ if(act.length){const o=act[0],s=[...(o.steps||[])].reverse().find(x=>x.status==='running');pill.innerHTML=`<span class="rd-spin"></span> reading the traces${s?' · '+esc(s.name):''} · ${dur(o.secs||0)}`}
+ if(el.hidden)return;
+ const last=Object.values(d.last||{}).sort((a,b)=>b.start-a.start)[0];
+ const now=act.length?act.map(rdOp).join(''):recent&&last?rdOp(last):`<div class="sub">Nothing is reading these traces now.${last?' The last read:':''}</div>${last?rdOp(last):''}`;
+ el.innerHTML=`<div class="rd-top"><b>${act.length?'<span class="rd-spin"></span> Reading the traces':'Reading the traces'}</b>
+  <span class="seg"><button data-rd="now" class="${RD.tab==='now'?'on':''}">Now</button><button data-rd="time" class="${RD.tab==='time'?'on':''}">Where time goes</button></span>
+  <button class="rd-x" data-rd="close" title="Hide (the pill brings it back while a read runs)">×</button></div>
+  <div class="rd-body">${RD.tab==='time'?rdTime():now}</div>`}
+async function rdPoll(){if(RD.busy)return;const pid=WB.sel&&document.body.classList.contains('views')?WB.sel.id:null;
+ if(pid!==RD.pid){RD.pid=pid;RD.data=null;RD.stats=null;RD.closed={};RD.open=false;RD.tab='now'}
+ if(!pid){rdDraw();return}
+ RD.busy=true;try{const d=await api('api/workbench/progress?pipeline='+encodeURIComponent(pid));
+  if(d&&!d.error&&RD.pid===pid){const was=(RD.data&&RD.data.active||[]).length;RD.data=d;
+   if(was&&!d.active.length){RD.doneAt=Date.now();setTimeout(()=>{if(!(RD.data&&RD.data.active||[]).length&&RD.tab==='now'){RD.open=false;rdDraw()}},5000);if(RD.tab==='time')rdStats()}
+   rdDraw()}}finally{RD.busy=false}}
+(function rdLoop(){rdPoll().finally(()=>setTimeout(rdLoop,(RD.data&&RD.data.active&&RD.data.active.length)||RD.open?1000:2500))})();
+// the "reading the traces…" notes in the views open the popup
+document.addEventListener('click',e=>{const t=e.target.closest('#wbview .sub, #wbview .wq-graph');if(t&&/reading the/i.test(t.textContent||'')&&t.textContent.length<200)rdOpen('now')});

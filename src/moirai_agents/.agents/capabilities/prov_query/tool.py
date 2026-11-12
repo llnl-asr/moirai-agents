@@ -13,6 +13,7 @@ from moirai_agents.core import moirai_env as M
 from moirai_agents.core import pipeline as P
 from moirai_agents.core import answers as A
 from moirai_agents.core import evidence as E
+from moirai_agents.core import provtrace as T
 
 STAGE = "query"
 
@@ -51,7 +52,7 @@ def _run(pipeline, steps):
     if not tr:
         return None, {"status": "error", "error": "this pipeline has no traces yet"}
     try:
-        return E.run(tr, steps, E.index_dir_of(pipeline)), None
+        return E.run(tr, steps, E.index_dir_of(pipeline), pipeline), None
     except E.PlanError as e:
         return None, {"status": "error", "error": str(e)}
 
@@ -145,11 +146,16 @@ def register(mcp):
         if not m.get("dftracer_utils"):
             return {"status": "error", "error": "dftracer-utils is not in the moirai Python", "fix": m.get("fix", "")}
         t = os.path.abspath(os.path.expanduser(_traces(c)))
-        trace_dir = t if os.path.isdir(t) else str(Path(t.split("*")[0]).parent)
+        trace_dir = os.path.realpath(t if os.path.isdir(t) else str(Path(t.split("*")[0]).parent))   # the index is keyed by real paths
+        idx = E.index_dir_of(pipeline)        # the index every other query reads, brought up to date first (a live run still writing)
+        try:
+            T.ensure_index(T.expand(trace_dir), idx)
+        except Exception:  # noqa: BLE001  TraceViewer still builds what it lacks
+            pass
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / "q.py"
             f.write_text(PREAMBLE + "\n" + code)
-            env = {**os.environ, "MOIRAI_Q_TRACES": trace_dir, "MOIRAI_Q_INDEX": str(P.pdir(pipeline) / "index")}
+            env = {**os.environ, "MOIRAI_Q_TRACES": trace_dir, "MOIRAI_Q_INDEX": idx}
             r = subprocess.run([m["python"], str(f)], capture_output=True, text=True, timeout=timeout, env=env, cwd=d)
         _log(pipeline, code, r.stdout[:200] or r.stderr[-200:])
         return {"status": "ok" if r.returncode == 0 else "error", "stdout": r.stdout[-20000:], "stderr": r.stderr[-3000:]}

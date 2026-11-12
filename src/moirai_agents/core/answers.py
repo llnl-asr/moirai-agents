@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import pipeline as P
 from . import provtrace as T
+from . import readprogress as RP
 
 MAX_NODES = 80
 _LOCK = threading.Lock()
@@ -53,15 +54,16 @@ def graph(c: Dict[str, Any]) -> Tuple["T.Graph", List[str]]:
     if not t:
         return T.Graph(), []
     files = T.expand(t)
-    sizes = {f: os.path.getsize(f) for f in files if os.path.exists(f)}
+    sizes = {f: st for f in files if (st := T._stamp(f))}      # (size, mtime): a same-size rewrite is a change too
     with _LOCK:
         r = _READERS.get(c["id"])
-        if r is None or r.traces != t or any(sizes.get(f, 0) < n for f, n in r.sizes.items()):
+        if r is None or r.traces != t or any(sizes.get(f, (0, 0))[0] < n[0] for f, n in r.sizes.items()):
             r = _READERS[c["id"]] = _Reader(t)
     with r.lock:
         if sizes != r.sizes:
-            while _drain(r):
-                pass
+            with RP.op(c["id"], "graph", t):
+                while _drain(r):
+                    pass
             r.sizes = sizes
     return r.g, files
 

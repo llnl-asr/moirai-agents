@@ -12,6 +12,7 @@ Node ids: ``t:<entity type>``, ``a:<activity name>``. Edge ids: ``<kind>|<source
 from __future__ import annotations
 
 import os
+import time
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
@@ -198,10 +199,22 @@ def _n(lf: Any, colname: str) -> int:
 
 
 def _cats(tv: Any, col: Any) -> Dict[str, int]:
+    """Events by category, counter events (ph 4) left out: grouped by (cat, ph) and the counters dropped here, which the engine does faster
+    than filtering every row on ph first (2.3 s -> 1.4 s on a 51 MB file)."""
     out: Dict[str, int] = {}
-    for r in tv.filter(col("ph") != 4).group_by("cat").agg(col("name").count()).collect().to_dicts():
-        out[str(r.get("cat"))] = int(next((v for k, v in r.items() if k != "cat"), 0) or 0)
+    for r in tv.group_by("cat", "ph").agg(col("name").count()).collect().to_dicts():
+        if r.get("ph") in (4, "4", "C"):
+            continue
+        k = str(r.get("cat"))
+        out[k] = out.get(k, 0) + int(next((v for c, v in r.items() if c not in ("cat", "ph")), 0) or 0)
     return out
+
+
+def _as_string(df: Any, cols: List[str], col: Any) -> Dict[str, Any]:
+    """with_columns() casts for the columns that are not strings already: a cast of a string column is a full copy (about half of a file's
+    relation grouping on a 64-node run)."""
+    sch = getattr(df, "schema", None) or {}
+    return {c: col(c).cast("string") for c in cols if "STRING" not in str(sch.get(c, "")).upper()}
 
 
 def tv_partial(args: tuple) -> Dict[str, Any]:
@@ -210,14 +223,24 @@ def tv_partial(args: tuple) -> Dict[str, Any]:
     subject, object) for the parent to dedup, and activity relations to entities this file does not declare, to resolve there."""
     path, idx = args
     from . import provtrace as T
+    t_ = [time.time()]
+    laps: Dict[str, float] = {}
+
+    def lap(name: str) -> None:                     # seconds per phase, summed over the files by tv_runtime (the read's timing log)
+        now = time.time()
+        laps[name] = laps.get(name, 0.0) + now - t_[0]
+        t_[0] = now
     U = T._tv()
     col = U.col
     base = U.TraceViewer([path], idx)
     rel = sorted(c for c in base.columns if c.startswith("args.relations."))
     tv = base.phase("any")
     rows = lambda lf: lf.collect().to_dicts()       # noqa: E731
+    lap("open")
     out: Dict[str, Any] = {"types": {}, "cats": _cats(tv, col), "kinds": {}, "acts": {}, "edges": 0, "ents": [], "eg": [], "loose": [], "ers": []}
+    lap("scan: events by category")
     meta_df = tv.filter(col("name").is_in(list(T.PROV_NAMES))).collect()
+    lap("scan: provenance metadata (ET/EH/ER)")
     meta = meta_df.lazy()
     kinds = out["kinds"] = {r["name"]: r["n"] for r in rows(meta.group_by(["name"], "count_valid:name:n"))} if meta_df.height else {}
     if kinds.get("ET"):
@@ -228,17 +251,19 @@ def tv_partial(args: tuple) -> Dict[str, Any]:
     ents = None
     if kinds.get("EH"):
         ents = (meta.filter(col("name") == "EH").select("args.id", "args.type", "args.uri")
-                .with_columns(**{"args.id": col("args.id").cast("string")}).filter(col("args.id").is_not_null()).unique("args.id")
+                .with_columns(**_as_string(meta_df, ["args.id"], col)).filter(col("args.id").is_not_null()).unique("args.id")
                 .with_columns(an=col("args.uri").extract(r"^([^=]*)=")).select("args.id", "args.type", "an").collect().lazy())
         out["ents"] = [(r["args.id"], r["args.type"] or "?", r["an"]) for r in rows(ents)]
+    lap("entities: unique by id, to Python")
     acts_df = tv.filter(col("cat").is_in(list(T.ACTIVITY_CATS)) & (col("ph") == 1)).select("name", "pid", "ts", *rel).collect()
+    lap("scan: activities")
     if acts_df.height:
         acts = acts_df.lazy()
         if _n(acts, "ts") != _n(acts.group_by(["pid", "ts"], "count_valid:ts:n"), "n"):
             acts = acts.unique(["pid", "ts"]).collect().lazy()          # one activity per (pid, ts); unique() over the wide columns is slow: only when needed
         out["acts"] = {r["name"]: r["n"] for r in rows(acts.group_by(["name"], "count_valid:ts:n"))}
         if rel:
-            long_df = (acts.select("name", *rel).with_columns(**{c: col(c).cast("string") for c in rel})
+            long_df = (acts.select("name", *rel).with_columns(**_as_string(acts_df, rel, col))
                        .unpivot(id_vars=["name"], value_vars=rel).filter(col("value").is_not_null()).collect())
             if long_df.height:
                 long = long_df.lazy()
@@ -253,11 +278,14 @@ def tv_partial(args: tuple) -> Dict[str, Any]:
                 if loose.height:
                     out["loose"] = [(r["variable"], r["name"], r["value"], r["n"]) for r in
                                     rows(loose.lazy().group_by(["variable", "name", "value"], "count_valid:value:n"))]
+    lap("activity relations: unpivot, join, group by")
     if kinds.get("ER"):
         ers = (meta.filter(col("name") == "ER").select("args.relation", "args.subject", "args.object")
-               .with_columns(**{"args.subject": col("args.subject").cast("string"), "args.object": col("args.object").cast("string")})
+               .with_columns(**_as_string(meta_df, ["args.subject", "args.object"], col))
                .filter(col("args.subject").is_not_null()).unique(["args.relation", "args.subject", "args.object"]))
         out["ers"] = [(r["args.relation"], r["args.subject"], r["args.object"] or "") for r in rows(ers)]
+    lap("entity relations: unique, to Python")
+    out["_t"] = laps
     return out
 
 
@@ -267,18 +295,40 @@ def tv_runtime(traces: str, workers: int = 0) -> Dict[str, Any]:
     dedup across files by id / key, as one graph would, and an activity relation to an entity declared in another file is resolved there.
     Equal to runtime(provtrace.read(traces)) with g.counts(), without building the graph in Python (millions of entities for a multi-node run)."""
     from . import provtrace as T
-    files = T.expand(traces)
+    from . import readprogress as RP
+    files = T.find(traces)
     if not files:
         return {"nodes": [], "edges": [], "counts": T.Graph().counts()}
     idx = T.ensure_index(files)
     n = workers or min(len(files), os.cpu_count() or 4, int(os.environ.get("MOIRAI_TV_WORKERS", "48")))
-    if n < 2 or len(files) < 2:
-        parts = [tv_partial((f, idx)) for f in files]
-    else:
-        import multiprocessing as mp
-        from concurrent.futures import ProcessPoolExecutor
-        with ProcessPoolExecutor(max_workers=n, mp_context=mp.get_context("spawn")) as ex:     # spawn: TraceViewer's threads are running here
-            parts = list(ex.map(tv_partial, [(f, idx) for f in files]))
+    sizes = {f: (T._stamp(f) or (0, 0))[0] for f in files}
+    parts = []
+    with RP.step("group by type and activity", total=len(files), nbytes=sum(sizes.values()),
+                 detail=f"{len(files)} file(s), {min(n, len(files))} process(es)") as s:
+        if n < 2 or len(files) < 2:
+            for f in files:
+                parts.append(tv_partial((f, idx)))
+                s.advance(1, os.path.basename(f), sizes[f])
+        else:
+            import multiprocessing as mp
+            from concurrent.futures import ProcessPoolExecutor
+            with ProcessPoolExecutor(max_workers=n, mp_context=mp.get_context("spawn")) as ex:     # spawn: TraceViewer's threads are running here
+                for f, p in zip(files, ex.map(tv_partial, [(f, idx) for f in files])):
+                    parts.append(p)
+                    s.advance(1, os.path.basename(f), sizes[f])
+    laps: Counter = Counter()
+    for p in parts:
+        laps.update(p.pop("_t", {}))
+    for name, secs in laps.items():                 # inside each file, summed over the files (worker seconds, not wall time)
+        RP.record(f"per file · {name}", secs, detail=f"summed over {len(parts)} file(s)")
+    with RP.step("merge files in Python", total=len(parts),
+                 detail=f"{sum(len(p['ents']) for p in parts)} entities, {sum(len(p['ers']) for p in parts)} entity relations returned by the files"):
+        return _merge_parts(parts)
+
+
+def _merge_parts(parts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """tv_runtime's merge of the per-file partials (tv_partial) into one aggregated graph."""
+    from . import provtrace as T
 
     types: Dict[str, str] = {}
     cats: Counter = Counter()

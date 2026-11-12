@@ -48,6 +48,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from . import pipeline as P
 from . import provtrace as T
+from . import readprogress as RP
 from .aggregate import TYPE_MAX, ends       # a type the trace cut at 31 characters still counts as <x>.attribute / .input / .output
 
 MAX_STEPS, MAX_HOPS, MAX_NODES, MAX_CITE, MAX_ROWS, MAX_IN = 8, 30, 5000, 300, 200, 4000
@@ -80,14 +81,15 @@ class Viewer:
     """TraceViewer over each trace file; ``q`` runs one query on all of them and keeps its text, rows and time."""
     def __init__(self, traces: str, index_dir: str) -> None:
         U = T.tv()                                 # the one reader (core.provtrace, the prov_read capability)
-        self.U, self.files, self.idx = U, T.expand(traces), index_dir
+        self.U, self.files, self.idx = U, T.find(traces), index_dir
         if not self.files:
             raise PlanError(f"no trace file under {traces}")
         # Index every file up front, on all cores: left to the queries, each file's index is built
         # one after another on first touch (a 31-file, 2.8 GB live run took many minutes that way).
-        # A no-op when the index is already there.
+        # Only what changed since it was indexed is rebuilt (a live run still writing); one stat per
+        # file when the index is current (a live run's keeper keeps it so: provtrace.keep_indexed).
         try:
-            U.Indexer(files=list(self.files), index_dir=index_dir, parallelism=0).ensure_indexed()
+            T.ensure_index(list(self.files), index_dir)
         except Exception:  # noqa: BLE001  the queries still build what they need, file by file
             pass
         self.queries: List[Dict[str, Any]] = []
@@ -106,7 +108,11 @@ class Viewer:
             tv = self.U.TraceViewer(f, self.idx).phase("any")
             q = build(tv, self.U.col, self.columns(f))
             return [] if q is None else [_clean(r) for r in q.collect().to_dicts()]
-        got_all = [one(f) for f in self.files]    # one file at a time: threads made the 32-node run 2x slower
+        got_all = []
+        with RP.step(f"query {len(self.queries) + 1}: {why}"[:120], total=len(self.files)) as s:
+            for f in self.files:                      # one file at a time: threads made the 32-node run 2x slower
+                got_all.append(one(f))
+                s.advance(1, f"{os.path.basename(f)}: {len(got_all[-1])} row(s)")
         for f, got in zip(self.files, got_all):
             per[os.path.basename(f)] = len(got)
             rows += [{**r, "_file": os.path.basename(f)} for r in got]
@@ -821,18 +827,26 @@ def reported_gaps(synthesis: str, n_steps: int, have: List[Dict[str, Any]]) -> L
 
 
 # ------------------------------------------------------------------ the whole thing
-def run(traces: str, steps: List[Dict[str, Any]], index_dir: str) -> Dict[str, Any]:
+def run(traces: str, steps: List[Dict[str, Any]], index_dir: str, pipeline: str = "", kind: str = "query") -> Dict[str, Any]:
+    """The plan's steps as TraceViewer queries; a read the progress popup of ``pipeline`` follows (core.readprogress)."""
+    with RP.op(pipeline, kind, traces):
+        return _run(traces, steps, index_dir)
+
+
+def _run(traces: str, steps: List[Dict[str, Any]], index_dir: str) -> Dict[str, Any]:
     bad = check_plan(steps)
     if bad:
         raise PlanError("; ".join(bad))
     t0 = time.time()
     v = Viewer(traces, index_dir)
-    cat = _catalog(v)
+    with RP.step("catalog entity types", unit="queries"):
+        cat = _catalog(v)
     ctx: Dict[str, Any] = {}
     outs, res = [], []
     for k, s in enumerate(steps):
         before = len(v.queries)
-        o = STEPS[s["op"]](s, k, v, cat, outs, ctx)
+        with RP.step(f"plan step {k + 1} of {len(steps)}: {s['op']}", unit="queries"):
+            o = STEPS[s["op"]](s, k, v, cat, outs, ctx)
         outs.append(o)
         res.append({"step": k + 1, "op": s["op"], "args": {a: x for a, x in s.items() if a != "op"}, "resolved": o.get("resolved"),
                     "queries": [q["n"] for q in v.queries[before:]] or None, "computed_from": None if v.queries[before:] else s.get("from"),
@@ -912,7 +926,7 @@ def ask(pipeline: str, question: str, steps: List[Dict[str, Any]], synthesis: st
     tr = A.traces_of(c)
     if not tr:
         raise PlanError("this pipeline has no traces yet")
-    r = run(tr, steps, index_dir_of(pipeline))
+    r = run(tr, steps, index_dir_of(pipeline), pipeline)
     syn = check_synthesis(synthesis, len(steps), r["computed"], f"{question} {pipeline} {c.get('name', '')}")
     last = r["steps"][-1]
     from . import querystore as QS
@@ -936,7 +950,7 @@ def rerun(pipeline: str, aid: str) -> Dict[str, Any]:
     rec = next((a for a in A.listing(pipeline) if a.get("id") == aid), None)
     if not rec or rec.get("engine") != "traceviewer":
         raise PlanError("no computed answer with that id")
-    r = run(A.traces_of(P.load(pipeline)), rec["plan"]["steps"], index_dir_of(pipeline))
+    r = run(A.traces_of(P.load(pipeline)), rec["plan"]["steps"], index_dir_of(pipeline), pipeline, "rerun")
     was = {x["file"]: x for x in rec["reads"]}
     changed = [x["file"] for x in r["reads"] if (was.get(x["file"]) or {}).get("sha256_ends") != x["sha256_ends"] or (was.get(x["file"]) or {}).get("bytes") != x["bytes"]]
     return {"same": r["result_hash"] == rec["result_hash"], "result_hash": r["result_hash"], "was": rec["result_hash"], "files_changed": changed,

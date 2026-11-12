@@ -34,7 +34,7 @@ WS = Path(os.environ.get("MOIRAI_AGENTS_WORKSPACE", REPO / "workspace"))   # whe
 from ..env import state_dir  # noqa: E402
 STATE = Path(os.environ.get("MOIRAI_AGENTS_WEBUI_STATE") or state_dir("webui"))      # in the project, never in ~
 
-from ..env import ENV_FILE, load_env  # noqa: E402
+from ..env import ENV_FILE, load_env, system_env_file, system_name, venv_dir  # noqa: E402
 
 load_env()
 from ..env import group_umask  # noqa: E402
@@ -191,16 +191,20 @@ def provider_models(provider: str) -> list:
 
 
 def _env_file_value(name: str) -> Optional[str]:
-    f = os.environ.get("MOIRAI_AGENTS_LIVAI_ENV", str(ENV_FILE))
-    try:
-        for line in open(f):
-            line = line.strip()
-            if line.startswith("export "):
-                line = line[7:].strip()
-            if line.startswith(name + "="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'") or None
-    except OSError:
-        pass
+    """NAME read fresh from MOIRAI_AGENTS_LIVAI_ENV if set, else from .env.<system> then .env."""
+    files = [os.environ["MOIRAI_AGENTS_LIVAI_ENV"]] if os.environ.get("MOIRAI_AGENTS_LIVAI_ENV") else [str(system_env_file()), str(ENV_FILE)]
+    for f in files:
+        try:
+            for line in open(f):
+                line = line.strip()
+                if line.startswith("export "):
+                    line = line[7:].strip()
+                if line.startswith(name + "="):
+                    v = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    if v:
+                        return v
+        except OSError:
+            pass
     return None
 
 
@@ -361,7 +365,7 @@ def mcp_failure(cwd: str, server: str) -> dict:
 
 
 _CLAUDE: Dict[str, object] = {}
-CLAUDE_SETUP = ("scripts/setup_claude.sh   (installs Claude Code if needed, records MOIRAI_AGENTS_CLAUDE_BIN in .env, "
+CLAUDE_SETUP = ("scripts/setup_claude.sh   (installs Claude Code if needed, records MOIRAI_AGENTS_CLAUDE_BIN in .env.<system>, "
                 "checks it; no restart needed)")
 
 
@@ -412,15 +416,16 @@ def find_claude(refresh: bool = False) -> dict:
     out["fix"] = None if out["ok"] else [
         f"On the server, as the account that runs the web UI: {CLAUDE_SETUP}",
         "Or by hand: curl -fsSL https://claude.ai/install.sh | bash   (or: npm install -g @anthropic-ai/claude-code)",
-        "then put MOIRAI_AGENTS_CLAUDE_BIN=/full/path/to/claude in moirai-agents/.env  (`command -v claude` prints it)",
+        f"then put MOIRAI_AGENTS_CLAUDE_BIN=/full/path/to/claude in {system_env_file()}  (`command -v claude` prints it)",
         "Check: <path> --version prints a version. Then reload this page."]
     _CLAUDE.update(t=time.time(), v=out, sig=sig)
     return out
 
 
-def set_env_value(name: str, value: str) -> Path:
-    """Write NAME=value into the server's .env (replacing an existing line; mode 600). Read fresh, so no restart."""
-    f = Path(os.environ.get("MOIRAI_AGENTS_LIVAI_ENV", str(ENV_FILE)))
+def set_env_value(name: str, value: str, per_system: bool = False) -> Path:
+    """Write NAME=value into the server's .env, or this system's .env.<system> when per_system (replacing an existing line;
+    mode 600). Read fresh, so no restart."""
+    f = Path(os.environ.get("MOIRAI_AGENTS_LIVAI_ENV") or (system_env_file() if per_system else ENV_FILE))
     lines = f.read_text().splitlines() if f.exists() else []
     rx = re.compile(rf"^\s*(export\s+)?{re.escape(name)}=")
     new = [ln for ln in lines if not rx.match(ln)] + [f"{name}={value}"]
@@ -447,7 +452,7 @@ def use_claude_path(path: str) -> dict:
         return {"ok": False, "error": f"{p} --version did not work: {e}"}
     if r.returncode != 0 or "claude" not in (r.stdout + r.stderr).lower():
         return {"ok": False, "error": f"{p} does not look like Claude Code: {(r.stdout or r.stderr).strip()[:200]}"}
-    f = set_env_value("MOIRAI_AGENTS_CLAUDE_BIN", p)
+    f = set_env_value("MOIRAI_AGENTS_CLAUDE_BIN", p, per_system=True)     # a binary belongs to one system
     return dict(find_claude(refresh=True), saved_to=str(f))
 
 
@@ -588,10 +593,12 @@ def verify_provider(provider: str, key: str, model: Optional[str], base_url: Opt
 
 
 def _venv_paths(env: Dict[str, str]) -> None:
-    venv_bin = REPO / ".venv" / "bin"
-    if venv_bin.exists():
-        env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
-        env["VIRTUAL_ENV"] = str(REPO / ".venv")
+    """This system's venv first on PATH (scripts/venv.sh resolves the same one for the workspace's MCP servers)."""
+    venv = venv_dir()
+    env["MOIRAI_AGENTS_SYSTEM"] = system_name()
+    if (venv / "bin").exists():
+        env["PATH"] = f"{venv / 'bin'}:{env.get('PATH', '')}"
+        env["VIRTUAL_ENV"] = str(venv)
     env["PYTHONPATH"] = f"{REPO / 'src'}:{env.get('PYTHONPATH', '')}"
 
 

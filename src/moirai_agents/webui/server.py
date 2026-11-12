@@ -251,6 +251,8 @@ def main(argv=None) -> int:
     host = os.uname().nodename if a.host in ("0.0.0.0", "") else a.host
     print(f"moirai-agents web UI: http://{host}:{port}/?token={token}", flush=True)
     print(f"  tunnel: ssh -L {port}:localhost:{port} {os.uname().nodename}", flush=True)
+    from ..env import system_name, venv_dir
+    print(f"  system: {system_name()}, venv {venv_dir()}{'' if (venv_dir() / 'bin' / 'python').exists() else ' (missing: run scripts/setup_env.sh here)'}", flush=True)
     print(f"  stops after {life.idle_s or 'no'} s idle, {life.max_s or 'no'} s at most", flush=True)
     R.REGISTRY = R.procs.Registry({"port": port, "url": f"http://{host}:{port}/", "instance": instance, "log": os.environ.get("MOIRAI_AGENTS_WEBUI_LOG"), "workspace": str(R.WS)})
 

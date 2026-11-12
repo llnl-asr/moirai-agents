@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
 # Set up the OpenAI bridge: users whose model access is OpenAI (or an OpenAI-compatible gateway) run Claude Code
-# through a private LiteLLM proxy. LiteLLM gets its own venv (.venv-bridge) because its proxy extras pin packages
-# the agent's .venv needs at other versions.
+# through a private LiteLLM proxy. LiteLLM gets its own venv (.venv-bridge-<system>, one per system like the agent's venv)
+# because its proxy extras pin packages the agent's venv needs at other versions.
 #
-#   scripts/setup_openai_bridge.sh          # create/update .venv-bridge with litellm[proxy] and check it
+#   scripts/setup_openai_bridge.sh          # create/update .venv-bridge-<system> with litellm[proxy] and check it
 #   scripts/setup_openai_bridge.sh --check  # only report whether the bridge is usable
 #
 # Installs from pypi.org only: an unreachable extra index in a pip config makes every lookup retry for minutes.
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VENV="$REPO/.venv-bridge"
+source "$REPO/scripts/venv.sh"
+VENV="$REPO/.venv-bridge-$MOIRAI_SYSTEM"
 [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ] && { sed -n '2,9p' "$0"; exit 0; }
 if [ "${1:-}" = "--check" ]; then
   [ -x "$VENV/bin/litellm" ] && { echo "✓ bridge: $VENV/bin/litellm ($("$VENV/bin/python" -c 'import importlib.metadata as m; print("litellm", m.version("litellm"))'))"; exit 0; }
   echo "✗ bridge not installed: run $0"; exit 1
 fi
-PY="$REPO/.venv/bin/python"; [ -x "$PY" ] || PY="$(command -v python3)"
+PY="$MOIRAI_PY"
 [ -x "$VENV/bin/python" ] || "$PY" -m venv "$VENV" || { echo "✗ could not create $VENV" >&2; exit 1; }
 echo "→ installing litellm[proxy] into $VENV (a few minutes) ..."
 "$VENV/bin/python" -m pip install --isolated --index-url https://pypi.org/simple -q --upgrade "litellm[proxy]" \
