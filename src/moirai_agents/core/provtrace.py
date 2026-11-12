@@ -106,6 +106,25 @@ def read_file(path: str, idx: str) -> Tuple[List[Dict[str, Any]], Dict[str, int]
     return recs, cats
 
 
+def row_counts(traces: str) -> Dict[str, int]:
+    """Row counts of the traces by TraceViewer group-by only, no row is turned into a Python record: {"<cat>:<name>": rows} for the provenance
+    names (ET/EH/ER) and the activity categories, plus "files". Seconds where ``read(...).counts()`` takes minutes on a multi-GB run; two sets of
+    traces that hold the same records (a byte-for-byte published copy) give the same table."""
+    files = expand(traces)
+    out: Counter = Counter()
+    if not files:
+        return {"files": 0}
+    idx = ensure_index(files)
+    U = _tv()
+    for f in files:
+        tv = U.TraceViewer(f, idx).phase("any")
+        sel = U.col("name").is_in(list(PROV_NAMES)) | U.col("cat").is_in(list(ACTIVITY_CATS))
+        for r in tv.filter(sel).group_by("cat", "name").agg(U.col("ts").count()).collect().to_dicts():
+            n = next((v for k, v in r.items() if k not in ("cat", "name")), 0)
+            out[f"{r.get('cat')}:{r.get('name')}"] += int(n or 0)
+    return {**out, "files": len(files)}
+
+
 def _stamp(f: str) -> Optional[Tuple[int, int]]:
     try:
         st = os.stat(f)

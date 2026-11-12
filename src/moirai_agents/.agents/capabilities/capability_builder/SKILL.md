@@ -22,6 +22,7 @@ scope), `checks.json` (known input to expected output), `LESSONS.md`. Read LESSO
 - A refinement of a pending proposal goes through `capability_refine`, never a second `capability_new`.
 - Never edit capability files directly: edits skip validation and the human gate.
 - No `eval`, `exec`, `shell=True`, `os.system`. No machine-specific paths: take them as arguments.
+- Traces are read only through TraceViewer: `moirai_agents.core.provtrace` / `evidence` in a tool, `dftracer.utils.TraceViewer` in a standalone script. Never open, decompress or parse a trace file (`gzip.open`, `zlib`, `zcat`, a regex over its lines), even to avoid a locked index: the store refuses it. Writing a synthetic trace for a selftest is fine.
 - `agent.json` declares `level_1|2|3`, never a model. Bash must be scoped, for example `Bash(git diff:*)`.
 - The skill needs all of: Rules, Constraints, Corner cases, Self-heal, Self-learn, and its Self-learn says what is explored there becomes a capability.
 

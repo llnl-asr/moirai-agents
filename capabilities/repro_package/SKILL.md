@@ -35,7 +35,7 @@ This is the home of the generic package and publish procedure. Workload capabili
 
 ## Publish a live run's data (the `publish_data` stage of a live pipeline)
 - After the live run ended and `moirai_validate(pipeline, 'live_run')` passed: `repro_publish_traces(pipeline=<live pipeline>)`. It publishes into `<publish_root>/provenance-traces/<app>/<timestamp>/` with publish_root and app from the parent's `repro_publish_package`; give them when the parent never published.
-- Then `repro_publish_data_validate` (it also requires `raw/.dftindex`), then the gate. Never publish while the run is still writing (the counts check fails).
+- Then `repro_publish_data_validate` (it also requires `raw/.dftindex`), then the gate. Never publish while the run is still writing (the same_traces check fails). Both publish validators compare trace files by size and sha256 (seconds); pass `deep=true` only when the user asks for a full recount (minutes on a large run).
 
 ## Constraints
 - No username, home path, session path or job id in any script. Use `${USER}` and `${HOME}` in `config.ini` (a lustre default keeps `${USER}`, never a literal name).
@@ -90,6 +90,8 @@ Predictors `repro_build`, `repro_verify`, `repro_publish_plan`, `repro_publish_p
 | `package_equals_source` | the published copy differs from final_provenance: rebuild and publish to a new target with the user's approval |
 | `verification_record` | package hashes differ from the record (the package changed after the verified run) or the run failed: `repro_verify(in_place)` again |
 | `readme_counts` | regenerate the run folder (new target) from the graph tools |
+| `traces_as_counted` | a published trace file is not the file that was counted (size or sha256 differs from run.json's manifest): the run folder was changed after publishing, or the copy failed; publish the run again into a new folder. A folder published before manifests is checked by file count and bytes; `deep=true` recounts the graph |
+| `same_traces` (publish_data) | the live run's files differ from the published copy: the run was still writing; publish again after it ends |
 | `permissions` | the exceptions name each path; rerun `repro_publish_permissions`; if it persists, the script or the group is wrong (ask) |
 | `indexed` | a run folder has no `raw/.dftindex`: `repro_publish_index(publish_root, app, timestamps=<ts>)`; if it fails again, the error names the file the indexer could not read |
 

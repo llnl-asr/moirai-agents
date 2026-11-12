@@ -93,6 +93,25 @@ def test_bad_bundles_are_refused(kw, needle):
     assert r["status"] == "error" and needle in json.dumps(r), r
 
 
+READ_GZ = 'import gzip\n' + TOOL.replace('return {"y": x + 1}', 'return {"y": sum(1 for _ in gzip.open("a.pfw.gz", "rt"))}')
+CHECK_SCRIPT = TOOL.replace('"""A demo."""', '"""A demo."""\nSCRIPT = "for f in raw/*.pfw.gz; do zcat $f | grep EH; done"')
+WRITE_GZ = 'import gzip\n' + TOOL.replace('return {"y": x + 1}', 'gzip.open("a.pfw.gz", "wt").write("")\n        return {"y": x + 1}')
+
+
+@pytest.mark.parametrize("code,refused", [(READ_GZ, True), (CHECK_SCRIPT, True), (WRITE_GZ, False)])
+def test_a_trace_is_read_only_through_traceviewer(code, refused):
+    """A capability that decompresses a trace itself (in Python or in an embedded script) is refused; writing a synthetic one is not a read."""
+    errs = [e for e in S.analyze(code)["errors"] if "TraceViewer" in e]
+    assert bool(errs) == refused, errs
+
+
+def test_no_capability_reads_traces_directly():
+    """Every capability in every layer reads traces through TraceViewer."""
+    bad = {n: e for n, (_layer, d, _m) in S.all_caps().items() for e in [S.direct_trace_reads(__import__("ast").parse((d / "tool.py").read_text()),
+                                                                                                   (d / "tool.py").read_text())] if e}
+    assert not bad, bad
+
+
 def test_a_twin_under_another_name_is_refused():
     S.apply(new()["id"], True)
     twin = TOOL.replace('"""A demo."""', '"""Other."""').replace("demo_ping", "demo_pong").replace("demo_check", "demo_chk").replace("Add one", "Increment")

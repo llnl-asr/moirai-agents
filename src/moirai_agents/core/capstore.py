@@ -43,6 +43,31 @@ FORBIDDEN_IMPORTS = {"ctypes", "pty", "telnetlib", "ftplib", "paramiko"}
 REVIEW_IMPORTS = {"socket": "opens network connections", "requests": "makes HTTP requests", "urllib": "makes HTTP requests",
                   "http": "makes HTTP requests", "subprocess": "runs commands", "shutil": "copies/removes files"}
 ABS_PATH = re.compile(r"(?:/usr/WS\d|/usr/workspace|/g/g\d+|/home/[a-z]|/p/(?:lustre|vast|gpfs)\d?/[a-z]|/Users/)")
+# Traces are read only through dftracer-utils' TraceViewer (core.provtrace / core.evidence, or dftracer.utils.TraceViewer in a standalone
+# script): never decompressed and parsed by hand. Writing a synthetic trace for a selftest is fine.
+TRACE_HINT = re.compile(r"\.pfw\b|\.pfw\.gz|pfw\*")
+DECOMPRESS = {("gzip", "open"), ("gzip", "GzipFile"), ("zlib", "decompress"), ("zlib", "decompressobj"), ("indexed_gzip", "IndexedGzipFile"),
+              ("indexed_gzip", "open")}
+TEXT_READ = re.compile(r"\bgzip\.open\((?![^)]*[\"'][wax]b?t?[\"'])[^)]*\)|\bz(?:cat|grep|egrep|less|more)\b|\bgunzip\s+-c\b|\bgzip\s+-(?:d|c)?dc?\b")
+TV_RULE = "read traces only through TraceViewer (moirai_agents.core.provtrace / evidence, or dftracer.utils.TraceViewer), never by decompressing them"
+
+
+def direct_trace_reads(tree: ast.AST, code: str) -> List[str]:
+    """Where capability code reads trace files itself (gzip/zlib in Python, or zcat/gzip.open in an embedded script or command) instead of
+    through TraceViewer. Only code that deals with traces (.pfw) is checked; a write ("wt", "wb", "a") is not a read."""
+    if not TRACE_HINT.search(code):
+        return []
+    out = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name) and (n.func.value.id, n.func.attr) in DECOMPRESS:
+            mode = n.args[1] if len(n.args) > 1 else next((k.value for k in n.keywords if k.arg == "mode"), None)
+            if not (isinstance(mode, ast.Constant) and isinstance(mode.value, str) and mode.value[:1] in "wax"):
+                out.append(f"line {n.lineno}: {n.func.value.id}.{n.func.attr}() reads a trace directly: {TV_RULE}")
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str) and len(n.value) > 20 and TRACE_HINT.search(n.value) and TEXT_READ.search(n.value):
+            out.append(f"line {getattr(n, 'lineno', '?')}: an embedded script or command reads traces directly ({TEXT_READ.search(n.value).group(0)[:30]!r}): {TV_RULE}")
+    return out
+
+
 STANDING = ("Standing rules. knowledge_search comes first: it is how to find a capability, a skill, a past fix or a fact, before acting on anything unfamiliar. When anything fails, read "
             "known_lessons in the result, or call lesson_search with the error text, and try what they say before exploring on your own. Anything explored becomes a "
             "capability, constantly, from every pipeline and process you run: a new workload, software, tool, system or way of doing something met in any stage is captured before moving on, while the "
@@ -209,6 +234,7 @@ def analyze(code: str, taken_tools: Optional[Dict[str, str]] = None, own: str = 
                     review.append(f"imports {r}: {REVIEW_IMPORTS[r]}")
         if isinstance(n, ast.Constant) and isinstance(n.value, str) and ABS_PATH.search(n.value):
             errors.append(f"line {getattr(n, 'lineno', '?')}: machine-specific path {n.value[:40]!r}: take paths as arguments")
+    errors += direct_trace_reads(tree, code)
     return {"errors": errors, "review": sorted(set(review)), "warnings": warnings, "tools": tools}
 
 

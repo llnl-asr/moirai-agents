@@ -23,6 +23,13 @@
   }
  },
  {
+  "tool": "repro_home_selftest",
+  "args": {},
+  "expect": {
+   "contains": "repro home selftest PASS"
+  }
+ },
+ {
   "tool": "repro_publish_selftest",
   "args": {},
   "expect": {

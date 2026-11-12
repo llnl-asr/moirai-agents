@@ -74,7 +74,7 @@ python3 -m venv "$VENV"
 "$PY" -m pip install -q --upgrade pip scikit-build-core pybind11
 DFTRACER_WHEEL=1 "$PY" -m pip install -q "$DFTRACER_SPEC"
 "$PY" -m pip install -q --no-build-isolation "$MOIRAI_SPEC"
-[[ -z "$UTILS_SPEC" ]] || "$PY" -m pip install -q "$UTILS_SPEC"
+"$PY" -m pip install -q "${UTILS_SPEC:-dftracer-utils}"      # prov_check.py reads the traces through its TraceViewer
 ''',
     "03_build.sh": r'''# Build the patched application against moirai.
 SITE="$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
@@ -99,8 +99,10 @@ cd "$SRC"
 log "running: ${!var}"
 eval "$LAUNCHER ${!var}"
 ''',
-    "05_validate.sh": r'''# Judge the result with the standalone checker: it writes run.json next to the traces.
-python3 "$PKG_DIR/scripts/prov_check.py" "$TRACES" "$PKG_DIR/inputs/spec.json" "$PKG_DIR/inputs/expected.json" "$SCALE" "$OUTPUT_ROOT/run.json"
+    "05_validate.sh": r'''# Judge the result with the standalone checker: it writes run.json next to the traces. It reads them through TraceViewer, so it runs
+# with the python that has dftracer-utils: the moirai venv (batch mode), else the run's venv.
+CPY="${MOIRAI_VENV:+$MOIRAI_VENV/bin/python}"; CPY="${CPY:-$PY}"
+"$CPY" "$PKG_DIR/scripts/prov_check.py" "$TRACES" "$PKG_DIR/inputs/spec.json" "$PKG_DIR/inputs/expected.json" "$SCALE" "$OUTPUT_ROOT/run.json"
 ''',
 }
 RUN_ALL = r'''# Reproduce end to end: prereqs, source and patch, environment, build, run, validate.
@@ -109,33 +111,48 @@ for s in 00_check_prereqs 01_get_source 02_setup_env 03_build 04_run 05_validate
 log "done: $OUTPUT_ROOT/run.json"
 '''
 CHECK = r'''#!/usr/bin/env python3
-"""Standalone provenance check: python stdlib only. It needs nothing from the tools that made this package.
+"""Standalone provenance check. It reads the traces only through dftracer-utils' TraceViewer (installed in the moirai venv by
+02_setup_env.sh), never by parsing the trace files; it needs nothing else from the tools that made this package.
     prov_check.py <trace dir> <spec.json> <expected.json> <scale> <run.json>
 Fails on no trace, a dangling id, an undescribed type, an artifact type with no producer, or counts that differ from the original run."""
-import glob, gzip, json, os, sys
+import glob, json, os, sys, tempfile
+try:
+    import dftracer.utils as U
+except ImportError:
+    sys.exit("prov_check.py reads the traces through dftracer-utils' TraceViewer: run it with the moirai venv's python (02_setup_env.sh installs it)")
+try:
+    U.set_log_level("error")
+except Exception:
+    pass
 traces, spec, expected, scale, out = sys.argv[1:6]
 spec, expected = json.load(open(spec)), json.load(open(expected)).get(scale)
 types, ents, acts, edges = {}, {}, 0, []
-files = sorted(glob.glob(os.path.join(traces, "**", "*.pfw.gz"), recursive=True))
+files = sorted({os.path.realpath(f) for f in glob.glob(os.path.join(traces, "**", "*.pfw.gz"), recursive=True)})
+idx = ""
+if files:   # the index beside the traces (raw/.dftindex, published with them) when writable, else a private temporary one
+    d = os.path.commonpath([os.path.dirname(f) for f in files])
+    idx = d if os.access(d, os.W_OK) else tempfile.mkdtemp(prefix="prov_check_index_")
+    U.Indexer(files=files, index_dir=idx, parallelism=0).ensure_indexed()
 for f in files:
-    with gzip.open(f, "rt", errors="replace") as fh:
-        for line in fh:
-            line = line.strip().rstrip(",")
-            if not line.startswith("{"):
-                continue
-            try:
-                r = json.loads(line)
-            except ValueError:
-                continue
-            a = r.get("args") or {}
-            if r.get("name") == "ET":
-                types[a.get("type")] = a.get("description", "")
-            elif r.get("name") == "EH" and a.get("id"):
-                ents[a["id"]] = a.get("type", "")
-            elif r.get("cat") in ("moirai", "PROV") and r.get("ph") in (1, "X"):
-                acts += 1
-                for kind, ids in (a.get("relations") or {}).items():
-                    edges += [(kind, i) for i in (ids if isinstance(ids, list) else [ids])]
+    base = U.TraceViewer(f, idx)
+    cols = set(base.columns)
+    tv = base.phase("any")
+    for r in tv.filter(U.col("name").is_in(["ET", "EH"])).collect().to_dicts():
+        if r.get("name") == "ET":
+            types[r.get("args.type")] = r.get("args.description") or ""
+        elif r.get("args.id"):
+            ents[r["args.id"]] = r.get("args.type") or ""
+    rel = sorted(c for c in cols if c.startswith("args.relations."))
+    q = tv.filter(U.col("cat").is_in(["moirai", "PROV"]) & ~U.col("name").is_in(["ET", "EH", "ER"]))
+    if rel:      # the relation columns are in the index schema: read only what is counted (a small index may not list them: read whole rows)
+        q = q.select([c for c in ("name", "cat", "ph") if c in cols] + rel)
+    for r in q.collect().to_dicts():
+        if str(r.get("ph")) not in ("1", "X"):
+            continue
+        acts += 1
+        for c, x in r.items():
+            if c.startswith("args.relations.") and x not in (None, ""):
+                edges.append((c[len("args.relations."):].partition(".")[0], x))
 made = {ents.get(i) for k, i in edges if k in ("generated", "updated")}
 seen = set(ents.values())
 fails = []
@@ -272,7 +289,7 @@ $EDITOR config.ini            # the only file with site values
 bash scripts/run_all.sh       # SCALE=baseline for the full run
 ```
 
-`scripts/run_all.sh` runs the numbered scripts in order, and each can be run alone. The result is judged by `scripts/prov_check.py`, which needs only Python, and written to `$OUTPUT_ROOT/run.json`.
+`scripts/run_all.sh` runs the numbered scripts in order, and each can be run alone. The result is judged by `scripts/prov_check.py`, which reads the traces through dftracer-utils' TraceViewer (in the moirai venv), and written to `$OUTPUT_ROOT/run.json`.
 
 | Script | Does |
 |---|---|

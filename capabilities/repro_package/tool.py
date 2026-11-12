@@ -8,6 +8,8 @@ compute nodes; each chunk job runs a wrapper that starts its own moirai-service,
 
 Publishing: provenance-repro/<app>/ holds the package (run AS IT IS from there to verify it), provenance-traces/<app>/<job start>/ holds one run each (raw traces, README.md, run.json,
 run.sh, graph_summary.json), then the site's chgperm.sh sets the group. Every publishing step takes publish_root as an argument and refuses any path outside it.
+
+Verification and its OUTPUT_ROOT never live on home (quota): lustre or the workspace only.
 """
 import grp
 import hashlib
@@ -86,7 +88,7 @@ python3 -m venv "$VENV"
 "$PY" -m pip install -q --upgrade pip scikit-build-core pybind11
 DFTRACER_WHEEL=1 "$PY" -m pip install -q "$DFTRACER_SPEC"
 "$PY" -m pip install -q --no-build-isolation "$MOIRAI_SPEC"
-[[ -z "$UTILS_SPEC" ]] || "$PY" -m pip install -q "$UTILS_SPEC"
+"$PY" -m pip install -q "${UTILS_SPEC:-dftracer-utils}"      # prov_check.py reads the traces through its TraceViewer
 ''',
     "03_build.sh": r'''# Build the patched application against moirai.
 SITE="$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
@@ -111,8 +113,10 @@ cd "$SRC"
 log "running: ${!var}"
 eval "$LAUNCHER ${!var}"
 ''',
-    "05_validate.sh": r'''# Judge the result with the standalone checker: it writes run.json next to the traces.
-python3 "$PKG_DIR/scripts/prov_check.py" "$TRACES" "$PKG_DIR/inputs/spec.json" "$PKG_DIR/inputs/expected.json" "$SCALE" "$OUTPUT_ROOT/run.json"
+    "05_validate.sh": r'''# Judge the result with the standalone checker: it writes run.json next to the traces. It reads them through TraceViewer, so it runs
+# with the python that has dftracer-utils: the moirai venv (batch mode), else the run's venv.
+CPY="${MOIRAI_VENV:+$MOIRAI_VENV/bin/python}"; CPY="${CPY:-$PY}"
+"$CPY" "$PKG_DIR/scripts/prov_check.py" "$TRACES" "$PKG_DIR/inputs/spec.json" "$PKG_DIR/inputs/expected.json" "$SCALE" "$OUTPUT_ROOT/run.json"
 ''',
 }
 RUN_ALL = r'''# Reproduce end to end: prereqs, source and patch, environment, build, run, validate.
@@ -121,35 +125,50 @@ for s in 00_check_prereqs 01_get_source 02_setup_env 03_build 04_run 05_validate
 log "done: $OUTPUT_ROOT/run.json"
 '''
 CHECK = r'''#!/usr/bin/env python3
-"""Standalone provenance check: python stdlib only. It needs nothing from the tools that made this package.
+"""Standalone provenance check. It reads the traces only through dftracer-utils' TraceViewer (installed in the moirai venv by
+02_setup_env.sh), never by parsing the trace files; it needs nothing else from the tools that made this package.
     prov_check.py <trace dir> <spec.json> <expected.json> <scale> <run.json>
 Fails on no trace, a dangling id, an undescribed type, an artifact type with no producer, a different number of activities than the original run, or an entity type of the original run
 that is missing (extra types are allowed). Entity and edge counts must equal the original run only when expected.json has no entity types (an old build); when the run captured inputs or
 attributes (an expected type name ends with .input or .attribute) those counts depend on the run, so they are reported with a note and never fail."""
-import glob, gzip, json, os, sys
+import glob, json, os, sys, tempfile
+try:
+    import dftracer.utils as U
+except ImportError:
+    sys.exit("prov_check.py reads the traces through dftracer-utils' TraceViewer: run it with the moirai venv's python (02_setup_env.sh installs it)")
+try:
+    U.set_log_level("error")
+except Exception:
+    pass
 traces, spec, expected, scale, out = sys.argv[1:6]
 spec, expected = json.load(open(spec)), json.load(open(expected)).get(scale)
 types, ents, acts, edges = {}, {}, 0, []
-files = sorted(glob.glob(os.path.join(traces, "**", "*.pfw.gz"), recursive=True))
+files = sorted({os.path.realpath(f) for f in glob.glob(os.path.join(traces, "**", "*.pfw.gz"), recursive=True)})
+idx = ""
+if files:   # the index beside the traces (raw/.dftindex, published with them) when writable, else a private temporary one
+    d = os.path.commonpath([os.path.dirname(f) for f in files])
+    idx = d if os.access(d, os.W_OK) else tempfile.mkdtemp(prefix="prov_check_index_")
+    U.Indexer(files=files, index_dir=idx, parallelism=0).ensure_indexed()
 for f in files:
-    with gzip.open(f, "rt", errors="replace") as fh:
-        for line in fh:
-            line = line.strip().rstrip(",")
-            if not line.startswith("{"):
-                continue
-            try:
-                r = json.loads(line)
-            except ValueError:
-                continue
-            a = r.get("args") or {}
-            if r.get("name") == "ET":
-                types[a.get("type")] = a.get("description", "")
-            elif r.get("name") == "EH" and a.get("id"):
-                ents[a["id"]] = a.get("type", "")
-            elif r.get("cat") in ("moirai", "PROV") and r.get("ph") in (1, "X"):
-                acts += 1
-                for kind, ids in (a.get("relations") or {}).items():
-                    edges += [(kind, i) for i in (ids if isinstance(ids, list) else [ids])]
+    base = U.TraceViewer(f, idx)
+    cols = set(base.columns)
+    tv = base.phase("any")
+    for r in tv.filter(U.col("name").is_in(["ET", "EH"])).collect().to_dicts():
+        if r.get("name") == "ET":
+            types[r.get("args.type")] = r.get("args.description") or ""
+        elif r.get("args.id"):
+            ents[r["args.id"]] = r.get("args.type") or ""
+    rel = sorted(c for c in cols if c.startswith("args.relations."))
+    q = tv.filter(U.col("cat").is_in(["moirai", "PROV"]) & ~U.col("name").is_in(["ET", "EH", "ER"]))
+    if rel:      # the relation columns are in the index schema: read only what is counted (a small index may not list them: read whole rows)
+        q = q.select([c for c in ("name", "cat", "ph") if c in cols] + rel)
+    for r in q.collect().to_dicts():
+        if str(r.get("ph")) not in ("1", "X"):
+            continue
+        acts += 1
+        for c, x in r.items():
+            if c.startswith("args.relations.") and x not in (None, ""):
+                edges.append((c[len("args.relations."):].partition(".")[0], x))
 made = {ents.get(i) for k, i in edges if k in ("generated", "updated")}
 seen = set(ents.values())
 fails = []
@@ -293,7 +312,7 @@ if [[ ! -x "$MPY" ]]; then
   "$MPY" -m pip install -q --upgrade pip scikit-build-core pybind11
   DFTRACER_WHEEL=1 "$MPY" -m pip install -q "$DFTRACER_SPEC"
   "$MPY" -m pip install -q --no-build-isolation "$MOIRAI_SPEC"
-  [[ -z "$UTILS_SPEC" ]] || "$MPY" -m pip install -q "$UTILS_SPEC"
+  "$MPY" -m pip install -q "${UTILS_SPEC:-dftracer-utils}"      # prov_check.py reads the traces through its TraceViewer
 fi
 if [[ ! -x "$PY" ]]; then
   [[ -n "$APP_SETUP_COMMAND" ]] || { echo "no app venv at $VENV and APP_SETUP_COMMAND is empty: build it as README says" >&2; exit 1; }
@@ -732,6 +751,28 @@ def _metaval(meta, k):
     return str(v) if v not in (None, "") else "not recorded"
 
 
+def trace_manifest(files, workers=16):
+    """{file name: {"bytes", "sha256"}} of trace files, hashed from their bytes in threads (seconds for GBs). What a published run folder's counts
+    were computed from: the same files mean the same records, so the graph does not have to be rebuilt to check them. Bytes only, never
+    decompressed: the records themselves are read only through TraceViewer."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(f):
+        h = hashlib.sha256()
+        with open(f, "rb") as fh:
+            for b in iter(lambda: fh.read(8 << 20), b""):
+                h.update(b)
+        return Path(f).name, {"bytes": Path(f).stat().st_size, "sha256": h.hexdigest()}
+    files = [str(f) for f in files]
+    with ThreadPoolExecutor(max(1, min(workers, len(files) or 1))) as ex:
+        return dict(ex.map(one, files))
+
+
+def manifest_diff(want, have):
+    """Names whose size or hash differ, or that are in one manifest only."""
+    return sorted(k for k in set(want) | set(have) if want.get(k) != have.get(k))
+
+
 def render_run_files(kind, app, ts, s, info, meta):
     """Pure: README.md, run.json and graph_summary.json texts from a graph summary dict (Graph.summary()), file info and metadata. Nothing is typed in: a missing fact reads 'not recorded'."""
     types = {t["type"]: {"role": t.get("role", ""), "description": t.get("description", "")} for t in s.get("types", [])}
@@ -741,7 +782,7 @@ def render_run_files(kind, app, ts, s, info, meta):
            "runtime_s": secs if secs not in (None, "") else "not recorded", "scale": _metaval(meta, "scale"), "input": _metaval(meta, "input"), "timestamp": ts}
     doc = {"app": {"name": app, "source_commit": _metaval(meta, "app_commit")}, "run": run,
            "software": {"dftracer": _metaval(meta, "dftracer"), "moirai": _metaval(meta, "moirai")}, "env": meta.get("env") or {},
-           "captured": {"trace_files": info["files"], "trace_bytes": info["bytes"], "record_counts": {"events_total": s.get("records", 0), "other_events": s.get("other_events", {})},
+           "captured": {"trace_files": info["files"], "trace_bytes": info["bytes"], **({"trace_manifest": info["manifest"]} if info.get("manifest") else {}), "record_counts": {"events_total": s.get("records", 0), "other_events": s.get("other_events", {})},
                         "graph": {"entities": s["entities"], "activities": s["activities"], "edges": s["edges"], "relations": s.get("relations", 0), "dangling_hashes": s["dangling"], "types_described": len([t for t in types.values() if t["description"]])},
                         "entities_by_type": by_type, "entity_relations": rel, "entities_by_store": by_store, "entity_types": types}}
     if "verification" in meta:
@@ -802,7 +843,7 @@ def publish_traces_core(root, app, run_dir, ts, kind, summary, meta, run_sh="", 
         subprocess.run(["cp", "-a", str(rs), str(tmp / "run.sh")], check=True, capture_output=True)
         if kind == "verification" and rec is not None:
             subprocess.run(["cp", "-a", str(rec), str(tmp / "verification.json")], check=True, capture_output=True)
-        info = {"files": len(pf), "bytes": sum(f.stat().st_size for f in pf)}
+        info = {"files": len(pf), "bytes": sum(f.stat().st_size for f in pf), "manifest": trace_manifest(pf)}     # the files the counts came from
         meta = dict(meta)
         if kind == "verification" and rec is not None:
             meta["verification"] = json.loads(rec.read_text())
@@ -942,8 +983,10 @@ def permissions_core(root, script, group, app, stamps=None):
     return {"ok": not bad and all(x["rc"] == 0 for x in results), "ran": results, "exceptions": bad}
 
 
-def publish_checks(src_pkg, root, app, group, counts_of):
-    """Pure (reads only): [(name, ok, detail, fix)] of the published tree. counts_of(raw_dir) -> {'activities','entities','edges',...} comes from the graph tools."""
+def publish_checks(src_pkg, root, app, group, counts_of=None):
+    """Pure (reads only): [(name, ok, detail, fix)] of the published tree. Each run folder's README.md must state run.json's counts, and its traces must be
+    the files those counts were computed from (traces_as_counted: run.json's trace_manifest, size + sha256; a folder published before manifests: file
+    count and bytes). counts_of(raw_dir) -> {'activities','entities','edges',...}: a deep check that also recounts the graph (minutes on a large run)."""
     out = []
     root = Path(root)
     pkg, runs = published_dirs(root, app)
@@ -968,21 +1011,38 @@ def publish_checks(src_pkg, root, app, group, counts_of):
     files += [str(d / "run.sh") for d in runs if (d / "run.sh").is_file()]
     parse = [p for p in files if subprocess.run(["bash", "-n", p], capture_output=True).returncode]
     out.append(("scripts_parse", bool(files) and not parse, f"bash -n fails: {parse}" if parse else "no scripts found", "regenerate the package or the run folder"))
-    incomplete, count_bad = [], []
+    incomplete, count_bad, changed, legacy = [], [], [], []
     for d in runs:
         need = ["README.md", "run.json", "run.sh", "graph_summary.json"]
         lack = [n for n in need if not (d / n).is_file()] + ([] if list((d / "raw").glob("*.pfw.gz")) else ["raw/*.pfw.gz"])
         if lack:
             incomplete.append(f"{d.name}: {lack}")
             continue
-        got = counts_of(str(d / "raw"))
-        g = json.loads((d / "run.json").read_text())["captured"]["graph"]
-        readme = (d / "README.md").read_text()
-        line = f"{got['entities']} entities, {got['activities']} activities, {got['edges']} edges"
-        if (g["entities"], g["activities"], g["edges"]) != (got["entities"], got["activities"], got["edges"]) or line not in readme:
-            count_bad.append(f"{d.name}: run.json {g}, README has {line in readme}, graph tool {got}")
+        cap = json.loads((d / "run.json").read_text())["captured"]
+        g = cap["graph"]
+        line = f"{g['entities']} entities, {g['activities']} activities, {g['edges']} edges"
+        if line not in (d / "README.md").read_text():
+            count_bad.append(f"{d.name}: README.md does not state run.json's counts ({line})")
+        if counts_of:
+            got = counts_of(str(d / "raw"))
+            if (g["entities"], g["activities"], g["edges"]) != (got["entities"], got["activities"], got["edges"]):
+                count_bad.append(f"{d.name}: run.json {g}, graph tool {got}")
+        pub = sorted((d / "raw").glob("*.pfw.gz"))
+        if cap.get("trace_manifest"):
+            diff = manifest_diff(cap["trace_manifest"], trace_manifest(pub))
+            if diff:
+                changed.append(f"{d.name}: {len(diff)} file(s) differ from what was counted: {diff[:4]}")
+        else:
+            nb = sum(p.stat().st_size for p in pub)
+            if (len(pub), nb) != (cap.get("trace_files"), cap.get("trace_bytes")):
+                changed.append(f"{d.name}: {len(pub)} files / {nb} bytes, run.json counted {cap.get('trace_files')} / {cap.get('trace_bytes')}")
+            else:
+                legacy.append(d.name)
     out.append(("run_folders_complete", bool(runs) and not incomplete, "; ".join(incomplete), "repro_publish_traces"))
     out.append(("readme_counts", bool(runs) and not count_bad, "; ".join(count_bad)[:380], "regenerate: the README/run.json must come from graph tool counts"))
+    out.append(("traces_as_counted", bool(runs) and not changed and not incomplete,
+                "; ".join(changed)[:380] or (f"published before trace manifests, so checked by file count and bytes: {legacy} (deep=true recounts the graph)" if legacy else ""),
+                "the published traces changed after they were counted: publish the run again into a new folder (repro_publish_traces)"))
     unindexed = [d.name for d in runs if not (d / "raw" / ".dftindex" / "CURRENT").is_file()]
     out.append(("indexed", bool(runs) and not unindexed, f"no raw/.dftindex in {unindexed}", "repro_publish_index(publish_root, app)"))
     vrec, vdetail = False, "no verification folder with verification.json"
@@ -1143,6 +1203,11 @@ def publish_selftest():
         cases["validate_catches_changed_package"] = not changed["package_equals_source"] and not changed["verification_record"]
         (tdir / "README.md").write_text("no counts here\n")
         cases["validate_catches_readme_counts"] = not {n: ok for n, ok, _, _ in publish_checks(src, root, "demo", fake_group, counts_of)}["readme_counts"]
+        cases["run_json_has_trace_manifest"] = bool(json.loads((tdir / "run.json").read_text())["captured"].get("trace_manifest"))
+        cases["fast_check_needs_no_recount"] = {n: ok for n, ok, _, _ in publish_checks(src, root, "demo", fake_group)}.get("traces_as_counted") is True
+        tf = sorted((tdir / "raw").glob("*.pfw.gz"))[0]
+        tf.write_bytes(tf.read_bytes() + b"x")
+        cases["validate_catches_changed_trace"] = {n: ok for n, ok, _, _ in publish_checks(src, root, "demo", fake_group)}.get("traces_as_counted") is False
         cases["cfg_values_expand"] = cfg_values(src / "config.ini", {"HOME": "/h"})["OUTPUT_ROOT"] == "/h/demo/demo"
         cases["flux_id_found"] = _find_flux_id("x\n[10:00:00] 04_run.sh: batch job f3babTaxk3eF (smoke, 28 min, queue pdebug)\n") == "f3babTaxk3eF"
     bad = [k for k, v in cases.items() if not v]
@@ -1241,8 +1306,175 @@ def check_selftest():
     return {"status": "ok" if all(cases.values()) else "error", "line": line, "cases": cases}
 
 
+# ------------------------------------------------------------------ verification never lives on home (quota): lustre or the workspace only
+LUSTRE_BASE = "/p/lustre5"
+HOME_FS = "/g"
+
+
+def _on_home(path, home=None):
+    """Pure: True when path is the user's home (os.path.expanduser('~'), or the given home) or anywhere under it, or under the home file system (/g/, 24 GB quota)."""
+    h = os.path.realpath(home if home is not None else os.path.expanduser("~"))
+    p = os.path.realpath(os.path.expandvars(os.path.expanduser(str(path))))
+    if p == HOME_FS or p.startswith(HOME_FS + "/"):
+        return True
+    return h not in ("", "/") and (p == h or p.startswith(h + os.sep))
+
+
+def _cfg_on_home(text, home=None):
+    """Pure: True when a config.ini value (still holding ${HOME}) is under home."""
+    h = home if home is not None else os.path.expanduser("~")
+    t = str(text)
+    if t.startswith(("${HOME}", "~", "$HOME")):
+        return True
+    return _on_home(t.replace("${HOME}", h), home)
+
+
+def default_build_root(ws_root, lustre_base=LUSTRE_BASE, home=None):
+    """Pure: (output_root, error) default of repro_build, portable (${USER} and ${APP} stay variables, never a literal name): <lustre_base>/${USER}/moirai_repro/${APP} when the
+    build machine has lustre_base, else <ws_root>/moirai_repro/${APP} (ws_root = the workspace that holds the sessions). error when that is under home."""
+    if os.path.isdir(lustre_base):
+        return f"{lustre_base}/${{USER}}/moirai_repro/${{APP}}", ""
+    p = str(Path(ws_root) / "moirai_repro" / "${APP}")
+    if _on_home(p, home):
+        return "", f"no {lustre_base} here and the workspace {ws_root} is on home: pass output_root on a big file system (never home)"
+    return p, ""
+
+
+def default_verify_root(app, ws_parent, user=None, lustre_base=LUSTRE_BASE):
+    """Pure: where an in-place verification writes by default: <lustre_base>/<user>/moirai_repro/<app> when that user folder exists and is writable, else
+    <ws_parent>/verification/<app> (ws_parent = the workspace folder above the session, outside the published package)."""
+    user = user if user is not None else os.environ.get("USER", "")
+    app = re.sub(r"[^\w.-]", "_", app or "app")
+    lus = Path(lustre_base) / user if user else None
+    if lus is not None and lus.is_dir() and os.access(lus, os.W_OK):
+        return str(lus / "moirai_repro" / app)
+    return str(Path(ws_parent) / "verification" / app)
+
+
+def resolve_verify_root(explicit, cfg_root, app, ws_parent, home=None, lustre_base=LUSTRE_BASE, user=None):
+    """Pure: the OUTPUT_ROOT of an in-place verification. An explicit output_root wins but is refused on home. Else the package's own resolved OUTPUT_ROOT (cfg_root) is used only when
+    it is not under home (or /g/); otherwise it is overridden by default_verify_root. Returns {root, override (True when the env must carry OUTPUT_ROOT), source, error}."""
+    if explicit:
+        root = os.path.expandvars(os.path.expanduser(explicit))
+        if "$" in root or not os.path.isabs(root):
+            return {"root": "", "override": False, "source": "argument", "error": f"output_root {explicit!r} is not an absolute path after expanding ~ and variables"}
+        root = os.path.realpath(root)
+        if _on_home(root, home):
+            return {"root": "", "override": False, "source": "argument", "error": f"output_root {root} is on home: verification never runs on home (quota); give a path on lustre ({lustre_base}/<user>/...) or in the workspace"}
+        return {"root": root, "override": True, "source": "argument", "error": ""}
+    if cfg_root and "${" not in cfg_root and not _on_home(cfg_root, home):
+        return {"root": cfg_root, "override": False, "source": "config.ini", "error": ""}
+    root = default_verify_root(app, ws_parent, user, lustre_base)
+    if _on_home(root, home):
+        return {"root": "", "override": False, "source": "default", "error": f"the default verification root {root} is on home: pass output_root on lustre or in the workspace"}
+    return {"root": root, "override": True, "source": "default", "error": ""}
+
+
+def _df(path):
+    """The file system of path from `df -P` (nearest existing parent): 'device mounted on X, N KiB available, P used'; 'df unavailable' when df fails."""
+    probe = Path(path)
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    try:
+        r = subprocess.run(["df", "-P", str(probe)], capture_output=True, text=True, timeout=30)
+        f = r.stdout.strip().splitlines()[-1].split()
+        return f"{f[0]} mounted on {f[-1]}, {f[3]} KiB available, {f[4]} used"
+    except (OSError, IndexError, subprocess.TimeoutExpired):
+        return "df unavailable"
+
+
+def _write_error(path, e):
+    """The one-line error of a failed write: the path, the errno, the file system (df) and the fix."""
+    return (f"cannot write {path}: [Errno {getattr(e, 'errno', None)}] {getattr(e, 'strerror', None) or e}; file system: {_df(Path(path).parent)}; "
+            "fix: repro_verify(in_place=<package>, output_root=<a folder on lustre, /p/lustre5/$USER/moirai_repro/<app>, or in the workspace>); verification never runs on home")
+
+
+def _write_record(target, rec):
+    """Write the record (already built in memory) to target, creating its folder (mkdir -p). Returns {status: ok, record} or {status: error, error, fix, record_in_memory} instead of a traceback on OSError."""
+    text = json.dumps(rec, indent=2)
+    try:
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_text(text)
+    except OSError as e:
+        return {"status": "error", "error": _write_error(target, e), "fix": "give output_root on lustre or in the workspace, then repro_verify again",
+                "record_in_memory": {k: rec.get(k) for k in ("ok", "job", "scale", "counts", "expected", "failures", "package_unchanged")}}
+    return {"status": "ok", "record": str(target)}
+
+
+def _outputs_gone(out, scale, rc):
+    """Pure (reads only): '' when the finished run's outputs are there, else why they are not: the output folder was removed, or a job that ended rc 0 left neither run.json nor work/<scale>."""
+    out = Path(out)
+    if not out.is_dir():
+        return f"the output folder {out} is gone (removed after the run, e.g. to free quota)"
+    if rc == 0 and not (out / "run.json").exists() and not (out / "work" / scale).exists():
+        return f"run.json and work/{scale} are gone from {out} (removed after the run)"
+    return ""
+
+
+def home_selftest():
+    """Sandbox: the verification root never lies on home, the build default is portable and off home, a failed write is an error result naming the path and df, and removed outputs read outputs_gone."""
+    cases = {}
+    fake_home = "/home-fake/tester"
+    g_path = HOME_FS + "/g92/x"
+    lus_user_path = LUSTRE_BASE + "/u/x"
+    lus_cfg = LUSTRE_BASE + "/u/app"
+    with tempfile.TemporaryDirectory(prefix="repro_home_selftest_") as td:
+        td = Path(td).resolve()
+        lus, ws = td / "lustre", td / "ws"
+        (lus / "tester").mkdir(parents=True)
+        ws.mkdir()
+        r = default_verify_root("app", str(ws), user="tester", lustre_base=str(lus))
+        cases["default_on_lustre_not_home"] = r == str(lus / "tester" / "moirai_repro" / "app") and not _on_home(r, fake_home) and not _on_home(r)
+        r2 = default_verify_root("app", str(ws), user="nobody_zz", lustre_base=str(lus))
+        cases["default_falls_back_to_workspace"] = r2 == str(ws / "verification" / "app") and not _on_home(r2, fake_home)
+        cases["real_default_not_home"] = not _on_home(default_verify_root("app", str(ws)))
+        cases["on_home_detects"] = _on_home(fake_home + "/x", fake_home) and _on_home(fake_home, fake_home) and _on_home(g_path, fake_home) and not _on_home(lus_user_path, fake_home)
+        cfg_home = fake_home + "/moirai_repro/app"
+        rv = resolve_verify_root("", cfg_home, "app", str(ws), fake_home, str(lus), "tester")
+        cases["home_config_root_is_overridden"] = rv["override"] and rv["root"] == r and not rv["error"] and not _on_home(rv["root"], fake_home)
+        rv = resolve_verify_root("", lus_cfg, "app", str(ws), fake_home, str(lus), "tester")
+        cases["lustre_config_root_kept"] = not rv["override"] and rv["root"] == lus_cfg
+        rv = resolve_verify_root("", "", "app", str(ws), fake_home, str(td / "nolustre"), "tester")
+        cases["unresolved_config_gets_workspace_default"] = rv["override"] and rv["root"] == str(ws / "verification" / "app")
+        cases["explicit_home_refused"] = bool(resolve_verify_root(fake_home + "/v", "", "app", str(ws), fake_home, str(lus), "tester")["error"]) and bool(resolve_verify_root(g_path, "", "app", str(ws), fake_home)["error"])
+        rv = resolve_verify_root(str(td / "elsewhere"), cfg_home, "app", str(ws), fake_home, str(lus), "tester")
+        cases["explicit_wins"] = rv["override"] and rv["root"] == str(td / "elsewhere") and rv["source"] == "argument"
+        cases["explicit_relative_refused"] = bool(resolve_verify_root("rel/path", "", "app", str(ws), fake_home)["error"])
+        # the sandbox may sit under a path that holds the user name (/var/tmp/<user>/...), which _site rewrites to ${USER}: the value is compared with the sandbox lustre path,
+        # the config render on a fixed portable root, so neither depends on where the sandbox is
+        b, err = default_build_root(str(ws), str(lus), fake_home)
+        portable = LUSTRE_BASE + "/${USER}/moirai_repro/${APP}"
+        cfg, _ = _batch_cfg("app", portable, "", "", {}, "")
+        cases["build_default_lustre_portable"] = (b == f"{lus}/${{USER}}/moirai_repro/${{APP}}" and not err and not _on_home(str(lus), fake_home) and "${USER}" in b and "${APP}" in b
+                                                  and f"OUTPUT_ROOT={portable}" in cfg and not _LITERAL.search(cfg))
+        b2, err2 = default_build_root(str(ws), str(td / "nolustre"), fake_home)
+        cases["build_default_workspace_fallback"] = b2 == str(ws / "moirai_repro" / "${APP}") and not err2
+        b3, err3 = default_build_root(fake_home + "/ws", str(td / "nolustre"), fake_home)
+        cases["build_default_never_home"] = b3 == "" and bool(err3)
+        cases["cfg_on_home"] = _cfg_on_home("${HOME}/moirai_repro/${APP}", fake_home) and not _cfg_on_home(LUSTRE_BASE + "/${USER}/moirai_repro/${APP}", fake_home)
+        rec = {"ok": True, "job": "j", "scale": "smoke", "counts": {}, "expected": {}, "failures": [], "package_unchanged": True}
+        good = _write_record(td / "gone_dir" / "verification.json", rec)
+        cases["record_written_creating_folder"] = good["status"] == "ok" and json.loads((td / "gone_dir" / "verification.json").read_text())["ok"] is True
+        blocker = td / "afile"
+        blocker.write_text("x")
+        bad = _write_record(blocker / "verification.json", rec)
+        cases["record_oserror_is_error_result"] = bad["status"] == "error" and str(blocker / "verification.json") in bad["error"] and "file system:" in bad["error"] and "output_root" in bad["error"] and bad["record_in_memory"]["ok"] is True
+        q = _write_error(td / "v.json", OSError(122, "Disk quota exceeded"))
+        cases["quota_error_names_path_and_fix"] = "Disk quota exceeded" in q and str(td / "v.json") in q and "lustre" in q and "never runs on home" in q
+        out = td / "old_out"
+        cases["outputs_gone_folder_missing"] = "gone" in _outputs_gone(out, "smoke", 0)
+        out.mkdir()
+        cases["outputs_gone_run_and_work_missing"] = "run.json" in _outputs_gone(out, "smoke", 0) and _outputs_gone(out, "smoke", 1) == ""
+        (out / "work" / "smoke").mkdir(parents=True)
+        cases["outputs_present_not_gone"] = _outputs_gone(out, "smoke", 0) == ""
+    line = "repro home selftest PASS " + " ".join(f"{k}=ok" for k in cases) if all(cases.values()) else "repro home selftest FAIL " + ",".join(k for k, v in cases.items() if not v)
+    return {"status": "ok" if all(cases.values()) else "error", "line": line, "cases": cases}
+
+
 def _verification_record(pipeline):
-    """Write <OUTPUT_ROOT>/verification.json once the in-place job has finished. Returns {status, ...}; status 'running' while it runs."""
+    """Write <OUTPUT_ROOT>/verification.json once the in-place job has finished. Returns {status, ...}; status 'running' while it runs; 'outputs_gone' when the run's output folder (run.json,
+    work/<scale>) was removed since: repro_verify then starts a fresh batch. The record is built in memory first and its folder created (mkdir -p); an OSError on the write (a full file
+    system: quota) returns status error naming the path, the file system (df) and the fix, never a traceback."""
     c = P.load(pipeline)
     o = P.stage(c, STAGE)["outputs"]
     vf = o.get("verify") or {}
@@ -1252,6 +1484,10 @@ def _verification_record(pipeline):
     if j["status"] == "running":
         return {"status": "running"}
     out, pkg = Path(vf["output_root"]), Path(vf["in_place"])
+    gone = _outputs_gone(out, vf["scale"], j["rc"])
+    if gone:
+        return {"status": "outputs_gone", "error": gone, "job": vf["job"], "output_root": str(out),
+                "fix": "repro_verify(in_place=<package>) again: it starts a fresh batch on lustre or in the workspace (output_root=... to choose), never on home"}
     run = out / "run.json"
     rj = json.loads(run.read_text()) if run.exists() else {}
     flux = _find_flux_id(j.get("log_tail", ""))
@@ -1271,20 +1507,24 @@ def _verification_record(pipeline):
            "ok": run_ok and j["rc"] == 0, "overrides": vf.get("overrides", {}), "not_exercised": vf.get("not_exercised", []), "package_hashes_before": vf.get("hashes_before"),
            "package_hashes": now, "package_unchanged": now == vf.get("hashes_before"), "login_shell": "env -i bash -l"}
     rec["ok"] = rec["ok"] and rec["package_unchanged"]
-    (out / "verification.json").write_text(json.dumps(rec, indent=2))
+    w = _write_record(out / "verification.json", rec)
+    if w["status"] != "ok":
+        return w
     P.record(pipeline, STAGE, outputs={"verify": {**vf, "record": str(out / "verification.json"), "job_start": rec["job_start"], "flux_job": flux, "ok": rec["ok"]}}, note="in-place verification record written")
     return {"status": "ok", "record": str(out / "verification.json"), **{k: rec[k] for k in ("job_start", "ok", "counts", "expected", "package_unchanged", "flux_job")}}
 
 
 def register(mcp):
     @mcp.tool()
-    def repro_build(pipeline: str, output_root: str = "${HOME}/moirai_repro/${APP}", mode: str = "") -> dict:
+    def repro_build(pipeline: str, output_root: str = "", mode: str = "") -> dict:
         """Generate final_provenance/ in the session: config.ini, scripts, the provenance patch, the spec, pinned versions and a standalone checker. Use after the graph stage, or again after
-        a fix: it starts over. output_root: where a reader's run writes; keep ${USER} or ${HOME}, never a literal name. mode: '' detects it (batch when the moirai_smoke or baseline stage ran a
+        a fix: it starts over. output_root: where a reader's run writes; keep ${USER} or ${HOME}, never a literal name. Default '' is /p/lustre5/${USER}/moirai_repro/${APP} when the build
+        machine has /p/lustre5, else <workspace>/moirai_repro/${APP}: never under home (a home quota fills up and verification fails writing verification.json); an explicit output_root under home is
+        accepted for the reader but warned about, and repro_verify never runs on it. mode: '' detects it (batch when the moirai_smoke or baseline stage ran a
         generated flux batch run.sh: its outputs hold batch_script or submit_command), 'batch' or 'generic' forces it. Batch mode writes a per-chunk wrapper template, a run.sh generator call, a
         flux batch with a wait and failure checks, and never starts a service on the login node. inputs/expected.json holds, for the smoke and baseline traces, the activity, entity and edge
         counts and the sorted entity types (from the trace reader); the checker requires equal activities and every type, and counts entities and edges only when the run captures no inputs or attributes.
-        Returns {status, package, mode, files, source, pins, warnings}."""
+        Returns {status, package, mode, files, source, pins, warnings, output_root}."""
         c = P.load(pipeline)
         integ, ann, base = P.stage(c, "integrate")["outputs"], P.stage(c, "annotate")["outputs"], P.stage(c, "baseline")["outputs"]
         smoke_run = P.stage(c, "moirai_smoke")["outputs"]
@@ -1293,11 +1533,17 @@ def register(mcp):
         if mode not in ("", "auto", "batch", "generic"):
             return {"status": "error", "error": "mode is batch, generic or empty"}
         batch = mode == "batch" or (mode in ("", "auto") and _is_batch(smoke_run, base))
+        warnings = []
+        if not output_root:
+            output_root, why = default_build_root(str(P.work(c).parent.parent))
+            if why:
+                return {"status": "error", "error": why}
+        elif _cfg_on_home(output_root):
+            warnings.append(f"output_root {output_root} is under home: repro_verify runs on lustre or in the workspace instead (home quota); prefer /p/lustre5/${{USER}}/moirai_repro/${{APP}}")
         pkg, src, dst = _dir(c), Path(P.source_of(c)), Path(ann["annotated"])
         shutil.rmtree(pkg, ignore_errors=True)
         for d in ("scripts", "patches", "inputs"):
             (pkg / d).mkdir(parents=True)
-        warnings = []
         (pkg / "patches" / "provenance.patch").write_text(_patch(src, dst, list(ann["files"]) + (["_moirai_prov.py"] if (dst / "_moirai_prov.py").exists() else [])))
         (pkg / "inputs" / "spec.json").write_text(json.dumps(ann["spec"], indent=1))
         expected = {"smoke": ref_expected(T.read(smoke_run["traces"]))}
@@ -1395,7 +1641,7 @@ $EDITOR config.ini            # the only file with site values
 bash scripts/run_all.sh       # SCALE=baseline for the full run
 ```
 
-`scripts/run_all.sh` runs the numbered scripts in order, and each can be run alone. The result is judged by `scripts/prov_check.py`, which needs only Python, and written to `$OUTPUT_ROOT/run.json`.
+`scripts/run_all.sh` runs the numbered scripts in order, and each can be run alone. The result is judged by `scripts/prov_check.py`, which reads the traces through dftracer-utils' TraceViewer (in the moirai venv), and written to `$OUTPUT_ROOT/run.json`.
 The number of activities and the entity types must match `inputs/expected.json`; when the run captures inputs and attributes the entity and edge counts depend on the run and are only reported.
 
 | Script | Does |
@@ -1411,20 +1657,24 @@ The number of activities and the entity types must match `inputs/expected.json`;
         files = sorted(str(f.relative_to(pkg)) for f in pkg.rglob("*") if f.is_file())
         P.record(pipeline, STAGE, status="running", outputs={"package": str(pkg), "mode": "batch" if batch else "generic", "files": len(files), "pins": pins, "warnings": warnings, "verified": None,
                                                              "summary": f"{len(files)} files in final_provenance ({'batch' if batch else 'generic'} mode)"}, note="package built")
-        return {"status": "ok", "package": str(pkg), "mode": "batch" if batch else "generic", "files": files, "source": url or "bundled", "pins": pins, "warnings": warnings}
+        return {"status": "ok", "package": str(pkg), "mode": "batch" if batch else "generic", "files": files, "source": url or "bundled", "pins": pins, "warnings": warnings, "output_root": output_root}
 
     @mcp.tool()
-    def repro_verify(pipeline: str, isolation_root: str = "", scale: str = "smoke", reuse_venv: str = "", limit: int = 3600, wait: int = 300, moirai_venv: str = "", in_place: str = "") -> dict:
+    def repro_verify(pipeline: str, isolation_root: str = "", scale: str = "smoke", reuse_venv: str = "", limit: int = 3600, wait: int = 300, moirai_venv: str = "", in_place: str = "", output_root: str = "") -> dict:
         """Prove the package works: run it in a clean login shell, with nothing inherited (env -i, bash -l). Use after repro_build (copy mode) or after repro_publish_package (in_place).
-        Copy mode: isolation_root, a parent folder outside the session on a file system compute nodes can see; the package is copied to a new folder there. In-place mode (in_place = the
+        VERIFICATION NEVER RUNS ON HOME (quota: Errno 122 Disk quota exceeded writing verification.json): lustre or the workspace only.
+        Copy mode: isolation_root, a parent folder outside the session on a file system compute nodes can see and NOT under home (refused); the package is copied to a new folder there. In-place mode (in_place = the
         published package folder, e.g. <publish_root>/provenance-repro/<app>): the package is run AS IT IS, no copy; only HOME, USER, TERM and SCALE are passed, plus the venv/limit overrides
-        you give (they are written into the record). Its trace output goes to the package's own OUTPUT_ROOT (config.ini). When the job has finished a verification record
+        you give (they are written into the record). Its trace output goes to OUTPUT_ROOT: the package's config.ini value when that is not under home (or /g/); when it is under home the run's OUTPUT_ROOT is
+        overridden through the env the config reads to /p/lustre5/$USER/moirai_repro/<app> (when /p/lustre5/$USER exists and is writable), else <workspace>/verification/<app> (outside the published folder), and the
+        override is written into the record's overrides. output_root (in-place only, default ''): an absolute path that wins over that default; refused when under home. When the job has finished a verification record
         <OUTPUT_ROOT>/verification.json is written (job ids, scale, seconds, counts vs expected.json, exit codes, the package's file hashes before and after, whether unchanged); its ok means no
-        failures, and entity/edge count differences are never failures when expected.json shows the run captures inputs or attributes (activities, entity types and dangling ids decide). Call again
-        with the same in_place after a timeout to complete the record. scale: smoke or baseline. reuse_venv: a venv to reuse instead of building one (batch mode: the app's own venv).
+        failures, and entity/edge count differences are never failures when expected.json shows the run captures inputs or attributes (activities, entity types and dangling ids decide). A failed write
+        (full file system) returns status error naming the path, the file system (df) and the fix. Calling again with the same in_place after a timeout completes the record; when the earlier run's
+        OUTPUT_ROOT was removed meanwhile (record status outputs_gone) a fresh batch is started instead of waiting for the old job. scale: smoke or baseline. reuse_venv: a venv to reuse instead of building one (batch mode: the app's own venv).
         moirai_venv: batch mode only, the moirai venv to reuse (needed with reuse_venv). limit: seconds for the whole run; in batch mode the flux batch time limit is derived from it.
         wait: seconds to wait now; the run goes on in the background (a batch run takes ~8 min) and repro_validate judges it later. Batch mode never starts a service on the login node.
-        Returns {status, job, iso_dir or in_place, mode, not_exercised, log_tail, record (in_place)}."""
+        Returns {status, job, iso_dir or in_place, output_root, root_source, mode, not_exercised, log_tail, record (in_place)}."""
         c = P.load(pipeline)
         o = P.stage(c, STAGE)["outputs"]
         if scale not in ("smoke", "baseline"):
@@ -1432,7 +1682,7 @@ The number of activities and the entity types must match `inputs/expected.json`;
         if in_place:
             pk = Path(in_place).resolve()
             prev = o.get("verify") or {}
-            if prev.get("in_place") == str(pk) and prev.get("scale") == scale and not prev.get("record"):
+            if prev.get("in_place") == str(pk) and prev.get("scale") == scale and not prev.get("record") and prev.get("output_root") and Path(prev["output_root"]).is_dir():
                 r = J.wait(pipeline, prev["job"], wait)
                 return {"status": r["status"], "job": prev["job"], "in_place": str(pk), "record": _verification_record(pipeline)}
             if not (pk / "config.ini").is_file() or not (pk / "scripts" / "run_all.sh").is_file():
@@ -1453,18 +1703,27 @@ The number of activities and the entity types must match `inputs/expected.json`;
                     overrides["MOIRAI_VENV"] = moirai_venv
                 overrides[f"LIMIT_MIN_{scale}"] = str(max(1, int(limit) // 60 - 2))
             env.update(overrides)
-            out_root = cfg_values(pk / "config.ini", dict(env)).get("OUTPUT_ROOT", "")
-            if not out_root or "${" in out_root:
-                return {"status": "error", "error": f"cannot resolve OUTPUT_ROOT from config.ini: {out_root!r}"}
-            (Path(out_root) / "verification.json").unlink(missing_ok=True)
+            cv = cfg_values(pk / "config.ini", dict(env))
+            rv = resolve_verify_root(output_root, cv.get("OUTPUT_ROOT", ""), cv.get("APP") or pk.name, str(P.work(c).parent.parent), user=env.get("USER", ""))
+            if rv["error"]:
+                return {"status": "error", "error": rv["error"]}
+            out_root = rv["root"]
+            if rv["override"]:
+                overrides["OUTPUT_ROOT"] = out_root
+                env["OUTPUT_ROOT"] = out_root
+            try:
+                Path(out_root).mkdir(parents=True, exist_ok=True)
+                (Path(out_root) / "verification.json").unlink(missing_ok=True)
+            except OSError as e:
+                return {"status": "error", "error": _write_error(Path(out_root) / "verification.json", e)}
             hashes = tree_hashes(pk)
             cmd = f"cd {shlex.quote(str(pk))} && bash scripts/run_all.sh"
             args = " ".join(shlex.quote(f"{k}={v}") for k, v in env.items())
             j = J.start(pipeline, STAGE, "in-place-verify", f"env -i {args} bash -lc {shlex.quote(cmd)}\n", str(pk.parent), limit=limit)
-            P.record(pipeline, STAGE, outputs={"verify": {"job": j["id"], "in_place": str(pk), "output_root": out_root, "scale": scale, "mode": "batch" if batch else "generic",
-                                                           "overrides": overrides, "not_exercised": not_exercised, "hashes_before": hashes}}, note=f"in-place run of {scale} from {pk}")
+            P.record(pipeline, STAGE, outputs={"verify": {"job": j["id"], "in_place": str(pk), "output_root": out_root, "root_source": rv["source"], "scale": scale, "mode": "batch" if batch else "generic",
+                                                           "overrides": overrides, "not_exercised": not_exercised, "hashes_before": hashes}}, note=f"in-place run of {scale} from {pk} on {out_root} ({rv['source']})")
             r = J.wait(pipeline, j["id"], wait)
-            return {"status": r["status"], "job": j["id"], "rc": r["rc"], "in_place": str(pk), "output_root": out_root, "mode": "batch" if batch else "generic", "not_exercised": not_exercised,
+            return {"status": r["status"], "job": j["id"], "rc": r["rc"], "in_place": str(pk), "output_root": out_root, "root_source": rv["source"], "mode": "batch" if batch else "generic", "not_exercised": not_exercised,
                     "log_tail": r.get("log_tail", "")[-2500:], "record": _verification_record(pipeline)}
         if not o.get("package"):
             return {"status": "error", "error": "run repro_build first"}
@@ -1476,8 +1735,13 @@ The number of activities and the entity types must match `inputs/expected.json`;
         root = Path(os.path.expanduser(isolation_root)).resolve()
         if str(root).startswith(str(P.work(c).parent.resolve()) + os.sep):
             return {"status": "error", "error": "isolation_root must be outside the session workspace"}
+        if _on_home(root):
+            return {"status": "error", "error": f"isolation_root {root} is on home: verification never runs on home (quota); give a path on lustre (/p/lustre5/<user>/...) or outside the session in the workspace"}
         iso = root / f"isolation_{time.strftime('%Y%m%d_%H%M%S')}"
-        iso.mkdir(parents=True)
+        try:
+            iso.mkdir(parents=True)
+        except OSError as e:
+            return {"status": "error", "error": _write_error(iso, e)}
         shutil.copytree(o["package"], iso / "pkg", symlinks=True)
         env = {k: os.environ[k] for k in ("HOME", "USER") if k in os.environ}
         env.update(TERM="dumb", OUTPUT_ROOT=str(iso / "out"), SCALE=scale)
@@ -1531,7 +1795,7 @@ The number of activities and the entity types must match `inputs/expected.json`;
             note = f"; NOT exercised: {', '.join(vf['not_exercised'])}" if vf.get("not_exercised") else ""
             P.record(pipeline, STAGE, outputs={"summary": f"reproduced in a clean shell ({vf.get('scale')}): {json.loads(run.read_text())['counts']}{note}"})
         if o.get("publish_root"):
-            for name, ok, detail, fix in publish_checks(o["package"], o["publish_root"], o.get("publish_app", ""), "moirai", lambda d: T.read(d).counts()):
+            for name, ok, detail, fix in publish_checks(o["package"], o["publish_root"], o.get("publish_app", ""), "moirai"):
                 v.check("published_" + name, ok, detail, fix)
         return P.finish_validation(pipeline, v)
 
@@ -1548,6 +1812,15 @@ The number of activities and the entity types must match `inputs/expected.json`;
         with other types, keeps the exact count comparison; expected.json types come from the trace reader; the verification record keeps ok = no failures and drops entity/edge count differences
         when the run captures inputs or attributes. Use after any change to the checker or expected.json. Returns {status, line, cases}: line is 'repro check selftest PASS ...' or 'FAIL <cases>'."""
         return check_selftest()
+
+    @mcp.tool()
+    def repro_home_selftest() -> dict:
+        """Unit check that verification never lives on home, no cluster: resolves the default verification root (lustre when /p/lustre5/<user> is writable, else <workspace>/verification/<app>)
+        and asserts it is not under the home directory or /g/; a package OUTPUT_ROOT under home is overridden, an explicit output_root wins and is refused on home; repro_build's default
+        output_root is portable (keeps ${USER} and ${APP}), off home and passes the config render; a failed record write (full file system, simulated Errno 122 and a real OSError) returns
+        status error naming the path, the file system (df) and the fix; the record's folder is created (mkdir -p); removed outputs of an earlier run read outputs_gone. Use after any change to repro_verify,
+        repro_build or the verification record. Returns {status, line, cases}: line is 'repro home selftest PASS ...' or 'FAIL <cases>'."""
+        return home_selftest()
 
     @mcp.tool()
     def repro_publish_selftest() -> dict:
@@ -1683,9 +1956,10 @@ The number of activities and the entity types must match `inputs/expected.json`;
         return {"status": "ok", **r, "counts": g.counts()}
 
     @mcp.tool()
-    def repro_publish_data_validate(pipeline: str) -> dict:
+    def repro_publish_data_validate(pipeline: str, deep: bool = False) -> dict:
         """Validator of a live run's publish_data stage: the run's traces were published (repro_publish_traces on the live pipeline), the published folder holds every raw trace
-        file, run.sh, README.md and run.json, and the published traces read to the same counts as the run's own. Use after repro_publish_traces on a live pipeline, before its gate.
+        file, run.sh, README.md and run.json, and the published trace files are byte for byte the run's own (size + sha256: seconds; deep=true also recounts both
+        graphs, minutes on a large run). Use after repro_publish_traces on a live pipeline, before its gate.
         Returns the verdict {status, failed, unknown, passed, total}."""
         c = P.load(pipeline)
         if c["kind"] != "live":
@@ -1698,9 +1972,13 @@ The number of activities and the entity types must match `inputs/expected.json`;
             pub = sorted((tgt / "raw").glob("*.pfw.gz"))
             v.check("all_files", len(pub) == len([f for f in src if f.endswith(".pfw.gz")]), f"{len(pub)} published vs {len(src)} in the run", "publish again into a new folder: a file was added after publishing, or the copy failed")
             v.check("run_files", all((tgt / n).is_file() for n in ("run.sh", "README.md", "run.json")), "run.sh, README.md or run.json missing", "repro_publish_traces writes them: publish again")
-            a, b = T.read(str(tgt / "raw")).counts(), T.read(lo["traces"]).counts()
-            keys = ("entities", "activities", "edges", "relations")
-            v.check("same_counts", all(a[k] == b[k] for k in keys), f"published {[a[k] for k in keys]} vs run {[b[k] for k in keys]} ({', '.join(keys)})", "the run was still writing when it was published: publish after it ends")
+            srcd = Path(lo["traces"])
+            diff = manifest_diff(trace_manifest(sorted(srcd.glob("*.pfw.gz")) if srcd.is_dir() else [f for f in src if f.endswith(".pfw.gz")]), trace_manifest(pub))
+            v.check("same_traces", not diff, f"{len(diff)} file(s) differ between the run and the published copy: {diff[:4]}", "the run was still writing when it was published: publish after it ends")
+            if deep:
+                a, b = T.read(str(tgt / "raw")).counts(), T.read(lo["traces"]).counts()
+                keys = ("entities", "activities", "edges", "relations")
+                v.check("same_counts", all(a[k] == b[k] for k in keys), f"published {[a[k] for k in keys]} vs run {[b[k] for k in keys]} ({', '.join(keys)})", "the run was still writing when it was published: publish after it ends")
             v.check("indexed", (tgt / "raw" / ".dftindex" / "CURRENT").is_file(), f"no index in {tgt / 'raw'}", "repro_publish_index(publish_root, app, timestamps=<its timestamp>)")
         return P.finish_validation(pipeline, v)
 
@@ -1729,13 +2007,14 @@ The number of activities and the entity types must match `inputs/expected.json`;
         return {"status": "ok" if not bad else "error", "indexed": len(runs) - len(bad), "failed": len(bad), "runs": runs}
 
     @mcp.tool()
-    def repro_publish_validate(pipeline: str, publish_root: str, app: str = "elmerfold", group: str = "moirai") -> dict:
+    def repro_publish_validate(pipeline: str, publish_root: str, app: str = "elmerfold", group: str = "moirai", deep: bool = False) -> dict:
         """Validator of the published tree: the package and run folders are complete; the package copy equals final_provenance; the package is portable and its scripts (and each run.sh) parse
-        (bash -n); each run folder's README.md and run.json counts equal the graph tool's counts of its raw traces; a verification record exists, ran in place, passed, and its package hashes equal
+        (bash -n); each run folder's README.md states its run.json counts and its traces are the files those counts came from (run.json's size + sha256
+        manifest: seconds, no graph rebuild; deep=true also recounts the whole graph, minutes on a large run); a verification record exists, ran in place, passed, and its package hashes equal
         the published files; permissions are as set by chgperm (group, setgid, g=u, no other). Use after repro_publish_permissions. Returns the verdict {status, failed, unknown, passed, total}."""
         c = P.load(pipeline)
         o = P.stage(c, STAGE)["outputs"]
         v = P.Verdict(STAGE)
-        for name, ok, detail, fix in publish_checks(o.get("package"), publish_root, app, group, lambda d: T.read(d).counts()):
+        for name, ok, detail, fix in publish_checks(o.get("package"), publish_root, app, group, (lambda d: T.read(d).counts()) if deep else None):
             v.check(name, ok, detail, fix)
         return P.finish_validation(pipeline, v)
