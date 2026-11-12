@@ -1,0 +1,12 @@
+{
+ "description": "Reads provenance traces through TraceViewer and checks the reader.",
+ "level": "level_1",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "prov_read"
+ ],
+ "permission_mode": "plan",
+ "instructions": "Use prov_read_files and prov_read_counts; run prov_read_selftest after a dftracer-utils upgrade."
+}

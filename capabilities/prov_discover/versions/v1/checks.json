@@ -1,0 +1,1 @@
+[{"tool":"discover_cases","args":{"query":"simulation"},"expect":{"contains":"cases"}},{"tool":"discover_validate","args":{"pipeline":"nope-1"},"expect":{"raises":true}}]

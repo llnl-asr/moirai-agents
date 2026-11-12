@@ -73,10 +73,16 @@ def register(mcp):
         the directory or glob the user gave). A run pipeline gets a dftracer session, which holds all its work; a live run shares its parent's. ref: git ref of a URL.
         Returns {id, kind, stages, current, session}, with session_error if the session failed."""
         def go():
-            c = P.new(kind, name, source, command, traces, notes, parent)
+            chat = os.environ.get("MOIRAI_AGENTS_WEBUI_SESSION", "")
+            draft = next((x for x in P.list_all(chat) if x.get("draft") and x["kind"] == "run"), None) if chat and kind == "run" else None
+            if draft:          # an app started blank from the web UI, whose Annotate chat this is: fill it instead of making another
+                c = P.fill_draft(draft["id"], source, command, notes)
+            else:
+                c = P.new(kind, name, source, command, traces, notes, parent)
+            name_ = c["name"]
             if kind != "run" or not B.available():
                 return P.summary(c)
-            s = B.start_session(name, source, ref, f"moirai pipeline {c['id']}")
+            s = B.start_session(name_, source, ref, f"moirai pipeline {c['id']}")
             if s.get("status") != "ok":
                 return {**P.summary(c), "session_error": s.get("error")}
             return P.summary(P.set_session(c["id"], s))

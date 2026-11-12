@@ -1,0 +1,14 @@
+{
+ "description": "Answers and checks the traceability aspect of provenance from the traces.",
+ "level": "level_2",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "prov_traceability",
+  "prov_read",
+  "prov_query"
+ ],
+ "permission_mode": "plan",
+ "instructions": "Run traceability_check on the pipeline, then traceability_summary; answer with evidence_answer plans; report every gap with its fix."
+}

@@ -83,11 +83,12 @@ async function wbLoad(){if(!me)return;const d=await api('api/workbench');if(!d||
  if(WB.app&&!wbItem(WB.app)){WB.app=null;savePick()}
  const row=x=>{const [cls,word]=WB_STATE[x.state]||['',x.state],lv=livesOf(x.id),run=lv.filter(l=>l.state==='running').length,og=(x.gaps||[]).filter(g=>g.status==='open').length;
   return `<div class="wbi ${WB.app===x.id?'on':''}" data-id="${esc(x.id)}" title="${esc(x.id)}"><span class="wbd ${cls}"></span><span class="t">${esc(x.name)}</span><span class="s">${esc(word)}${lv.length?` · ${lv.length} run${lv.length>1?'s':''}${run?` (${run} live)`:''}`:''}${og?` · ${og} gap${og>1?'s':''}`:''}</span></div>`};
- $('#wblist').innerHTML=`<div class="shead">Apps<a data-new="app">+ annotate an app</a></div>${d.apps.map(row).join('')||'<div class="wbe">none yet</div>'}
+ $('#wblist').innerHTML=`<div class="shead">Apps<a data-new="blank" title="A new app with an empty chat in each of Annotate, Live Run and Query">+ new app</a><a data-new="app">+ annotate an app</a></div>${d.apps.map(row).join('')||'<div class="wbe">none yet</div>'}
   <div class="shead">Datasets<a data-new="data">+ open data</a></div>${d.datasets.map(row).join('')||'<div class="wbe">none yet</div>'}`;
  $('#wblist').querySelectorAll('.wbi').forEach(e=>e.onclick=()=>{WB.app=e.dataset.id;savePick();const it=wbItem(WB.app);if(it&&it.kind==='analysis'&&WB.view!=='query')return wbShow('query');wbOpenView()});
  $('#wblist').querySelectorAll('[data-new]').forEach(a=>a.onclick=e=>{e.preventDefault();WB.app=null;savePick();WB.sel=null;
-  document.querySelectorAll('#wblist .wbi').forEach(x=>x.classList.remove('on'));if(a.dataset.new==='data'&&WB.view!=='query'){WB.view='query';showTab('wb')}wbHome(a.dataset.new)});
+  document.querySelectorAll('#wblist .wbi').forEach(x=>x.classList.remove('on'));if(a.dataset.new==='data'&&WB.view!=='query'){WB.view='query';showTab('wb')}
+  if(a.dataset.new==='blank'&&WB.view!=='ann'){WB.view='ann';showTab('wb')}wbHome(a.dataset.new)});
  if(WB.sel){const it=wbItem(WB.sel.id);if(it)WB.sel.item=it}}
 function wbPoolOf(v){const d=WB.items;return v==='query'?[...d.apps,...d.datasets]:d.apps}
 function wbItem(id){const d=WB.items;return [...d.apps,...d.lives,...d.datasets,...(d.published||[])].find(x=>x.id===id)}
@@ -95,11 +96,16 @@ function wbItem(id){const d=WB.items;return [...d.apps,...d.lives,...d.datasets,
 // ---- the home of each view: what it is for, and how to start
 function wbHome(what){WB.sel=null;clearInterval(WB.timer);const v=$('#wbview');v.dataset.home='1';delete v.dataset.h;
  const d=WB.items,sel=WB.app&&wbItem(WB.app),apps=d.apps.filter(a=>a.can_live&&(!sel||sel.kind!=='run'||a.id===sel.id));
+ // an app made blank has its own Live Run chat: it is the chat on the left until its first live run takes it
+ if(WB.view==='live'&&sel&&sel.live_chat&&!d.lives.some(l=>l.chat===sel.live_chat)&&sel.live_chat!==session)openSession(sel.live_chat);
  if(what==='dataset'){v.innerHTML=`<div class="wb-home"><h2>${esc(sel?sel.name:'Dataset')}</h2><p class="sub">This is a dataset: provenance someone else recorded. It has no annotation and no live runs of its own; ask about it in the Query view.</p><button class="btn primary" id="wbtoq">Query it</button></div>`;
   $('#wbtoq').onclick=()=>wbShow('query');return}
  if(sel&&sel.kind==='run'&&WB.view==='live'&&!sel.can_live){v.innerHTML=`<div class="wb-home"><h2>${esc(sel.name)}</h2><p class="sub">A live run uses the app's annotation: finish annotating it first (its integrate stage).</p><button class="btn primary" id="wbtoa">Annotate it</button></div>`;
   $('#wbtoa').onclick=()=>wbShow('ann');return}
  const forms={
+  blank:`<form class="wb-start" id="wbblank"><h3>＋ New app</h3><p class="sub">Start with just a name: the app gets an empty chat in each view (Annotate, Live Run and Query). Tell the agent in the Annotate chat where the app is and how to test it.</p>
+    <label>Name<input name="name" placeholder="short name, e.g. biotox" pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,40}" required></label>
+    <button class="btn primary">Create app</button><div class="err" id="wbberr"></div></form>`,
   ann:`<form class="wb-start" id="wbapp"><h3>✎ Annotate an app</h3><p class="sub">The agent explores the app, proposes what to record, annotates it, runs a baseline and shows you what the annotation promised next to what was recorded. Then it publishes the code.</p>
     <label>Application<input name="src" placeholder="app directory or git URL" required></label>
     <label>Small test command<input name="cmd" placeholder="e.g. python run.py --config small.json" required></label>
@@ -119,7 +125,7 @@ function wbHome(what){WB.sel=null;clearInterval(WB.timer);const v=$('#wbview');v
   live:['Live Run','Run an annotated app for hours and watch its provenance graph form. When the run ends, its data is published.','live'],
   query:['Query','Ask about the provenance of a live run (while it runs, or after), an app’s baseline or any dataset: where something came from, what it affected, and the evidence for it. Pick one on the left.','data']}[WB.view];
  const pool=wbPoolOf(WB.view).slice().sort((a,b)=>(b.updated||0)-(a.updated||0)).slice(0,6);
- v.innerHTML=`${what==='live'&&sel?targetBar():''}<div class="wb-home"><h2>${what==='live'&&sel?esc(sel.name)+': a new live run':intro[0]}</h2><p class="sub">${intro[1]}</p><div class="wb-starts">${forms[what==='data'?'data':what==='live'?'live':what==='app'?'ann':intro[2]]}</div>
+ v.innerHTML=`${what==='live'&&sel?targetBar():''}<div class="wb-home"><h2>${what==='live'&&sel?esc(sel.name)+': a new live run':intro[0]}</h2><p class="sub">${intro[1]}</p><div class="wb-starts">${(k=>k==='ann'&&!what?forms.blank+forms.ann:forms[k])(what==='data'?'data':what==='live'?'live':what==='app'?'ann':what==='blank'?'blank':intro[2])}</div>
   ${pool.length?`<h3 style="margin-top:22px">Recent</h3><div class="wb-recent">${pool.map(x=>{const [cls,word]=WB_STATE[x.state]||['',x.state];
    return `<div class="wb-rc" data-id="${esc(x.id)}"><span class="wbd ${cls}"></span><b>${esc(x.name)}</b><span class="sub">${esc(x.app?x.app+' · ':'')}${esc(word)} · ${ago(x.updated)}</span></div>`}).join('')}</div>`:''}</div>`;
  v.querySelectorAll('.wb-rc').forEach(e=>e.onclick=()=>{WB.app=appOf(e.dataset.id);savePick();wbLoad().then(wbOpenView)});
@@ -127,6 +133,9 @@ function wbHome(what){WB.sel=null;clearInterval(WB.timer);const v=$('#wbview');v
   const msg=`Annotate an app${name?` named ${name}`:''} for provenance.\nApplication: ${f.get('src')}\nSmall test command: ${f.get('cmd')}\n`+
    'Run the Run pipeline: explore, smoke, discover, annotate, integrate, moirai_smoke, baseline, then the graph stage (show me the diff of what the annotation promised against what the baseline recorded), then package (publish the code).';
   $('#newbtn').onclick();setMode('run');if(await sendText(msg,false,[]))setTimeout(()=>wbLoad(),4000)};
+ const fb=$('#wbblank');if(fb)fb.onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target),m=$('#wbberr');m.textContent='creating…';
+  const r=await api('api/workbench/newapp',{name:(f.get('name')||'').trim()});if(!r||r.error){m.textContent=(r&&r.error)||'could not create the app';return}
+  m.textContent='';WB.app=r.pipeline;savePick();await wbLoad();wbShow('ann')};
  const fl=$('#wblive');if(fl&&fl.querySelector('select'))fl.onsubmit=async e=>{e.preventDefault();const f=new FormData(e.target),m=$('#wblerr');m.textContent='creating…';
   const app=WB.items.apps.find(a=>a.id===f.get('parent')),vals=liValues(fl);
   const r=await api('api/workbench/live',{parent:f.get('parent'),name:(f.get('name')||'').trim(),...(app&&app.live_inputs?{values:vals}:{command:(f.get('cmd')||'').trim()})});if(!r||r.error){m.textContent=(r&&r.error)||'could not create';return}
@@ -296,7 +305,7 @@ async function wbAnnotate(first){if(!WB.sel||!WB.sel.item)return;const it=WB.sel
   <div class="wb-card"><div class="wb-sec">Live run inputs</div>${it.live_inputs?`<ul class="wb-li-list">${it.live_inputs.inputs.map(i=>`<li><b>${esc(i.label||i.name)}</b> ${i.kind==='choice'?`<span class="sub">${(i.options||[]).length} choices</span>`:''} <span class="sub">default ${esc(i.default??'-')}</span></li>`).join('')}</ul>${pro()?`<code class="wb-cmd">${esc(it.live_inputs.command)}</code>`:''}`:
    `<div class="sub">What a scientist can tune when starting a live run. The agent writes them once it has explored and annotated the app.</div><button class="btn" id="wbdetect" style="margin-top:6px">Detect them now</button>`}</div>
   ${gapsCard(it)}${pro()||WB.stage?'<div class="wb-card" id="wbstage"></div>':''}`;
- const html=headOf(it)+`<div class="wb-strip"><span class="sub">annotate</span>${strip(it,setup)}<span class="sub" style="margin-left:12px">check &amp; publish</span>${strip(it,['graph','package'])}</div>${needYou(it)}${nowCard(it)}
+ const html=headOf(it)+`<div class="wb-strip"><span class="sub">annotate</span>${strip(it,setup)}<span class="sub" style="margin-left:12px">check &amp; publish</span>${strip(it,['graph','package'])}</div>${needYou(it)}${it.draft?`<div class="wb-need">✎ <b>${esc(it.name)}</b> is a new, blank app. Tell the agent in the chat on the left where the app is (a directory or git URL) and a small test command; it plans and annotates it from there. Live Run and Query have their own chats for this app.</div>`:''}${nowCard(it)}
   <div class="vw-grid"><div class="vw-main"><div class="wq-tools"><b class="vw-t">${title}</b>${aggLegend(mode)}<span class="wq-btns"><button id="agfit">fit</button></span></div>
    <div id="aggann" class="vw-graph"></div><div id="agginfo" class="wq-info" hidden></div></div><div class="vw-side">${side}</div></div>`;
  if(v.dataset.h!==html){v.dataset.h=html;const keepG=AGG.ann&&$('#aggann');const old=keepG?$('#aggann'):null;v.innerHTML=html;if(old)$('#aggann').replaceWith(old);wireHead(v);$('#agfit').onclick=()=>aggFit(AGG.ann&&AGG.ann.cy);
@@ -381,17 +390,32 @@ async function wbQuery(quiet){if(!WB.sel||!WB.sel.item)return;const it=WB.sel.it
   if(firstG||Date.now()-Q.drawn>30000)await wqDraw();else st.textContent+=' · grew, redraws shortly'}
  else if(gr&&gr.same&&Q.g&&Q.g.sig!==Q.sig)await wqDraw()}
 
-function wbQStrip(){const s=$('#wqstrip');if(!s)return;const as=WB.answers.slice().reverse();
- s.innerHTML=`<button class="wq-chip ${Q.sel?'':'on'}" data-a="">◎ whole graph</button>`+as.map(a=>`<button class="wq-chip ${a.id===Q.sel?'on':''} ${a.verified?'':'unv'}" data-a="${esc(a.id)}" title="${esc(a.question)}">${a.verified?'✓':'⚠'} ${esc((a.question||'').slice(0,60))}${WB.pins.includes(a.id)?' 📌':''}</button>`).join('');
+// queries grouped: who asked (you first) -> category (largest first) -> newest first; each level collapsible, kept across refreshes
+const QOPEN={};
+const wqMe=()=>(typeof me==='object'&&me&&me.name)||'';
+function wqGroups(as){const mine=wqMe(),u=a=>a.asked_by||mine||'unknown',by={};
+ as.forEach(a=>{const g=by[u(a)]=by[u(a)]||{},c=a.category||'Other';(g[c]=g[c]||[]).push(a)});
+ return Object.entries(by).sort((x,y)=>(y[0]===mine)-(x[0]===mine)||x[0].localeCompare(y[0]))
+  .map(([user,cats])=>[user,Object.entries(cats).map(([c,xs])=>[c,xs.slice().sort((p,q)=>(q.ts||0)-(p.ts||0))]).sort((x,y)=>y[1].length-x[1].length||x[0].localeCompare(y[0]))])}
+const wqOrdered=as=>wqGroups(as).flatMap(([,cats])=>cats.flatMap(([,xs])=>xs));
+function wqGrouped(as){const mine=wqMe(),when=t=>t?`${ago(t)} · ${new Date(t*1000).toLocaleString()}`:'';
+ return wqGroups(as).map(([user,cats])=>{const k='u:'+user,uo=k in QOPEN?QOPEN[k]:true,n=cats.reduce((s,[,xs])=>s+xs.length,0);
+  return `<details class="wq-gu" data-qo="${esc(k)}" ${uo?'open':''}><summary><b>${esc(user)}</b>${user===mine?' <span class="sub">(you)</span>':''} <span class="wb-gn">${n}</span></summary>
+   ${cats.map(([c,xs])=>{const kk=`c:${user}:${c}`,co=kk in QOPEN?QOPEN[kk]:true;
+    return `<details class="wq-gc" data-qo="${esc(kk)}" ${co?'open':''}><summary>${esc(c)} <span class="wb-gn">${xs.length}</span></summary><div class="wq-list">${xs.map(x=>
+     `<button class="wq-li" data-a="${esc(x.id)}"><span class="ac-badge ${x.verified?'ok':'bad'}">${x.verified?'✓':'⚠'}</span> ${esc(x.question||'')}<span class="sub">${esc(when(x.ts))}${x.stored_file?' · kept with the trace':''}</span></button>`).join('')}</div></details>`}).join('')}</details>`}).join('')}
+function wbQStrip(){const s=$('#wqstrip');if(!s)return;const as=wqOrdered(WB.answers);
+ s.innerHTML=`<button class="wq-chip ${Q.sel?'':'on'}" data-a="">◎ whole graph</button>`+as.map(a=>`<button class="wq-chip ${a.id===Q.sel?'on':''} ${a.verified?'':'unv'}" data-a="${esc(a.id)}" title="${esc(a.question)}${a.asked_by?' · asked by '+esc(a.asked_by):''}${a.category?' · '+esc(a.category):''}">${a.verified?'✓':'⚠'} ${esc((a.question||'').slice(0,60))}${WB.pins.includes(a.id)?' 📌':''}</button>`).join('');
  s.querySelectorAll('[data-a]').forEach(b=>b.onclick=()=>{Q.sel=b.dataset.a||null;Q.pick=null;wbQStrip();wbQPanel();wqHighlight(true)})}
 
 function wbQPanel(){const p=$('#wqpanel');if(!p||!WB.sel||!WB.sel.item)return;const a=WB.answers.find(x=>x.id===Q.sel),it=WB.sel.item;
  if(a&&a.engine==='traceviewer')return wbQPanelTV(p,a);
  if(!a){const qs=(it.kind==='analysis'&&WB.card&&WB.card.questions)||WQ_ASK[it.kind]||[];
   p.innerHTML=`<div class="wq-intro"><b>Ask in the chat on the left.</b> Each answer becomes a query above: its plan, the evidence it collected and its answer show here, and the part of the graph it used is highlighted.</div>
-   ${WB.answers.length?`<div class="wb-sec">Queries</div><div class="wq-list">${WB.answers.slice().reverse().map(x=>`<button class="wq-li" data-a="${esc(x.id)}"><span class="ac-badge ${x.verified?'ok':'bad'}">${x.verified?'✓':'⚠'}</span> ${esc(x.question||'')}<span class="sub">${ago(x.ts)}</span></button>`).join('')}</div>`:''}
+   ${WB.answers.length?`<div class="wb-sec">Queries <span class="sub">by who asked, then kind, newest first</span></div>${wqGrouped(WB.answers)}`:''}
    <div class="wb-sec">Try</div><div class="wb-qs">${qs.map(q=>`<button class="wb-q">${esc(q)}</button>`).join('')}</div>`;
   p.querySelectorAll('[data-a]').forEach(b=>b.onclick=()=>{Q.sel=b.dataset.a;Q.pick=null;wbQStrip();wbQPanel();wqHighlight(true)});
+  p.querySelectorAll('details[data-qo]').forEach(d=>d.ontoggle=()=>{QOPEN[d.dataset.qo]=d.open});
   p.querySelectorAll('.wb-q').forEach(b=>b.onclick=()=>sendText(b.textContent,running,[]));return}
  const pl=a.plan||{},val=v=>Array.isArray(v)?v.join(', '):typeof v==='object'&&v?JSON.stringify(v):String(v??''),st=a.stats||{},conf=Math.round((a.confidence||0)*100);
  const on=k=>Q.pick===k?' on':'';
@@ -657,7 +681,7 @@ function wbQPanelTV(p,a){const on=k=>Q.pick===k?' on':'',st=a.stats||{},sc=a.syn
    <details><summary>Cited records</summary>${cites}</details></section>
 `;
  p.innerHTML=`<div class="wq-q"><span class="ac-badge ok" title="Every step is a TraceViewer query on the traces; the result is computed from the records">✓ computed from the traces</span><b>${esc(a.question||'')}</b>
-   <span class="sub">${a.ts?new Date(a.ts*1000).toLocaleString():''} · plan chosen by ${a.plan&&a.plan.chosen_by==='you'?'you':'the agent'} · ${esc((a.engine_info||{}).name||'TraceViewer')} ${esc((a.engine_info||{}).version||'')} · ${a.secs}s</span></div>
+   <span class="sub">${a.asked_by?`asked by ${esc(a.asked_by)} · `:''}${a.category?esc(a.category)+' · ':''}${a.ts?new Date(a.ts*1000).toLocaleString():''} · plan chosen by ${a.plan&&a.plan.chosen_by==='you'?'you':'the agent'} · ${esc((a.engine_info||{}).name||'TraceViewer')} ${esc((a.engine_info||{}).version||'')} · ${a.secs}s</span></div>
   ${secs}
   <div class="ac-del"><button id="wqrerun" title="Run the same plan on the traces as they are now and compare">↻ re-run</button><button id="wqpin" class="${pinned?'on':''}">${pinned?'📌 pinned':'📌 pin to report'}</button><button id="wqcite">⧉ copy citations</button><button id="wqwrong" class="warn">this looks wrong</button></div><div id="wqrr" class="sub"></div>`;
  p.querySelectorAll('[data-pk]').forEach(x=>x.onclick=e=>{e.preventDefault();e.stopPropagation();Q.pick=Q.pick===(x.dataset.pk||null)&&x.dataset.pk?null:(x.dataset.pk||null);wbQPanel();wqHighlight(true)});

@@ -1,7 +1,7 @@
 {
  "name": "prov_annotate",
  "description": "Add moirai provenance to an application - find data accesses, agree entity types and activities with the user, insert them into a copy (decorate a function, patch or subclass a method, annotate a statement, record a shell step of a Maestro YAML, invalidate, conditional edges), validate, and show the user an entity-type relationship diagram of what was annotated at the gate. Load for the annotate stage, or when a spec needs an inherited method, an inline subprocess step, a delete, a key from a local variable or an optional input, when the work is a shell command in a Maestro YAML `cmd:` step (AlphaFold 3, Rosetta FlexPepDock, BioTox, yaml_step), when a question about the parameters or flags of a step finds none recorded (a no-argument on_finish/run/__call__ hook whose command line was built in the constructor), when a gap says no_outputs or no_attributes (a hook that returns None keeps its result on self: record it with capture.outputs and as attributes; a question about quality, depth, size or counts of a data entity finds no attributes), or when the annotate verdict is inconclusive about PYTHONPATH, moirai_env.sh or maestro_dry.",
- "version": 13,
+ "version": 15,
  "enabled": true,
  "stages": [
   "annotate"
@@ -29,20 +29,20 @@
  "review": [
   "imports shutil: copies/removes files",
   "imports subprocess: runs commands",
-  "line 1048: writes or deletes files (write_text)",
-  "line 1225: writes or deletes files (write_text)",
-  "line 1234: writes or deletes files (write_text)",
-  "line 1298: writes or deletes files (write_text)",
-  "line 1341: writes or deletes files (write_text)",
-  "line 1710: writes or deletes files (write_text)",
-  "line 1724: writes or deletes files (rmtree)",
-  "line 1728: writes or deletes files (write_text)",
-  "line 1753: writes or deletes files (write_text)",
-  "line 1764: writes or deletes files (write_text)",
-  "line 1793: writes or deletes files (write_text)",
-  "line 1848: writes or deletes files (write_text)",
+  "line 1110: writes or deletes files (write_text)",
+  "line 1287: writes or deletes files (write_text)",
+  "line 1296: writes or deletes files (write_text)",
+  "line 1360: writes or deletes files (write_text)",
+  "line 1403: writes or deletes files (write_text)",
+  "line 1772: writes or deletes files (write_text)",
+  "line 1786: writes or deletes files (rmtree)",
+  "line 1790: writes or deletes files (write_text)",
+  "line 1815: writes or deletes files (write_text)",
+  "line 1826: writes or deletes files (write_text)",
   "line 1855: writes or deletes files (write_text)",
-  "line 737: writes or deletes files (write_text)"
+  "line 1910: writes or deletes files (write_text)",
+  "line 1917: writes or deletes files (write_text)",
+  "line 799: writes or deletes files (write_text)"
  ],
  "history": [
   {
@@ -137,6 +137,20 @@
    "by": "haridev",
    "proposal": "707c85bd39ab",
    "why": "Generic lessons from a 23-gap batch on the Elmerfold app; user: 'Improve the provenance coverage for all 23 open gaps'. Adds a section on relating an entity in every activity, subprocess failures, environment facts, how-many/which-one values, and reading annotate_apply unresolved."
+  },
+  {
+   "version": 14,
+   "ts": 1794457388.2592683,
+   "by": "haridev",
+   "proposal": "9095853b90c5",
+   "why": "The user asked for the four aspects of provenance (traceability, accountability, decision making, performance), each its own capability, and for one reading capability (prov_read: TraceViewer) used by every graph, query and check. The helper records a run_context entity at start (user, group, command and working dir only as hashes; the names as identity entities related to nothing, dropped to anonymize; job, host, versions) and passes the hashes to moirai.metadata when moirai has it."
+  },
+  {
+   "version": 15,
+   "ts": 1794458302.5785074,
+   "by": "haridev",
+   "proposal": "ef4554caf1a2",
+   "why": "moirai now records user_hash, group_hash, job and the configuration environment as process metadata at initialize (branch feat/process-metadata); the helper's run_context uses moirai's identity hash (moirai_hash of kind and MOIRAI_ID_SALT + name) so both name a user the same way."
   }
  ]
 }

@@ -1,0 +1,31 @@
+{
+ "name": "prov_performance",
+ "description": "Performance aspect of provenance: how to improve efficiency: the bottleneck, time per function and layer, I/O, parallelism, app- vs system-centric.",
+ "version": 1,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "performance_summary",
+  "performance_check",
+  "performance_selftest"
+ ],
+ "pvc": {
+  "predictor": [
+   "performance_summary"
+  ],
+  "validator": [
+   "performance_check",
+   "performance_selftest"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1794457382.01684,
+   "by": "haridev",
+   "proposal": "221d6ef567d9",
+   "why": "The user asked for the four aspects of provenance (traceability, accountability, decision making, performance), each its own capability, and for one reading capability (prov_read: TraceViewer) used by every graph, query and check."
+  }
+ ]
+}

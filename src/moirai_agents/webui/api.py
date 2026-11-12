@@ -364,12 +364,22 @@ def get_route(h, app, life, u, q):
             if u.path == "/api/workbench/graph":
                 return send_json(h, W.graph(user["workspace"], pid, q.get("since", [""])[0]))
             if u.path == "/api/workbench/explain":        # an answer in four parts, by the query_explain capability (no model)
+                from ..core import answers as A
                 from ..core import capstore as CS
+                from ..core import querystore as QS
                 aid = q.get("id", [""])[0]
+                rec = next((a for a in A.listing(pid, user["workspace"], limit=10 ** 6) if a.get("id") == aid), None)
+                tag = QS.explanation_tag(rec or {})
+                kept = QS.explanation(pid, aid)            # kept with the query: what was shown then, unless the answer changed since
+                if kept and kept.get("for") == tag:
+                    return send_json(h, {**kept, "stored": True})
                 try:
                     r = CS.call("query_explain", "query_explain", pipeline=pid, answer_id=aid)
                     r["checks"] = CS.call("query_explain", "query_explain_validate", pipeline=pid, answer_id=aid).get("parts")   # against the traces
                     r["confidence"] = CS.call("answer_confidence", "confidence_score", pipeline=pid, answer_id=aid)
+                    r["for"], r["computed_at"] = tag, round(time.time(), 1)
+                    if rec and not rec.get("stored_file") and r.get("parts"):     # the asker's own query: keep the explanation with it
+                        QS.save(pid, rec, explanation=r, user=rec.get("asked_by") or user["name"])
                     return send_json(h, r)
                 except Exception as e:
                     return send_json(h, {"error": f"{type(e).__name__}: {e}"})
@@ -630,17 +640,31 @@ def post_route(h, app, life, u, body):
                                  "pins": answers.pins(body.get("pipeline", ""), user["workspace"])})
         except pipeline.PipelineError as e:
             return send_json(h, {"error": str(e)}, 400)
-    if u.path in ("/api/workbench/live", "/api/workbench/querychat"):
+    if u.path in ("/api/workbench/live", "/api/workbench/querychat", "/api/workbench/newapp"):
         W = _fresh_wb()
         allowed = user.get("models") or R.provider_models(user.get("provider", "livai"))
         model = os.environ.get("MOIRAI_AGENTS_MODEL", allowed[0]) if os.environ.get("MOIRAI_AGENTS_MODEL") in allowed else allowed[0]
         sid = W.new_chat_id()
         try:
+            if u.path == "/api/workbench/newapp":        # a blank app: a draft run pipeline and three empty chats, one per view
+                ids = {"ann": sid, "live": W.new_chat_id(), "query": W.new_chat_id()}
+                c = W.new_app(user["workspace"], body.get("name", ""), ids["ann"], ids["live"], ids["query"])
+                base = {"created": R._now(), "updated": R._now(), "turns": [], "user": user["name"], "app_dir": None, "folder": c["name"], "model": model}
+                st.put({**base, "id": ids["ann"], "title": f"Annotate: {c['name']}", "mode": "run", "app": c["id"], "role": "annotate"})
+                st.put({**base, "id": ids["live"], "title": f"Live: {c['name']}", "mode": "run", "app": c["id"], "role": "live"})
+                st.put({**base, "id": ids["query"], "title": f"Query: {c['name']}", "mode": "ask", "pipeline": c["id"], "query": True})
+                R.WARM and R.WARM.want(user, st.get(ids["ann"]))      # the Annotate chat opens first: warm it
+                return send_json(h, {"pipeline": c["id"], "name": c["name"], "chats": ids})
             if u.path == "/api/workbench/live":          # a live run of an annotated app, with its own run chat
-                c = W.new_live(user["workspace"], body.get("parent", ""), body.get("name", ""), body.get("command", ""), sid,
+                reuse = W.unused_live_chat(user["workspace"], body.get("parent", ""))      # the app's blank Live Run chat, while unused
+                c = W.new_live(user["workspace"], body.get("parent", ""), body.get("name", ""), body.get("command", ""), reuse or sid,
                                body.get("values") if isinstance(body.get("values"), dict) else None)
-                st.put({"id": sid, "created": R._now(), "updated": R._now(), "turns": [], "user": user["name"], "title": c["name"],
-                        "mode": "run", "app_dir": None, "folder": "live runs", "model": model})
+                if reuse:
+                    sid = reuse
+                    st.rename(sid, c["name"])
+                else:
+                    st.put({"id": sid, "created": R._now(), "updated": R._now(), "turns": [], "user": user["name"], "title": c["name"],
+                            "mode": "run", "app_dir": None, "folder": "live runs", "model": model})
                 return send_json(h, {"session": sid, "pipeline": c["id"], "command": c["command"], "inputs": c.get("inputs") or {}})
             c = pipeline.load(body.get("pipeline", ""), user["workspace"])     # the Query view's chat of a pipeline: made once, kept
             if c["kind"] == "analysis":

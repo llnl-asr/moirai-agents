@@ -33,6 +33,9 @@ OPWORD = {"entities": "find the entities", "activities": "find the runs of an ac
           "ends": "take the ends of the lineage", "inputs": "read the inputs (parameters) of", "outputs": "read the outputs of",
           "attributes": "read the attributes of"}
 
+from .aspects import opword as _aspect_words  # noqa: E402
+OPWORD.update(_aspect_words())
+
 
 # ------------------------------------------------------------------------------------------------ values
 

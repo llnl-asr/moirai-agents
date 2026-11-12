@@ -157,7 +157,8 @@ def publish(pipeline: str, question: str, plan: Dict[str, Any], evidence: List[D
         problems.append(f"none of the sensitive references {sensitive} is in the traces")
     reached = {n["id"] for n in lineage["nodes"] if n["kind"] == "entity"} | cited_e
     acts_ts = [a["ts"] for a in g.activities if (a["name"] in cited_a or not cited_a) and isinstance(a.get("ts"), (int, float))]
-    rec = {"id": uuid.uuid4().hex[:10], "ts": round(time.time(), 1), "pipeline": pipeline, "chat": chat, "question": question,
+    from . import querystore as QS
+    rec = {"id": uuid.uuid4().hex[:10], "ts": round(time.time(), 1), "pipeline": pipeline, "chat": chat, "question": question, "asked_by": QS.who(),
            "plan": plan or {}, "evidence": evidence or [], "answer": answer or "", "targets": targets or [], "direction": direction,
            "gaps": gaps or [], "confidence": max(0.0, min(1.0, float(confidence or 0))), "verified": not problems,
            "problems": problems, "lineage": lineage,
@@ -167,22 +168,40 @@ def publish(pipeline: str, question: str, plan: Dict[str, Any], evidence: List[D
                      "records": g.total}}
     with open(P.pdir(pipeline) / "answers.jsonl", "a") as fh:
         fh.write(json.dumps(rec, default=str) + "\n")
+    QS.save(pipeline, rec)                 # kept with the trace too, for everyone who reads it
     return rec
 
 
 def listing(pipeline: str, workspace: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    """The pipeline's answers and every query kept with its traces (asked by anyone, through any pipeline on the same traces), oldest first.
+    Each carries asked_by and category; one kept only in the shared store also carries stored_file."""
     f = P.pdir(pipeline, workspace) / "answers.jsonl"
     try:
         rows = [json.loads(x) for x in f.read_text().splitlines() if x.strip()]
     except (OSError, ValueError):
-        return []
+        rows = []
     last, order = {}, []                 # an answer updated later (its synthesis added) is appended again: keep its latest copy, in first order
     for r in rows:
         k = r.get("id") or id(r)
         if k not in last:
             order.append(k)
         last[k] = r
-    out = [last[k] for k in order][-limit:]
+    from . import querystore as QS
+    try:
+        kept = QS.stored(traces_of(P.load(pipeline, workspace)))
+    except (P.PipelineError, OSError, KeyError):
+        kept = []
+    by_id = {d["id"]: d for d in kept}
+    for r in last.values():
+        d = by_id.get(r.get("id"))
+        r.setdefault("asked_by", (d or {}).get("asked_by") or "")
+        r["category"] = QS.category(r)
+    for d in kept:
+        if d["id"] not in last:
+            last[d["id"]] = {**d["record"], "asked_by": d.get("asked_by", ""), "category": QS.category(d["record"]),
+                             "stored_file": d.get("_file", "")}
+            order.append(d["id"])
+    out = sorted((last[k] for k in order), key=lambda r: float(r.get("ts") or 0))[-limit:]
     from . import evidence as E            # what a computed answer's write-up says is not recorded is a gap too (older records included)
     for r in out:
         if r.get("engine") == "traceviewer" and r.get("synthesis") and isinstance(r.get("gaps"), list):

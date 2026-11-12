@@ -1,0 +1,31 @@
+{
+ "name": "prov_read",
+ "description": "The one trace reader (core.provtrace on TraceViewer) every graph, query, check and aspect uses.",
+ "version": 1,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "prov_read_files",
+  "prov_read_counts",
+  "prov_read_selftest"
+ ],
+ "pvc": {
+  "predictor": [
+   "prov_read_files",
+   "prov_read_counts"
+  ],
+  "validator": [
+   "prov_read_selftest"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1794457383.2216244,
+   "by": "haridev",
+   "proposal": "a35125458b66",
+   "why": "The user asked for the four aspects of provenance (traceability, accountability, decision making, performance), each its own capability, and for one reading capability (prov_read: TraceViewer) used by every graph, query and check."
+  }
+ ]
+}

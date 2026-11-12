@@ -50,6 +50,11 @@ def index_dir(files: List[str]) -> str:
     return c
 
 
+def tv():
+    """dftracer-utils, the one TraceViewer every reader in moirai-agents uses (the prov_read capability): nothing else imports it."""
+    return _tv()
+
+
 def _tv():
     import dftracer.utils as U
     try:

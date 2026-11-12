@@ -1,0 +1,9 @@
+[
+ {
+  "tool": "prov_read_selftest",
+  "args": {},
+  "expect": {
+   "contains": "prov_read selftest PASS"
+  }
+ }
+]

@@ -14,6 +14,15 @@ claim citing the queries and records it rests on.
                  attributes  {from: step}                         the recorded attributes of a step's entities: "<type>.attribute", part_of
                  stats       {name, type?} | {name, from: step}   n, mean, median, min, max of one recorded value over EVERY entity that
                                                                   records it (all records, no sample), or over an attributes/inputs/outputs step
+               the four aspects of provenance (core.aspects; one capability each):
+                 traceability     entities, activities, lineage, ends, group, inputs, outputs, attributes (above)
+                 accountability   context     {}                       who ran it (user, group, job), hosts, processes, commands, tools/versions
+                                  timeline    {name?}                  when each activity ran: first/last start, runs, hosts
+                 decision making  stats (above); status {names?}       what failed or passed: return codes, status flags, errors
+                 performance      perf_time   {by: activity|function|io|process|host|layer, top?}   where the time went
+                                  perf_io     {by: file|call|host, top?}                            bytes, time, bandwidth
+                                  perf_parallelism {}                                               processes, hosts, wall, concurrency
+                                  perf_system {metric: cpu|disk|network}                            the nodes' counters (system-centric)
                times: ISO date-time, epoch seconds or microseconds, or relative to the run: "start+30m", "end-2h".
                "from" is the 0-based index of an earlier step.
     resolve    each step's selectors are made concrete before any query: entity type names checked against the types the
@@ -42,7 +51,8 @@ from . import provtrace as T
 from .aggregate import TYPE_MAX, ends       # a type the trace cut at 31 characters still counts as <x>.attribute / .input / .output
 
 MAX_STEPS, MAX_HOPS, MAX_NODES, MAX_CITE, MAX_ROWS, MAX_IN = 8, 30, 5000, 300, 200, 4000
-OPS = ("entities", "activities", "lineage", "group", "ends", "inputs", "outputs", "attributes", "stats")
+from . import aspects as ASP                     # traceability, accountability, decision making, performance: each aspect owns its operations
+OPS = tuple(ASP.all_ops())
 ACT = 'col("cat").is_in(["moirai", "PROV"])'
 
 
@@ -69,11 +79,7 @@ def _clean(r: Dict[str, Any]) -> Dict[str, Any]:
 class Viewer:
     """TraceViewer over each trace file; ``q`` runs one query on all of them and keeps its text, rows and time."""
     def __init__(self, traces: str, index_dir: str) -> None:
-        import dftracer.utils as U
-        try:
-            U.set_log_level("warning")
-        except Exception:  # noqa: BLE001
-            pass
+        U = T.tv()                                 # the one reader (core.provtrace, the prov_read capability)
         self.U, self.files, self.idx = U, T.expand(traces), index_dir
         if not self.files:
             raise PlanError(f"no trace file under {traces}")
@@ -507,7 +513,7 @@ def _stats(s, k, v, cat, outs, ctx):
 
 
 STEPS = {"entities": _entities, "activities": _activities, "lineage": _lineage, "group": _group, "ends": _ends,
-         "inputs": _inputs, "outputs": _outputs, "attributes": _attributes, "stats": _stats}
+         "inputs": _inputs, "outputs": _outputs, "attributes": _attributes, "stats": _stats, **ASP.ops()}
 
 
 def check_plan(steps: Any) -> List[str]:
@@ -544,6 +550,8 @@ def _table(head, rows):
 
 def headline(o, cat, ctx) -> str:
     k = o["kind"]
+    if k == "aspect":                    # an aspect operation states its own result
+        return o["headline"]
     if k == "entities":
         what = {"roots": "roots (inputs nothing in the traces produced)", "leaves": "final entities (nothing in the traces used them)"}.get(o.get("of"), "entities")
         return f"{len(o['ids'])} {what}: {_types(cat, o['ids'])}."
@@ -603,6 +611,8 @@ def _f2(x: float) -> str:
 
 def table(o, cat, ctx) -> str:
     k = o["kind"]
+    if k == "aspect":
+        return _table(o["columns"], o["rows"])
     if k == "stats":
         return _table(["name", "of", "entities", "distinct values", "mean", "median", "min", "max", "mean of distinct", "min on", "max on"],
                       [[o["name"], g["of"], f"{g['n']:,}", f"{g['distinct']:,}", _f2(g["mean"]), _f2(g["median"]), _f2(g["min"]), _f2(g["max"]),
@@ -748,6 +758,8 @@ def detect_gaps(steps: List[Dict[str, Any]], outs: List[Dict[str, Any]], cat: Di
         for n, c in by.items():
             add("no_inputs", n, f"activity {n} records no inputs ({c} run(s) here): what it was run with - its parameters, options, the command it ran - is not in the provenance", k)
     for k, (s, o) in enumerate(zip(steps, outs)):
+        for g in o.get("gaps") or []:               # an aspect operation names what it could not find
+            add(g["kind"], g["subject"], g["detail"], k)
         if o["kind"] == "lineage":
             for i in o["dangling"][:8]:
                 add("undeclared_entity", i, f"entity {i} is referenced by an activity but never declared (no entity record): its type and location are unknown, so the lineage stops there", k)
@@ -790,7 +802,7 @@ def reported_gaps(synthesis: str, n_steps: int, have: List[Dict[str, Any]]) -> L
     detection found none for this answer, so a missing thing the answer admits to can still be improved from the Query view."""
     if not synthesis or any(g.get("kind") != "reported" for g in have if isinstance(g, dict)):
         return []
-    out, seen = [], set()
+    out, seen = [], {g.get("id") for g in have if isinstance(g, dict)}
     for sent in re.split(r"(?<=[.!?])\s+(?=[A-Z])|\n+", synthesis):
         s = re.sub(r"\*\*|[`#>]+|^\s*[-+*]\s+", "", sent).strip()
         if not s or not _SAYS_MISSING.search(s):
@@ -903,7 +915,9 @@ def ask(pipeline: str, question: str, steps: List[Dict[str, Any]], synthesis: st
     r = run(tr, steps, index_dir_of(pipeline))
     syn = check_synthesis(synthesis, len(steps), r["computed"], f"{question} {pipeline} {c.get('name', '')}")
     last = r["steps"][-1]
+    from . import querystore as QS
     rec = {"id": uuid.uuid4().hex[:10], "ts": round(time.time(), 1), "pipeline": pipeline, "chat": chat, "engine": "traceviewer", "question": question,
+           "asked_by": QS.who(),
            "plan": {"steps": steps, "chosen_by": chose}, "steps": r["steps"], "queries": r["queries"], "reads": r["reads"], "engine_info": r["engine"],
            "result": {"headline": last["headline"], "table": last["table"]}, "synthesis": synthesis, "synthesis_check": syn,
            "result_hash": r["result_hash"], "secs": r["secs"], "lineage": r["graph"], "stats": r["stats"],
@@ -912,6 +926,7 @@ def ask(pipeline: str, question: str, steps: List[Dict[str, Any]], synthesis: st
     with A._LOCK:
         with open(P.pdir(pipeline) / "answers.jsonl", "a") as fh:
             fh.write(json.dumps(rec, default=str) + "\n")
+    QS.save(pipeline, rec)                 # kept with the trace too, for everyone who reads it
     return rec
 
 
@@ -937,8 +952,14 @@ def synthesize(pipeline: str, aid: str, text: str) -> Dict[str, Any]:
     computed = "\n".join(s["headline"] + "\n" + s["table"] for s in rec["steps"])
     c = P.load(pipeline)
     syn = check_synthesis(text, len(rec["steps"]), computed, f"{rec.get('question', '')} {pipeline} {c.get('name', '')}")
+    foreign = bool(rec.get("stored_file"))     # asked by someone else, kept in the shared store: their file stays theirs
+    rec = {k: v for k, v in rec.items() if k not in ("category", "stored_file")}          # derived when listed, never stored
+    rec["gaps"] = [g for g in rec.get("gaps") or [] if not (isinstance(g, dict) and g.get("kind") == "reported")]
     rec = {**rec, "synthesis": text, "synthesis_check": syn, "problems": syn["problems"], "answer": text or rec["result"]["headline"], "updated": round(time.time(), 1)}
     with A._LOCK:
         with open(P.pdir(pipeline) / "answers.jsonl", "a") as fh:
             fh.write(json.dumps(rec, default=str) + "\n")
+    from . import querystore as QS
+    if not foreign:
+        QS.save(pipeline, rec)
     return {"id": aid, "synthesis_check": syn}

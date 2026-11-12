@@ -1,0 +1,18 @@
+[
+ {
+  "tool": "traceability_selftest",
+  "args": {},
+  "expect": {
+   "contains": "traceability selftest PASS"
+  }
+ },
+ {
+  "tool": "traceability_check",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "contains": "error"
+  }
+ }
+]

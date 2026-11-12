@@ -6,7 +6,7 @@ Cross-references: [[moirai_integrate]] [[workload_elmerfold]] [[workload_biotox]
 
 # Annotate
 
-Provenance records what data exists and how it became what it is, not timing. The discover stage and the user decide what to capture; here the spec becomes code.
+Provenance covers four aspects, each its own capability: traceability (prov_traceability), accountability (prov_accountability), decision making (prov_decision) and performance (prov_performance); the spec captures what each needs (their skills say what). The discover stage and the user decide what to capture; here the spec becomes code.
 
 - **Entity type**: a class of data. It has a role: `input` (comes from outside), `output` (the deliverables: every scientific artifact is one), `intermediate`, `parameter` or `reference`; and a description a reader can understand.
 - **Entity**: one instance, keyed by something stable. Its id is a hash of type and key, the same in every language, so a C writer and a Python reader of one file join.
@@ -112,7 +112,9 @@ Learnt from a batch of 23 open gaps on Elmerfold (user: "Improve the provenance 
 - Do not edit annotated files by hand: the next apply discards it. Change the spec, or update this tool.
 - Do not pass hand-written descriptions in code: they live in the spec.
 - `key_expr` must be stable across processes: the same entity must get the same key everywhere, because its id is a hash of type and key.
-- No timing or performance data in entities.
+- No timing in entities: time comes from the activities' own durations and dftracer's events in the same trace (prov_performance reads them).
+- The helper records a run_context entity at start (user, group, job, host, command, versions): accountability needs no spec entry for it.
+- Each step's outcome (returncode=, status=, ok=, error=) as an output, and quality/quantity metrics as attributes: decision making (prov_decision).
 - `patch`, `subclass`, `statement`, `relations` are Python only. C and C++ take `wrap`, plus `invalidated`, `updated` and `when`; in C a `key_expr` and a `when` are evaluated at the top of the function, over its parameters.
 - The framework class must be in the copied tree. A class in an installed package is not changed; say so at the gate and annotate the driver side.
 - Never type a count, a type or an edge into the gate message: the diagram, its counts and its notes come from `annotate_diagram`, which reads the applied spec.

@@ -556,3 +556,102 @@ def test_a_how_good_question_is_answered_directly_with_a_verdict_and_each_items_
     assert [r[0] for r in each["rows"]] == ["Q0", "Q1", "Q2", "Q3", "Q4"] and each["rows"][2] == ["Q2", "54.3", "0.12"]
     v = S.call("explain_answer", "explain_answer_check", pipeline=run["id"], answer_id=rec["id"])
     assert v["status"] == "pass", v
+
+
+def test_queries_are_kept_with_their_trace_and_seen_from_every_pipeline_on_it(tmp_path, monkeypatch):
+    """Every computed answer is kept in the query store under its trace, one file per query in the asker's folder; a dataset on the same
+    traces lists it with who asked and its category; the write-up updates the asker's file; derived fields are never stored."""
+    from moirai_agents.core import evidence as E, querystore as QS
+    run = integrated_app(tmp_path)
+    tr = str(traces(tmp_path))
+    P.record(run["id"], "baseline", outputs={"traces": tr})
+    monkeypatch.setenv("MOIRAI_AGENTS_USER", "alice")
+    rec = E.ask(run["id"], "What happened in prep?", [{"op": "activities", "name": "prep"}])
+    key = QS.trace_key(tr)
+    assert key.startswith("local/") and rec["asked_by"] == "alice"
+    files = sorted((QS.root() / key / "queries" / "alice").glob("*.json"))
+    assert len(files) == 1 and files[0].name.endswith(f"-{rec['id']}.json") and (QS.root() / key / "trace.json").is_file()
+    doc = json.loads(files[0].read_text())
+    assert doc["schema"] == QS.SCHEMA and doc["asked_by"] == "alice" and doc["category"] == "Traceability"
+    assert doc["record"]["id"] == rec["id"] and doc["steps"] and doc["queries"] and doc["gaps"] == rec["gaps"]
+    monkeypatch.setenv("MOIRAI_AGENTS_USER", "bob")                 # someone else, same second: their own file, no conflict
+    rec2 = E.ask(run["id"], "Where did the plot come from?", [{"op": "entities", "type": "plot"}, {"op": "lineage", "from": 0, "direction": "back"}])
+    assert len(list((QS.root() / key / "queries" / "bob").glob("*.json"))) == 1
+    ds = P.new("analysis", "dataset-on-same-traces", traces=tr)      # another pipeline on the same traces sees both
+    seen = {a["id"]: a for a in A.listing(ds["id"])}
+    assert set(seen) >= {rec["id"], rec2["id"]} and seen[rec["id"]]["asked_by"] == "alice" and seen[rec2["id"]]["category"] == "Traceability"
+    assert seen[rec["id"]].get("stored_file")
+    E.synthesize(run["id"], rec["id"], "prep ran [S1]; the traces do not say why.")     # the write-up lands in the asker's file
+    doc = json.loads(files[0].read_text())
+    assert doc["answer"]["llm_response"].startswith("prep ran") and "category" not in doc["record"] and "stored_file" not in doc["record"]
+    assert not [g for g in doc["record"]["gaps"] if g.get("kind") == "reported"]
+    assert QS.trace_key("/p/vast1/moirai/provenance-traces/elmerfold-v10/20261111_154439/raw") == "elmerfold-v10/20261111_154439"
+    gid = QS.group_id()                                               # every artifact group-shared: folders setgid rwxrws---, files rw-rw----
+    for p in [QS.root() / key, QS.root() / key / "queries", QS.root() / key / "queries" / "alice", QS.root() / key / "trace.json", files[0]]:
+        st = p.stat()
+        assert (st.st_mode & 0o7777) == (QS.DIR_MODE if p.is_dir() else QS.FILE_MODE), (p, oct(st.st_mode))
+        assert gid is None or st.st_gid == gid, (p, st.st_gid, gid)
+    assert QS.fix_permissions(key) == {"fixed": 0, "others": []}
+
+
+def test_a_new_app_starts_blank_with_a_chat_per_view(tmp_path, call, monkeypatch):
+    from moirai_agents.webui import prompts
+    from moirai_agents.webui import workbench as W
+    with pytest.raises(P.PipelineError):
+        P.new("live", "x", draft=True)                     # only an app can be a draft
+    a = W.new_app("", "my app!", "cann", "clive", "cquery")
+    assert a["name"] == "my-app" and a["draft"] and not a["source"] and not a["command"]
+    row = W.items("")["apps"][0]
+    assert row["draft"] and row["chat"] == "cann" and row["live_chat"] == "clive" and row["query_chat"] == "cquery" and not row["can_live"]
+    assert "pipeline_new(kind='run', name='my-app'" in prompts.system_prompt("run", {"id": "cann", "app": a["id"], "role": "annotate"})
+    assert "has not yet" in prompts.system_prompt("run", {"id": "clive", "app": a["id"], "role": "live"})
+    monkeypatch.setenv("MOIRAI_AGENTS_WEBUI_SESSION", "cann")      # the agent in the Annotate chat fills the draft, it makes no second app
+    r = call("pipeline_new", kind="run", name="other", source=str(tmp_path), command="python app.py")
+    assert r["id"] == a["id"] and not r["draft"] and len(P.list_all()) == 1
+    assert P.load(a["id"])["command"] == "python app.py" and "Start with pipeline_status" in prompts.system_prompt("run", {"app": a["id"], "role": "annotate"})
+    with pytest.raises(P.PipelineError):
+        P.fill_draft(a["id"], str(tmp_path), "again")       # no longer a draft
+    P.update(a["id"], lambda c: c["stages"]["integrate"].update(status="passed", outputs={"env": "/e/moirai_env.sh"}))
+    assert W.unused_live_chat("", a["id"]) == "clive"       # the first live run takes the blank Live Run chat
+    L = W.new_live("", a["id"], "", "python app.py --big", "clive")
+    assert W.unused_live_chat("", a["id"]) == ""
+    assert f"drives live run {L['id']}" in prompts.system_prompt("run", {"id": "clive", "app": a["id"], "role": "live"})
+
+
+def test_the_new_app_endpoint_makes_the_app_and_its_three_chats(web, tmp_path):
+    w = web(MOIRAI_AGENTS_USER_WORKSPACE=str(tmp_path / "ws"))      # the server writes pipelines where it reads them
+    r = w.post("/api/workbench/newapp", {"name": "demo"})
+    ids = r["chats"]
+    assert r["name"] == "demo" and len(set(ids.values())) == 3
+    chats = {k: w.get(f"/api/session/{v}") for k, v in ids.items()}
+    assert [chats[k]["turns"] for k in ids] == [[], [], []]
+    assert chats["ann"]["mode"] == chats["live"]["mode"] == "run" and chats["query"]["mode"] == "ask"
+    assert chats["ann"]["app"] == chats["live"]["app"] == chats["query"]["pipeline"] == r["pipeline"]
+    app = w.get("/api/workbench")["apps"][0]
+    assert app["id"] == r["pipeline"] and app["draft"] and app["chat"] == ids["ann"] and app["live_chat"] == ids["live"]
+    assert w.post("/api/workbench/querychat", {"pipeline": r["pipeline"]})["session"] == ids["query"]      # the Query view finds its chat
+    import urllib.error
+    with pytest.raises(urllib.error.HTTPError):                 # 400: an app needs a name
+        w.post("/api/workbench/newapp", {"name": "  "})
+
+
+
+@pytest.mark.parametrize("aspect", ["traceability", "accountability", "decision", "performance"])
+def test_each_aspect_of_provenance_answers_its_questions_from_the_trace(aspect):
+    """Each aspect's summary on a synthetic trace with every aspect in it states what the trace holds (through TraceViewer only)."""
+    from moirai_agents.core import aspects as AS
+    r = AS.selftest(aspect)
+    assert r["status"] == "ok", r
+
+
+def test_identities_are_hashes_and_an_anonymized_trace_names_no_one(tmp_path):
+    from moirai_agents.core import evidence as E, querystore as QS
+    from moirai_agents.core.aspects import _selftest as ST
+    d = ST.write(tmp_path / "named")
+    assert E.run(d, [{"op": "context"}], d)["steps"][0]["headline"].startswith("Run by alice (group lab), job f1234")
+    a = ST.write(tmp_path / "anon", anonymized=True)
+    head = E.run(a, [{"op": "context"}], a)["steps"][0]["headline"]
+    assert "alice" not in head and "lab" not in head and f"anonymized user {ST.UH}" in head and f"anonymized group {ST.GH}" in head
+    assert QS.category({"plan": {"steps": [{"op": "entities"}, {"op": "perf_io"}]}}) == "Performance"
+    assert QS.category({"plan": {"steps": [{"op": "context"}]}}) == "Accountability"
+    assert QS.category({"plan": {"steps": [{"op": "status"}]}}) == "Decision making"

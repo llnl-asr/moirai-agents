@@ -561,6 +561,7 @@ async function openSession(id){const s=await api('api/session/'+id);if(s.error)r
   if(isLive){AG.main.status='running';AG.main.t0=(t.ts||Date.now()/1000)*1000}
   const r=new Renderer(msgEl('assistant',t.ts),{turn:i,answered:i<T.length-1,live:isLive,answers});(t.events||[]).forEach(e=>r.ev(e));if(isLive)live=r}})
  if(live){Object.entries(s.live_logs||{}).forEach(([tid,text])=>live.ev({type:'tool_log',id:tid,text}));setRunning(true);follow(id,live,s.stream_pos||0)}
+ if(!T.length)$('#log').innerHTML=`<div class="empty"><h2>${esc(s.title||'New chat')}</h2><div>An empty chat: write the first message below.</div></div>`;
  toBottom();loadSessions()}
 // Coming back to the page (another tab, VS Code panel switch, sleep): catch up on what was missed.
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&session&&me&&(!es||es.readyState===2))

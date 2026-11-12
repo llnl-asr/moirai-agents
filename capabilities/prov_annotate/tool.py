@@ -77,8 +77,65 @@ def start():
     moirai.initialize()
     for name, role, description in TYPES:
         moirai.entity_type(name, getattr(moirai.Role, role), description)
+    _run_context()
     atexit.register(stop)
     multiprocessing.util.Finalize(None, stop, exitpriority=100)
+
+
+def _identity_hash(kind, value):
+    """moirai's identity hash: moirai_hash(kind, MOIRAI_ID_SALT + value) (FNV-1a), from moirai when it has it, else the same here, so the
+    run_context hashes and moirai's process metadata name a user the same way."""
+    native = getattr(moirai, "identity_hash", None)
+    if callable(native):
+        return native(kind, value)
+    h = 1469598103934665603
+    for b in kind.encode() + b"\\x1f" + (os.environ.get("MOIRAI_ID_SALT", "") + value).encode():
+        h = ((h ^ b) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+    return f"{h or 1:016x}"
+
+
+def _run_context():
+    """Accountability: who ran this process, in which group and job, on which host, with which command and tools - one run_context entity
+    per process with each fact an attribute (part_of it). Never raises into the app."""
+    try:
+        import getpass
+        import grp
+        import platform
+        import socket
+        import sys
+        try:
+            user = getpass.getuser()
+        except Exception:
+            user = os.environ.get("USER", "")
+        try:
+            group = grp.getgrgid(os.getgid()).gr_name
+        except Exception:
+            group = str(os.getgid())
+        job = next((os.environ[k] for k in ("FLUX_JOB_ID", "SLURM_JOB_ID", "PBS_JOBID", "LSB_JOBID", "COBALT_JOBID") if os.environ.get(k)), "")
+        host = socket.gethostname()
+        command, cwd = " ".join(sys.argv)[:200], os.getcwd()
+        hid = lambda kind, v: _identity_hash(kind, v) if v else ""      # noqa: E731
+        ids = {"user": user, "group": group, "command": command, "cwd": cwd}
+        hashed = {k: hid(k, v) for k, v in ids.items()}
+        # identifying strings are kept only as hashes; the names behind them are "identity" entities with no relation to anything, so
+        # anonymizing a trace is dropping the identity records (as dftracer's own FH/SH string tables)
+        facts = {"user_hash": hashed["user"], "group_hash": hashed["group"], "command_hash": hashed["command"], "cwd_hash": hashed["cwd"],
+                 "job": job, "host": host, "pid": str(os.getpid()), "ppid": str(os.getppid()), "python": platform.python_version(),
+                 "moirai": str(getattr(moirai, "__version__", "")), "app_version": os.environ.get("MOIRAI_APP_VERSION", "")}
+        if "run_context" not in _declared:
+            _declared.add("run_context")
+            moirai.entity_type("run_context", moirai.Role.PARAMETER, "Who ran this process and with what: user, group, job, host, command, tool versions (its attributes).")
+        ctx = ("run_context", hashlib.sha1(f"{host}:{os.getpid()}:{job}".encode()).hexdigest()[:16], moirai.Store.MEMORY,
+               f"run_context://{hashed['user']}@{host}/{job or os.getpid()}")
+        for a in _value_entities("run_context.attribute", "REFERENCE", "A fact of the run context (who, group, job, host, command, versions); its uri is name=value.",
+                                 {k: v for k, v in facts.items() if v}):
+            moirai.relate(moirai.Relation.PART_OF, a, ctx)
+        for e in _value_entities("identity", "REFERENCE", "The name behind a hash (user, group, command, working directory): drop these records to anonymize the trace.",
+                                 {hashed[k]: v for k, v in ids.items() if v and hashed[k]}):
+            moirai.entity(*e)                   # related to nothing: dropping it leaves no dangling id
+        # moirai records user_hash, group_hash, job and the configuration environment as process metadata itself (moirai.initialize)
+    except Exception:
+        pass
 
 
 def _text(value, names):
@@ -372,9 +429,14 @@ def entity_type(name, role, description=""):
     types.append(name)
 
 
+def entity(type, key, store=None, uri=""):
+    return (type, key, store, uri)
+
+
 def relate(relation, subject, obj):
     if str(subject[0]).endswith(CAPTURED):
-        captured.append({"of": [obj[0], obj[1]], "type": subject[0], "value": subject[3] if len(subject) > 3 else ""})
+        if not str(subject[0]).startswith(("run_context", "identity")):      # the helper's own accountability records, not spec captures
+            captured.append({"of": [obj[0], obj[1]], "type": subject[0], "value": subject[3] if len(subject) > 3 else ""})
         return
     links.append([relation, subject[0], subject[1], obj[0], obj[1]])
 

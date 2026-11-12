@@ -235,6 +235,11 @@ def analyze(code: str, taken_tools: Optional[Dict[str, str]] = None, own: str = 
         if isinstance(n, ast.Constant) and isinstance(n.value, str) and ABS_PATH.search(n.value):
             errors.append(f"line {getattr(n, 'lineno', '?')}: machine-specific path {n.value[:40]!r}: take paths as arguments")
     errors += direct_trace_reads(tree, code)
+    for n in ast.walk(tree):              # one reader: prov_read (core.provtrace) is the only place TraceViewer is used
+        mods = [a.name for a in n.names] if isinstance(n, ast.Import) else [n.module or ""] if isinstance(n, ast.ImportFrom) else []
+        if any(m == "dftracer.utils" or m.startswith("dftracer.utils.") for m in mods):
+            errors.append(f"line {n.lineno}: imports dftracer.utils: read traces through prov_read (moirai_agents.core.provtrace: read, row_counts, "
+                          "ensure_index, tv) so every reader is the same")
     return {"errors": errors, "review": sorted(set(review)), "warnings": warnings, "tools": tools}
 
 

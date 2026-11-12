@@ -191,12 +191,16 @@ def _blank(name: str) -> Dict[str, Any]:
             "gate": None, "feedback": [], "history": [], "rev": 0}
 
 
-def new(kind: str, name: str, source: str = "", command: str = "", traces: str = "", notes: str = "", parent: str = "") -> Dict[str, Any]:
+def new(kind: str, name: str, source: str = "", command: str = "", traces: str = "", notes: str = "", parent: str = "",
+        draft: bool = False) -> Dict[str, Any]:
+    """``draft``: a run pipeline started blank from the web UI, with a name only; fill_draft gives it its source and command."""
     if kind not in KINDS:
         raise PipelineError(f"kind must be one of {sorted(KINDS)}")
     if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$", name or ""):
         raise PipelineError("name must be short: letters, digits, . _ -")
-    if kind == "run" and not (source.strip() and command.strip()):
+    if draft and kind != "run":
+        raise PipelineError("only a run pipeline (an app) can start as a draft")
+    if kind == "run" and not draft and not (source.strip() and command.strip()):
         raise PipelineError("a run pipeline needs the app source directory and a small test command")
     if kind == "analysis" and not traces.strip():
         raise PipelineError("an analysis pipeline needs the trace directory or glob from the user")
@@ -216,6 +220,8 @@ def new(kind: str, name: str, source: str = "", command: str = "", traces: str =
          "command": command.strip(), "traces": traces.strip(), "notes": notes, "dashboard": None,
          "chat_session": os.environ.get("MOIRAI_AGENTS_WEBUI_SESSION", ""), "user": os.environ.get("MOIRAI_AGENTS_USER", ""),
          "decisions": [], "stages": {s: _blank(s) for s in KINDS[kind]}}
+    if draft:
+        c["draft"] = True
     if par is not None:
         c["parent"], c["session"] = par["id"], par.get("session")
     with _locked(pid) as d:
@@ -224,6 +230,21 @@ def new(kind: str, name: str, source: str = "", command: str = "", traces: str =
         _write(d, c)
         _event(d, "created", pipeline_kind=kind, name=name)
     return c
+
+
+def fill_draft(pid: str, source: str, command: str, notes: str = "") -> Dict[str, Any]:
+    """A draft app gets what a run pipeline needs: the app source and a small test command. It is then an ordinary run pipeline."""
+    if not (source.strip() and command.strip()):
+        raise PipelineError("a run pipeline needs the app source directory and a small test command")
+
+    def fill(c):
+        if not c.get("draft"):
+            raise PipelineError(f"pipeline {pid} is not a draft")
+        c["source"], c["command"] = source.strip(), command.strip()
+        if notes:
+            c["notes"] = notes
+        c.pop("draft", None)
+    return update(pid, fill)
 
 
 def list_all(chat_session: str = "", workspace: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -574,4 +595,4 @@ def summary(c: Dict[str, Any]) -> Dict[str, Any]:
                      "progress": s["outputs"].get("progress")})
     current = next((r["name"] for r in rows if r["status"] not in ("passed", "skipped")), None)
     return {"id": c["id"], "kind": c["kind"], "name": c["name"], "created": c["created"], "updated": c.get("updated"), "parent": c.get("parent"),
-            "chat_session": c.get("chat_session"), "current": current, "stages": rows, "dashboard": c.get("dashboard"), "session": c.get("session"), "goal": (c.get("plan") or {}).get("goal", "")}
+            "chat_session": c.get("chat_session"), "draft": bool(c.get("draft")), "current": current, "stages": rows, "dashboard": c.get("dashboard"), "session": c.get("session"), "goal": (c.get("plan") or {}).get("goal", "")}

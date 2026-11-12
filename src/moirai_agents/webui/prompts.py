@@ -44,9 +44,36 @@ DATASET = (" This chat is the Query view of one {what}: pipeline {pid}, traces a
            "records and the lineage graph.")
 
 
+APP_ANNOTATE = (" This chat is the Annotate chat of app {name}: pipeline {pid}, made from the web UI. {state} Work only on this pipeline here.")
+APP_DRAFT = ("It is still blank (a draft with a name only): ask the user for the app directory or git URL and a small test command, then "
+             "pipeline_new(kind='run', name='{name}', source=..., command=...), which fills this draft instead of creating another pipeline; then go on with its plan stage.")
+APP_LIVE = (" This chat is the Live Run chat of app {name} (run pipeline {pid}). A live run here is pipeline_new(kind='live', parent='{pid}', "
+            "command=...), which needs the app's integrate stage passed ({ready}); agree on the command, time limit and queue with the user before moirai_live_run.")
+
+
+def _app_extra(session: dict) -> str:
+    """The extra prompt of an app's Annotate or Live Run chat, made blank with the app from the web UI."""
+    try:
+        from ..core import pipeline as P
+        c = P.load(session["app"])
+    except Exception:  # noqa: BLE001  a missing pipeline must not break the chat
+        return ""
+    if session.get("role") == "live":
+        own = next((x for x in P.children(c["id"]) if x.get("chat_session") == session.get("id")), None)
+        if own:
+            return (f" This chat drives live run {own['id']} of app {c['name']} (parent {c['id']}): start with pipeline_status(pipeline='{own['id']}'), "
+                    "and do not create another live pipeline here.")
+        ready = "it has" if c["stages"]["integrate"]["status"] == "passed" else "it has not yet: say so and point the user to the Annotate view"
+        return APP_LIVE.format(name=c["name"], pid=c["id"], ready=ready)
+    state = APP_DRAFT.format(name=c["name"]) if c.get("draft") else "Start with pipeline_status(pipeline='{}').".format(c["id"])
+    return APP_ANNOTATE.format(name=c["name"], pid=c["id"], state=state)
+
+
 def system_prompt(mode: str, session: dict) -> str:
     extra = ""
-    if session.get("pipeline"):
+    if session.get("app") and not session.get("pipeline"):
+        extra = _app_extra(session)
+    elif session.get("pipeline"):
         try:
             from ..core import pipeline as P
             c = P.load(session["pipeline"])

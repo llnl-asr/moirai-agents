@@ -864,17 +864,12 @@ def publish_traces_core(root, app, run_dir, ts, kind, summary, meta, run_sh="", 
 def index_raw(raw):
     """Build the TraceViewer index of every *.pfw.gz in raw into raw/.dftindex, on all cores (a no-op when it is complete), then give the group the user's bits on it
     (g=u, no other) so everyone who can read the traces can query them. Raises when no index appears where it was asked for. Returns {index, files, secs}."""
-    import dftracer.utils as U
     raw = Path(raw)
     pf = sorted(str(p) for p in raw.glob("*.pfw.gz"))
     if not pf:
         raise ValueError(f"no *.pfw.gz in {raw}")
-    try:
-        U.set_log_level("warning")
-    except Exception:  # noqa: BLE001
-        pass
     t = time.time()
-    U.Indexer(files=pf, index_dir=str(raw), parallelism=0).ensure_indexed()
+    T.ensure_index(pf, str(raw))            # prov_read: the one TraceViewer reader and indexer
     ix = raw / ".dftindex"
     if not (ix / "CURRENT").is_file():
         raise RuntimeError(f"the indexer finished but {ix} holds no index (no CURRENT)")

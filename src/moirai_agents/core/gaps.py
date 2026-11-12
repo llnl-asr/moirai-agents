@@ -105,7 +105,13 @@ def collect(pid: str) -> Dict[str, Any]:
     Returns {app, chat, added, seen, answers, open: [gap]}."""
     from . import answers as A
     app = _app(pid)
-    found = [(p, rec, g) for p in related(app["id"]) for rec in A.listing(p, limit=10 ** 6) for g in _answer_gaps(rec)]
+    found, once = [], set()
+    for p in related(app["id"]):
+        for rec in A.listing(p, limit=10 ** 6):      # pipelines on the same traces list each other's queries: each answer once, on its own pipeline
+            if rec.get("id") in once:
+                continue
+            once.add(rec.get("id"))
+            found += [(rec.get("pipeline") or p, rec, g) for g in _answer_gaps(rec)]
     out: Dict[str, Any] = {"added": 0, "seen": 0}
 
     def fn(c):

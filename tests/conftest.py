@@ -25,6 +25,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("MOIRAI_AGENTS_LEARNING_DIR", str(tmp_path / "learning"))
     monkeypatch.setenv("MOIRAI_AGENTS_USER_CAPABILITIES", str(tmp_path / "user_caps"))
     monkeypatch.setenv("MOIRAI_AGENTS_PROJECT_CAPABILITIES", str(tmp_path / "project_caps"))
+    monkeypatch.setenv("MOIRAI_AGENTS_QUERY_STORE", str(tmp_path / "queries"))        # never the shared /p/vast1 store
     (tmp_path / "home").mkdir()
     from moirai_agents.core import capstore
     capstore._State.loaded, capstore._State.fingerprint = {}, ""

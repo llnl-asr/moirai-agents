@@ -165,6 +165,7 @@ def items(ws: str, busy: Optional[set] = None) -> Dict[str, List[dict]]:
             pk, gr = c["stages"]["package"]["outputs"], c["stages"]["graph"]["outputs"]
             row.update(published=pk.get("published_package") or "", diff=((gr.get("health") or {}).get("diff") or {}).get("summary"),
                        can_live=c["stages"]["integrate"]["status"] == "passed", live_inputs=c.get("live_inputs"),
+                       draft=bool(c.get("draft")), live_chat=c.get("live_chat") or "",
                        gaps=[{**{k: g.get(k) for k in ("id", "kind", "subject", "detail", "status", "cause", "how", "generic", "workload", "opened", "closed", "recheck")},
                               "question": (g.get("from") or {}).get("question", ""), "seen": 1 + len(g.get("seen_in") or [])} for g in c.get("gaps") or []])
             row["versions"] = published_runs(c)
@@ -184,6 +185,31 @@ def items(ws: str, busy: Optional[set] = None) -> Dict[str, List[dict]]:
                 r["pipeline"] = opened[(a["id"], r["path"])]
     out["campaigns"] = out["apps"]
     return out
+
+
+def new_app(ws: str, name: str, chat: str, live_chat: str, query_chat: str) -> Dict[str, Any]:
+    """An app started blank: a draft run pipeline with a name only and three empty chats - Annotate (its own chat, where the
+    agent asks for the source and a test command and fills the draft), Live Run (where its first live run starts) and Query."""
+    name = re.sub(r"[^A-Za-z0-9._-]+", "-", (name or "").strip()).strip("-.")[:40]
+    if not name:
+        raise P.PipelineError("give the app a name: letters, digits, . _ -")
+    if not name[0].isalnum():
+        name = "a" + name[:39]
+    c = P.new("run", name, notes="started blank from the web UI", draft=True)
+
+    def own(x):
+        x["chat_session"], x["live_chat"], x["query_chat"] = chat, live_chat, query_chat
+    P.update(c["id"], own)
+    return P.load(c["id"], ws)
+
+
+def unused_live_chat(ws: str, parent: str) -> str:
+    """The app's blank Live Run chat while no live run owns it yet ("" otherwise): its first live run takes it."""
+    c = P.load(parent, ws)
+    lc = c.get("live_chat") or ""
+    if not lc or any(x.get("chat_session") == lc for x in P.children(parent, ws)):
+        return ""
+    return lc
 
 
 def new_live(ws: str, parent: str, name: str, command: str, chat: str, values: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

@@ -105,6 +105,13 @@ def test_a_trace_is_read_only_through_traceviewer(code, refused):
     assert bool(errs) == refused, errs
 
 
+def test_only_prov_read_uses_traceviewer():
+    """A capability that imports dftracer.utils is refused: every read goes through prov_read (core.provtrace)."""
+    code = 'import dftracer.utils as U\n' + TOOL
+    assert any("prov_read" in e for e in S.analyze(code)["errors"])
+    assert not any("prov_read" in e for e in S.analyze(TOOL.replace('"""A demo."""', '"""A demo."""\nX = "from dftracer.utils import TraceViewer"'))["errors"])
+
+
 def test_no_capability_reads_traces_directly():
     """Every capability in every layer reads traces through TraceViewer."""
     bad = {n: e for n, (_layer, d, _m) in S.all_caps().items() for e in [S.direct_trace_reads(__import__("ast").parse((d / "tool.py").read_text()),
