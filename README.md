@@ -8,7 +8,7 @@ A capability is one folder in `src/moirai_agents/.agents/capabilities/<name>/`. 
 
 The standing rule: anything explored becomes a capability, constantly. A new workload, software, tool or system met in any stage is captured as `workload_<x>`, `software_<x>`, `tools_<x>` or `system_<x>`, or extends one that exists. The rule is `capstore.STANDING`: every chat prompt, rendered agent and `CLAUDE.md` carries it, `pipeline_advance` repeats it after each stage, and a skill whose Self-learn section omits it is refused. These families and their skill shape match dftracer-agents; `capability_builder` has the template.
 
-`knowledge_search` is the first place to look. It walks one graphify graph over every capability, lesson and memory, and dftracer-agents' workload, software, system and tools skills and memories, then reads lessons and memory directly, because the graph matches headings and symbols rather than body text. The graph rebuilds itself when anything it covers changes. When a tool fails, its result carries `known_lessons`, the closest lessons found through the graph, including the lesson sections of dftracer-agents' skills, so an agent reads what is known before exploring. A `UserPromptSubmit` hook puts the best rows not yet shown in the session in front of each prompt. `memory_write` keeps what is true here, in `~/.moirai-agents/learning/memory/`.
+`knowledge_search` is the first place to look. It walks one graphify graph over every capability, lesson and memory, and dftracer-agents' workload, software, system and tools skills and memories, then reads lessons and memory directly, because the graph matches headings and symbols rather than body text. The graph rebuilds itself when anything it covers changes. When a tool fails, its result carries `known_lessons`, the closest lessons found through the graph, including the lesson sections of dftracer-agents' skills, so an agent reads what is known before exploring. A `UserPromptSubmit` hook puts the best rows not yet shown in the session in front of each prompt. `memory_write` keeps what is true here, in `workspace/.moirai-agents/learning/memory/` (in the project; `MOIRAI_AGENTS_HOME` moves it).
 
 | File | Holds |
 |---|---|
@@ -27,7 +27,7 @@ The web server looks for overlapping or conflicting lessons and capabilities in 
 
 `capability_builder` is the capability that builds capabilities: `capability_new` and `capability_update` validate a proposal and run its checks in a sandbox, a person approves, and it goes live with no restart.
 
-Layers, lowest first: bundled, user (`~/.moirai-agents/capabilities`), project (`capabilities/` in this repo). A higher layer shadows a lower one wholesale, and the bundled layer is never written.
+Layers, lowest first: bundled, user (`workspace/.moirai-agents/capabilities`), project (`capabilities/` in this repo). A higher layer shadows a lower one wholesale, and the bundled layer is never written.
 
 ## The pipelines
 

@@ -31,7 +31,8 @@ PKG = Path(__file__).resolve().parents[1]           # src/moirai_agents
 REPO = PKG.parents[1]                                # moirai-agents checkout
 STATIC = Path(__file__).resolve().parent / "static"
 WS = Path(os.environ.get("MOIRAI_AGENTS_WORKSPACE", REPO / "workspace"))   # where claude sessions run
-STATE = Path(os.environ.get("MOIRAI_AGENTS_WEBUI_STATE", Path.home() / ".moirai-agents" / "webui"))
+from ..env import state_dir  # noqa: E402
+STATE = Path(os.environ.get("MOIRAI_AGENTS_WEBUI_STATE") or state_dir("webui"))      # in the project, never in ~
 
 from ..env import ENV_FILE, load_env  # noqa: E402
 

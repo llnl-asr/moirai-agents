@@ -29,9 +29,11 @@ def expand(traces: str) -> List[str]:
     t = os.path.expanduser(traces)
     if os.pathsep in t and not os.path.exists(t):        # several paths: the exact files an answer read
         return sorted({f for part in t.split(os.pathsep) if part for f in expand(part)})
+    # real paths: an index is keyed by absolute file path, so the same files reached through a symlinked directory (a pipeline's live_run/raw
+    # -> the run's real traces dir) otherwise read a different, partial view of one index (74 entity records missing on 8.1M)
     if os.path.isdir(t):
-        return sorted(glob.glob(os.path.join(t, "**", "*.pfw*"), recursive=True))
-    return sorted(glob.glob(t, recursive=True))
+        return sorted({os.path.realpath(f) for f in glob.glob(os.path.join(t, "**", "*.pfw*"), recursive=True)})
+    return sorted({os.path.realpath(f) for f in glob.glob(t, recursive=True)})
 
 
 def index_dir(files: List[str]) -> str:

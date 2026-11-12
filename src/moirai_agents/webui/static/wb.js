@@ -300,7 +300,7 @@ async function wbAnnotate(first){if(!WB.sel||!WB.sel.item)return;const it=WB.sel
   <div class="vw-grid"><div class="vw-main"><div class="wq-tools"><b class="vw-t">${title}</b>${aggLegend(mode)}<span class="wq-btns"><button id="agfit">fit</button></span></div>
    <div id="aggann" class="vw-graph"></div><div id="agginfo" class="wq-info" hidden></div></div><div class="vw-side">${side}</div></div>`;
  if(v.dataset.h!==html){v.dataset.h=html;const keepG=AGG.ann&&$('#aggann');const old=keepG?$('#aggann'):null;v.innerHTML=html;if(old)$('#aggann').replaceWith(old);wireHead(v);$('#agfit').onclick=()=>aggFit(AGG.ann&&AGG.ann.cy);
-  const gg=$('#wbgapall');if(gg)gg.onclick=()=>workAllGaps(pid,gg);
+  const gg=$('#wbgapall');if(gg)gg.onclick=()=>workAllGaps(pid,gg);wireGaps(v,it);
   const dt=$('#wbdetect');if(dt)dt.onclick=()=>sendText('Describe this app\'s live-run inputs (what a scientist tunes when starting a long run): live_inputs_detect, curate them with what you know of the app, live_inputs_write and live_inputs_validate, then show them to me.',running,[])}
  await drawAgg('ann','aggann',d,null,x=>aggInfo('agginfo',x));if(first&&AGG.ann)aggFit(AGG.ann.cy);stageDetail()}
 
@@ -709,11 +709,35 @@ async function workAllGaps(pid,btn){if(btn){btn.disabled=true;btn.textContent='c
   GAP_HOW+'and work them as ONE batch: group the gaps by function or entity, fix each group in one pass, ask me ONCE before a single re-run of the smoke or baseline, '+
   'then re-run every question that showed a gap and gap_close each.';
  toAppChat(r.app,r.chat,msg)}
-function gapsCard(it){if(!Array.isArray(it.gaps))return '';const gs=it.gaps,open=gs.filter(g=>g.status==='open');
- return `<div class="wb-card"><div class="wb-sec">Provenance gaps <span class="sub">${open.length} open · ${gs.length-open.length} fixed</span></div><ul class="wb-gaps">${gs.slice().reverse().slice(0,pro()?30:8).map(g=>
-  `<li class="${esc(g.status)}"><b>${esc(g.status==='open'?'open':g.status==='closed'?'✓ closed':'fixed, run pending')}</b> ${esc(GAP_L[g.kind]||g.kind)} <code>${esc(g.subject)}</code>${g.cause?` <span class="sub">· ${esc(g.cause.replace(/_/g,' '))}</span>`:''}${pro()&&g.how?`<div class="sub">${esc(g.how)}</div>`:''}</li>`).join('')}</ul>
+// the app's gaps, grouped: by status (open, fixed waiting for a run, closed), then by kind; every level collapsible, kept across refreshes.
+// What closed since you last looked is shown first, with what was learned.
+const GAPOPEN={},GAP_ST={open:['Open','what the provenance still cannot show'],fixed_pending_run:['Fixed, waiting for a run','the annotation and capabilities are updated; the next run confirms it'],closed:['Closed','fixed and confirmed by a re-run question']};
+const GAP_CAUSE=c=>(c||'').replace(/_/g,' ');
+let GAPSEEN={};try{GAPSEEN=JSON.parse(localStorage.getItem('moirai_gapseen')||'{}')||{}}catch(_){GAPSEEN={}}
+function gapLearned(g){const cap=u=>u&&u.capability?`<code>${esc(u.capability)}</code>${u.version?` v${esc(u.version)}`:''}`:'';
+ return `${g.cause?`<div><b>Cause</b> ${esc(GAP_CAUSE(g.cause))}</div>`:''}${g.how?`<div><b>Fix</b> ${esc(g.how)}</div>`:''}
+  ${g.generic||g.workload?`<div><b>Learned in</b> ${[cap(g.generic),cap(g.workload)].filter(Boolean).join(' · ')}</div>`:''}
+  ${g.status==='closed'&&g.recheck?`<div><b>Re-checked</b> by answer <code>${esc(g.recheck.answer||'')}</code>${g.recheck.pipeline?` on ${esc(g.recheck.pipeline)}`:''}</div>`:g.status==='fixed_pending_run'?'<div class="sub">The next run of the app confirms it.</div>':''}
+  ${g.closed?`<div class="sub">${g.status==='closed'?'closed':'fixed'} ${new Date(g.closed*1000).toLocaleString()}</div>`:''}`}
+function gapRow(pid,g){const k=`${pid}:g:${g.id}`;
+ return `<li class="${esc(g.status)}"><details data-gapo="${esc(k)}" ${GAPOPEN[k]?'open':''}><summary><code>${esc(g.subject)}</code>${g.seen>1?` <span class="sub">· ${g.seen} answers</span>`:''}${g.cause?` <span class="sub">· ${esc(GAP_CAUSE(g.cause))}</span>`:''}</summary>
+  <div class="wb-gapd">${g.detail?`<div>${esc(g.detail)}</div>`:''}${g.question?`<div class="sub">shown by “${esc(g.question)}”</div>`:''}${g.status!=='open'?gapLearned(g):''}</div></details></li>`}
+function gapsCard(it){if(!Array.isArray(it.gaps))return '';const pid=it.id,gs=it.gaps,open=gs.filter(g=>g.status==='open');
+ const seen=new Set(GAPSEEN[pid]||[]),day=Date.now()/1000-86400,fresh=gs.filter(g=>g.status!=='open'&&!seen.has(g.id)&&(g.closed||0)>day).sort((a,b)=>(b.closed||0)-(a.closed||0));
+ const banner=fresh.length?`<div class="wb-gapnew"><div class="wb-sec" style="margin-top:0">✓ Just closed <span class="sub">${fresh.length} since you last looked</span><button class="btn" id="wbgapseen" style="margin-left:auto">Got it</button></div>
+  <ul class="wb-gaps">${fresh.map(g=>`<li class="${esc(g.status)}"><b>${g.status==='closed'?'✓ closed':'fixed, run pending'}</b> ${esc(GAP_L[g.kind]||g.kind)} <code>${esc(g.subject)}</code><div class="wb-gapd">${gapLearned(g)}</div></li>`).join('')}</ul></div>`:'';
+ const sec=st=>{const xs=gs.filter(g=>g.status===st);if(!xs.length)return '';const k=`${pid}:s:${st}`,isOpen=k in GAPOPEN?GAPOPEN[k]:st==='open';
+  const by={};xs.slice().reverse().forEach(g=>(by[g.kind]=by[g.kind]||[]).push(g));
+  return `<details class="wb-gsec ${esc(st)}" data-gapo="${esc(k)}" ${isOpen?'open':''}><summary><b>${GAP_ST[st][0]}</b> <span class="wb-gn">${xs.length}</span> <span class="sub">${GAP_ST[st][1]}</span></summary>
+   ${Object.entries(by).sort((a,b)=>b[1].length-a[1].length).map(([kind,ys])=>{const kk=`${pid}:k:${st}:${kind}`,ko=kk in GAPOPEN?GAPOPEN[kk]:Object.keys(by).length<=2;
+    return `<details class="wb-gkind" data-gapo="${esc(kk)}" ${ko?'open':''}><summary>${esc(GAP_L[kind]||kind)} <span class="wb-gn">${ys.length}</span></summary><ul class="wb-gaps">${ys.map(g=>gapRow(pid,g)).join('')}</ul></details>`}).join('')}</details>`};
+ return `<div class="wb-card"><div class="wb-sec">Provenance gaps <span class="sub">${open.length} open · ${gs.length-open.length} fixed</span></div>${banner}
+  ${['open','fixed_pending_run','closed'].map(sec).join('')}
   ${gs.length?'':'<div class="sub">What the queries on this app could not show. Collect them from every query asked so far, and fix them together.</div>'}
   <button class="btn primary" id="wbgapall" title="Collect the gaps of every query on this app, its live runs and its published datasets, and send them to the app's chat as one request">Collect gaps from all queries &amp; fix them together</button></div>`}
+function wireGaps(v,it){v.querySelectorAll('details[data-gapo]').forEach(d=>d.ontoggle=()=>{GAPOPEN[d.dataset.gapo]=d.open});
+ const b=v.querySelector('#wbgapseen');if(b)b.onclick=()=>{GAPSEEN[it.id]=(it.gaps||[]).filter(g=>g.status!=='open').map(g=>g.id);
+  try{localStorage.setItem('moirai_gapseen',JSON.stringify(GAPSEEN))}catch(_){}const box=b.closest('.wb-gapnew');if(box)box.remove()}}
 
 // ---- what is running now, from any tab: every app or run with a running job, a working agent, or a question for you
 function activeOf(d){return [...d.apps,...d.lives,...d.datasets].filter(x=>(x.jobs||[]).length||x.busy||['running','working','needs_you'].includes(x.state))}

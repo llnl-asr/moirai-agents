@@ -12,11 +12,13 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ..env import state_dir
+
 from . import capstore
 
 
 def _file() -> Path:
-    d = Path(os.environ.get("MOIRAI_AGENTS_LEARNING_DIR", "~/.moirai-agents/learning")).expanduser()
+    d = Path(os.environ.get("MOIRAI_AGENTS_LEARNING_DIR") or state_dir("learning")).expanduser()
     d.mkdir(parents=True, exist_ok=True)
     return d / "lessons.jsonl"
 

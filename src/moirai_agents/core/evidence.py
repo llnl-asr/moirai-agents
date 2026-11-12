@@ -472,12 +472,27 @@ def _stats(s, k, v, cat, outs, ctx):
                     '.filter(col("name") == "ER" & col("args.subject").is_in(<ids>))',
                     lambda tv, col, cols: tv.filter((col("name") == "ER") & col("args.subject").is_in(ids)) if ids else None) if ids else []
         per = Counter(str(r["args.subject"]) for r in links if r.get("args.subject"))
+        owners: Dict[str, List[str]] = {}          # attribute id -> the entities it is part_of: which entity owns the lowest and highest value
+        for r in links:
+            if r.get("args.subject") and r.get("args.object"):
+                owners.setdefault(str(r["args.subject"]), []).append(str(r["args.object"]))
         by: Dict[str, List[float]] = {}
         dist: Dict[str, int] = Counter()
         for i in ids:
             by.setdefault(typ[i], []).extend([val[i]] * max(per.get(i, 0), 1))
             dist[typ[i]] += 1
         groups = {ty: {"values": vs, "distinct": dist[ty]} for ty, vs in by.items()}
+        want_own: Dict[str, Dict[str, List[str]]] = {}      # only the owners of the lowest and highest value are looked up, never the whole catalog
+        for ty in groups:
+            mine = [i for i in ids if typ[i] == ty]
+            want_own[ty] = {key: owners.get(pick(mine, key=val.get), [])[:3] for key, pick in (("min_owner", min), ("max_owner", max))}
+        oids = sorted({o for d in want_own.values() for os_ in d.values() for o in os_})
+        orows = v.q(f"step {k + 1}: the entities owning the lowest and highest {name}", '.filter(col("name") == "EH" & col("args.id").is_in(<owners>))',
+                    lambda tv, col, cols: tv.filter((col("name") == "EH") & col("args.id").is_in(oids))) if oids else []
+        uri_of = {str(r.get("args.id", "")): str(r.get("args.uri", "")) for r in orows}
+        for ty, d in want_own.items():
+            for key, os_ in d.items():
+                groups[ty][key] = [_shown(uri_of.get(o, o)) for o in os_]
         for ty in groups:                          # the records of the lowest and highest value of each type come first
             mine = [i for i in ids if typ[i] == ty]
             for i in (min(mine, key=val.get), max(mine, key=val.get)):
@@ -487,7 +502,7 @@ def _stats(s, k, v, cat, outs, ctx):
     out = []
     for ty, g in sorted(groups.items(), key=lambda x: -len(x[1]["values"])):
         sm = _summary(g["values"])
-        out.append({"of": ty, "distinct": g["distinct"], **sm, "mean_distinct": (sum(set(g["values"])) / len(set(g["values"]))) if g["values"] else None})
+        out.append({"of": ty, "distinct": g["distinct"], "min_owner": g.get("min_owner", []), "max_owner": g.get("max_owner", []), **sm, "mean_distinct": (sum(set(g["values"])) / len(set(g["values"]))) if g["values"] else None})
     return {"kind": "stats", "name": name, "groups": out, "ids": [], "resolved": resolved, "cites": cites[:MAX_CITE]}
 
 
@@ -556,7 +571,8 @@ def headline(o, cat, ctx) -> str:
         if not o["groups"]:
             return f"{o['name']}: no entity records it."
         return " ".join(f"{o['name']} of {g['n']:,} {g['of']} entities: mean {_f2(g['mean'])}, median {_f2(g['median'])}, from {_f2(g['min'])} to {_f2(g['max'])}"
-                        + (f" ({g['distinct']:,} distinct values, whose mean is {_f2(g['mean_distinct'])})." if g["distinct"] != g["n"] else ".") for g in o["groups"])
+                        + (f" ({g['distinct']:,} distinct values, whose mean is {_f2(g['mean_distinct'])})." if g["distinct"] != g["n"] else ".")
+                      + (f" Lowest on {', '.join(g['min_owner'])}; highest on {', '.join(g['max_owner'])}." if g.get("max_owner") else "") for g in o["groups"])
     if k in ("input", "output", "attribute"):
         merged = _merged(o)
         what = {"input": f"{o.get('activity')} ran {len(o['runs'])} time(s); its parameters", "output": f"{o.get('activity')} ran {len(o['runs'])} time(s); what it returned",
@@ -588,9 +604,9 @@ def _f2(x: float) -> str:
 def table(o, cat, ctx) -> str:
     k = o["kind"]
     if k == "stats":
-        return _table(["name", "of", "entities", "distinct values", "mean", "median", "min", "max", "mean of distinct"],
+        return _table(["name", "of", "entities", "distinct values", "mean", "median", "min", "max", "mean of distinct", "min on", "max on"],
                       [[o["name"], g["of"], f"{g['n']:,}", f"{g['distinct']:,}", _f2(g["mean"]), _f2(g["median"]), _f2(g["min"]), _f2(g["max"]),
-                        _f2(g["mean_distinct"])] for g in o["groups"]])
+                        _f2(g["mean_distinct"]), ", ".join(g.get("min_owner", [])), ", ".join(g.get("max_owner", []))] for g in o["groups"]])
     if k == "entities":
         return _table(["type", "entity", "store", "id"], [[cat["entities"][i]["type"], _shown(cat["entities"][i]["uri"]), cat["entities"][i]["store"], i] for i in o["ids"] if i in cat["entities"]])
     if k == "activities":

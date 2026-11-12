@@ -165,7 +165,8 @@ def items(ws: str, busy: Optional[set] = None) -> Dict[str, List[dict]]:
             pk, gr = c["stages"]["package"]["outputs"], c["stages"]["graph"]["outputs"]
             row.update(published=pk.get("published_package") or "", diff=((gr.get("health") or {}).get("diff") or {}).get("summary"),
                        can_live=c["stages"]["integrate"]["status"] == "passed", live_inputs=c.get("live_inputs"),
-                       gaps=[{k: g.get(k) for k in ("id", "kind", "subject", "detail", "status", "cause", "how")} for g in c.get("gaps") or []])
+                       gaps=[{**{k: g.get(k) for k in ("id", "kind", "subject", "detail", "status", "cause", "how", "generic", "workload", "opened", "closed", "recheck")},
+                              "question": (g.get("from") or {}).get("question", ""), "seen": 1 + len(g.get("seen_in") or [])} for g in c.get("gaps") or []])
             row["versions"] = published_runs(c)
         elif c["kind"] == "analysis" and c.get("parent") and c.get("published"):
             row.update(published_run=c["published"])

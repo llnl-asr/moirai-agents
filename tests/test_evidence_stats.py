@@ -53,3 +53,10 @@ def test_synthesis_numbers_read_as_people_write_them(tmp_path):
     assert ok["ok"], ok
     bad = E.check_synthesis("The mean pLDDT is 79.5 over 1,234 structures [S1].", 1, computed)
     assert bad["problems"] == ["the number 79.5 is not in the computed result", "the number 1,234 is not in the computed result"]
+
+
+def test_stats_names_the_entity_that_owns_the_lowest_and_highest_value(tmp_path):
+    r = E.run(str(traces(tmp_path)), [{"op": "stats", "name": "mean_plddt", "type": "best_structure"}], str(tmp_path / "idx"))
+    g = r["outs"][0]["groups"][0]
+    assert g["min_owner"] == ["file:///s10.pdb"] and g["max_owner"] == ["file:///s20.pdb"], g
+    assert "Lowest on file:///s10.pdb; highest on file:///s20.pdb" in r["steps"][0]["headline"]

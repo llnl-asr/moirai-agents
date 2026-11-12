@@ -32,6 +32,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ..env import state_dir
+
 PKG = Path(__file__).resolve().parents[1]
 BUNDLED = PKG / ".agents" / "capabilities"
 NAME_RX = re.compile(r"^[a-z][a-z0-9_]{2,40}$")
@@ -68,7 +70,7 @@ class _State:
 def layers() -> List[Tuple[str, Path]]:
     """Lowest precedence first."""
     return [("bundled", Path(os.environ.get("MOIRAI_AGENTS_BUNDLED_CAPABILITIES", BUNDLED))),
-            ("user", Path(os.environ.get("MOIRAI_AGENTS_USER_CAPABILITIES", "~/.moirai-agents/capabilities")).expanduser()),
+            ("user", Path(os.environ.get("MOIRAI_AGENTS_USER_CAPABILITIES") or state_dir("capabilities")).expanduser()),
             ("project", Path(os.environ.get("MOIRAI_AGENTS_PROJECT_CAPABILITIES", PKG.parents[1] / "capabilities")).expanduser())]
 
 
@@ -333,7 +335,7 @@ def run_checks(code: str, checks: List[dict], timeout: int = 60) -> dict:
 
 # ------------------------------------------------------------------------------- proposals
 def _learning_dir() -> Path:
-    d = Path(os.environ.get("MOIRAI_AGENTS_LEARNING_DIR", "~/.moirai-agents/learning")).expanduser()
+    d = Path(os.environ.get("MOIRAI_AGENTS_LEARNING_DIR") or state_dir("learning")).expanduser()
     d.mkdir(parents=True, exist_ok=True)
     return d
 

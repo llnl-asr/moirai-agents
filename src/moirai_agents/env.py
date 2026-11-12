@@ -8,6 +8,12 @@ REPO = Path(__file__).resolve().parents[2]
 ENV_FILE = Path(os.environ.get("MOIRAI_AGENTS_ENV_FILE", REPO / ".env"))
 
 
+def state_dir(*parts: str) -> Path:
+    """Where moirai-agents keeps its own state (user capabilities, learning, web UI state, caches): inside the project, never in the
+    home directory. MOIRAI_AGENTS_HOME moves it; the default is <repo>/workspace/.moirai-agents (gitignored, beside the pipelines)."""
+    return Path(os.environ.get("MOIRAI_AGENTS_HOME") or REPO / "workspace" / ".moirai-agents").expanduser().joinpath(*parts)
+
+
 def load_env() -> None:
     if not ENV_FILE.exists():
         return
@@ -18,6 +24,8 @@ def load_env() -> None:
         k, v = line.split("=", 1)
         k = k.replace("export ", "").strip()
         os.environ.setdefault(k, v.strip().strip("'\""))
+    os.environ.setdefault("DFTRACER_JIT_CACHE", str(state_dir("cache", "dftracer-utils", "jit")))     # dftracer-utils: ~/.cache otherwise
+    os.environ.setdefault("DFTRACER_UTILS_SPILL_DIR", str(state_dir("cache", "dftracer-utils", "spill")))
 
 
 def group_umask() -> None:
