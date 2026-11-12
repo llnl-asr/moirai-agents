@@ -11,6 +11,7 @@ run.sh, graph_summary.json), then the site's chgperm.sh sets the group. Every pu
 
 Verification and its OUTPUT_ROOT never live on home (quota): lustre or the workspace only.
 """
+import filecmp
 import grp
 import hashlib
 import json
@@ -405,11 +406,84 @@ def _pins(py):
     return json.loads(r.stdout) if r.returncode == 0 else {}
 
 
+# The provenance patch is the diff of the WHOLE annotated copy against the pristine source: every stage that edits the copy (the moirai annotation, the dftracer performance annotation,
+# a fix) must show up in it, so it is found by comparing the two trees, never by a list one stage kept (the annotate spec listed 3 of the 31 files the performance annotation rewrote).
+PATCH_MAX_BYTES = 1 << 20
+PATCH_SKIP_DIRS = {"__pycache__", ".git"}
+
+
+def _patch_skip_name(name):
+    """Pure: file names that never go in the patch: compiled python, the dftracer log, trace files (*.pfw*)."""
+    return name.endswith(".pyc") or name == "dft.log" or ".pfw" in name
+
+
+def _patch_text_problem(path, limit=PATCH_MAX_BYTES):
+    """'' when path is a UTF-8 text file of at most limit bytes (so diff and patch carry it), else why it cannot be in the patch."""
+    try:
+        size = path.stat().st_size
+        if size > limit:
+            return f"{size} bytes, over the {limit} byte limit"
+        data = path.read_bytes()
+    except OSError as e:
+        return f"unreadable ({e.strerror or e})"
+    if b"\0" in data:
+        return "binary file"
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return "not UTF-8 text"
+    return ""
+
+
+def patch_files(src, dst, limit=PATCH_MAX_BYTES):
+    """Reads only. The relative paths (posix, sorted) of every text file under dst, the annotated copy, that differs from the same path under src, the pristine source, or does not
+    exist there (a new file such as _moirai_prov.py). Skips __pycache__ and .git folders, *.pyc, dft.log, *.pfw* trace files and symlinks; a differing file that is binary, not UTF-8
+    or over limit bytes cannot travel in a text patch and is returned as a warning naming it. Returns (files, warnings)."""
+    src, dst = Path(src), Path(dst)
+    files, warnings = [], []
+    for dp, dn, fn in os.walk(dst):
+        dn[:] = sorted(d for d in dn if d not in PATCH_SKIP_DIRS)
+        for f in sorted(fn):
+            p = Path(dp) / f
+            if _patch_skip_name(f) or p.is_symlink():
+                continue
+            rel = p.relative_to(dst).as_posix()
+            s = src / rel
+            if s.is_file() and not s.is_symlink() and filecmp.cmp(s, p, shallow=False):
+                continue
+            why = _patch_text_problem(p, limit)
+            if why:
+                warnings.append(f"{rel} differs from the source but is not in the patch: {why}")
+            else:
+                files.append(rel)
+    return sorted(files), sorted(warnings)
+
+
 def _patch(src, dst, files):
     out = ""
     for rel in files:
         r = subprocess.run(["diff", "-uN", "--label", f"a/{rel}", "--label", f"b/{rel}", str(src / rel), str(dst / rel)], capture_output=True, text=True)
         out += r.stdout
+    return out
+
+
+def _patch_findings(text, ws, home=None, user=None):
+    """Pure: portability findings of a patch text: the workspace path, the home path or '/<user>/' on any line. Same needles as lint. [] when clean."""
+    home = os.path.expanduser("~") if home is None else home
+    user = os.environ.get("USER", "") if user is None else user
+    forbidden = {}
+    if str(ws):
+        forbidden[str(ws)] = "workspace path"
+    if home not in ("", "/"):
+        forbidden[home] = "home path"
+    if user:
+        forbidden[f"/{user}/"] = "username in a path"
+    lines = text.splitlines()
+    out = []
+    for needle, what in forbidden.items():
+        hit = [i for i, line in enumerate(lines, 1) if needle in line]
+        if hit:
+            out.append(f"provenance.patch: hard-coded {what} on {len(hit)} line(s), first at line {hit[0]}: fix the annotation, not the check")
     return out
 
 
@@ -492,6 +566,9 @@ def lint(pkg, ws):
                 findings.append(f"{f.name}: bash -n: {r.stderr.strip()[:160]}")
             if f.name != LOADER and LOADER not in text:
                 findings.append(f"{f.name}: does not source {LOADER}")
+    pp = pkg / "patches" / "provenance.patch"
+    if pp.is_file():
+        findings += _patch_findings(pp.read_text(errors="replace"), ws, home, user)
     cfg = pkg / "config.ini"
     if not cfg.exists():
         return findings + ["config.ini is missing"]
@@ -518,6 +595,61 @@ def _bash_n(text):
 _LITERAL = re.compile("|".join(["/" + "usr/WS2", "/" + r"home/\w", "/g/g" + r"\d", "hari" + "dev", "2026" + r"\d{4}_", "moirai-agents-prov", "openfold/" + "2026"]))
 _SETUP = "." + "/setup-env.sh --use-rocm7 --no-managed-python"
 _SPLITS = "/" + "p/lustre5/lbann/elmerfold/splits/1n_10s"
+
+
+def patch_selftest():
+    """Sandbox for the provenance patch: a tmp pristine tree and an annotated tree where a file the annotate stage did not list differs. Asserts that every differing text file is in the patch
+    (sorted), that compiled/log/trace/.git/binary/oversized files are not (the last two as warnings), that `patch -p1` applies it to a copy of the pristine tree and reproduces the annotated
+    files, and that the portability finding fires on a home path and not on a clean patch."""
+    cases = {}
+    with tempfile.TemporaryDirectory(prefix="repro_patch_selftest_") as td:
+        td = Path(td).resolve()
+        a, b = td / "pristine", td / "annotated"
+
+        def put(root, rel, data):
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(data if isinstance(data, bytes) else data.encode())
+        for rel, t in {"a.py": "x = 1\n", "sub/b.py": "y = 2\n", "c.txt": "same\n", "d.py": "no newline"}.items():
+            put(a, rel, t)
+            put(b, rel, t)
+        listed = ["a.py"]                                                   # what the annotate spec lists
+        put(b, "a.py", "from moirai import x\nx = 1\n")
+        put(b, "sub/b.py", "from moirai import y\ny = 2\n")                 # differs, not listed
+        put(b, "d.py", "no newline at the end")                             # differs, no trailing newline
+        put(b, "sub/new.py", "z = 3\n")                                     # new file, not listed
+        put(b, "_moirai_prov.py", "# helper\n")                             # the helper
+        put(b, "__pycache__/m.cpython-311.pyc", b"\x00pyc")
+        put(b, "sub/m.pyc", b"\x00pyc")
+        put(b, "dft.log", "log\n")
+        put(b, "run.pfw.gz", b"\x1f\x8b")
+        put(b, ".git/config", "[core]\n")
+        put(b, "big.txt", "x" * ((1 << 20) + 5))
+        put(b, "bin.dat", b"\x00\x01\x02")
+        files, warns = patch_files(a, b)
+        cases["unlisted_file_in_patch"] = "sub/b.py" in files and "sub/new.py" in files and "d.py" in files and set(listed) <= set(files)
+        cases["files_exact_and_sorted"] = files == ["_moirai_prov.py", "a.py", "d.py", "sub/b.py", "sub/new.py"] and files == sorted(files)
+        cases["helper_included"] = "_moirai_prov.py" in files
+        cases["identical_file_not_in_patch"] = "c.txt" not in files
+        cases["pyc_log_pfw_git_excluded"] = not any(f.endswith(".pyc") or f == "dft.log" or ".pfw" in f or f.startswith((".git/", "__pycache__/")) for f in files)
+        cases["big_and_binary_warned"] = any(w.startswith("big.txt") for w in warns) and any(w.startswith("bin.dat") for w in warns) and "big.txt" not in files and "bin.dat" not in files
+        text = _patch(a, b, files)
+        cases["patch_names_every_file"] = all(f"+++ b/{f}" in text for f in files) and text == _patch(a, b, files)
+        if shutil.which("patch"):
+            work = td / "work"
+            shutil.copytree(a, work)
+            pf = td / "provenance.patch"
+            pf.write_text(text)
+            r = subprocess.run(["patch", "-s", "-p1", "-i", str(pf)], cwd=work, capture_output=True, text=True)
+            cases["patch_p1_applies_cleanly"] = r.returncode == 0 and not (work / "sub" / "b.py.orig").exists()
+            cases["patch_reproduces_annotated_files"] = all((work / f).read_bytes() == (b / f).read_bytes() for f in files)
+        clean = _patch_findings(text, str(td / "session"), "/home-fake/somebody", "nobody_zz")
+        dirty = _patch_findings(text + "+HOME = '/home-fake/somebody/x'\n", str(td / "session"), "/home-fake/somebody", "nobody_zz")
+        cases["portable_clean_patch"] = clean == []
+        cases["portable_catches_home_path"] = any("home path" in d for d in dirty)
+    bad = [k for k, v in cases.items() if not v]
+    line = "repro patch selftest PASS " + " ".join(f"{k}=ok" for k in cases) if not bad else "repro patch selftest FAIL " + ",".join(bad)
+    return {"status": "ok" if not bad else "error", "line": line, "cases": cases}
 
 
 def _selftest():
@@ -584,6 +716,9 @@ def _selftest():
     if bad:
         notes.append(f"literal values in {bad}")
     cases["scripts_parse"] = all(_bash_n(LIB + "\n" + BATCH_STEPS[k])[0] for k in BATCH_STEPS)
+    # the provenance patch holds every annotated file, not only the ones the annotate stage listed
+    ps = patch_selftest()
+    cases.update({"patch_" + k: v for k, v in ps["cases"].items()})
     line = "repro batch selftest PASS " + " ".join(f"{k}=ok" for k in cases) if all(cases.values()) else "repro batch selftest FAIL " + ",".join(k for k, v in cases.items() if not v)
     return {"status": "ok" if all(cases.values()) else "error", "line": line, "cases": cases, "notes": notes}
 
@@ -1513,13 +1648,15 @@ def register(mcp):
     @mcp.tool()
     def repro_build(pipeline: str, output_root: str = "", mode: str = "") -> dict:
         """Generate final_provenance/ in the session: config.ini, scripts, the provenance patch, the spec, pinned versions and a standalone checker. Use after the graph stage, or again after
-        a fix: it starts over. output_root: where a reader's run writes; keep ${USER} or ${HOME}, never a literal name. Default '' is /p/lustre5/${USER}/moirai_repro/${APP} when the build
+        a fix: it starts over. patches/provenance.patch is the diff of the WHOLE annotated copy (<session>/provenance/source) against the pristine source: every UTF-8 text file that differs,
+        sorted, not only the annotate stage's spec files (a later performance annotation changes more files), plus the helper _moirai_prov.py; __pycache__, .git, *.pyc, dft.log, *.pfw*,
+        binary files and files over 1 MB are left out and named in warnings. output_root: where a reader's run writes; keep ${USER} or ${HOME}, never a literal name. Default '' is /p/lustre5/${USER}/moirai_repro/${APP} when the build
         machine has /p/lustre5, else <workspace>/moirai_repro/${APP}: never under home (a home quota fills up and verification fails writing verification.json); an explicit output_root under home is
         accepted for the reader but warned about, and repro_verify never runs on it. mode: '' detects it (batch when the moirai_smoke or baseline stage ran a
         generated flux batch run.sh: its outputs hold batch_script or submit_command), 'batch' or 'generic' forces it. Batch mode writes a per-chunk wrapper template, a run.sh generator call, a
         flux batch with a wait and failure checks, and never starts a service on the login node. inputs/expected.json holds, for the smoke and baseline traces, the activity, entity and edge
         counts and the sorted entity types (from the trace reader); the checker requires equal activities and every type, and counts entities and edges only when the run captures no inputs or attributes.
-        Returns {status, package, mode, files, source, pins, warnings, output_root}."""
+        Returns {status, package, mode, files, source, pins, warnings, output_root, patch (files, count)}."""
         c = P.load(pipeline)
         integ, ann, base = P.stage(c, "integrate")["outputs"], P.stage(c, "annotate")["outputs"], P.stage(c, "baseline")["outputs"]
         smoke_run = P.stage(c, "moirai_smoke")["outputs"]
@@ -1539,7 +1676,12 @@ def register(mcp):
         shutil.rmtree(pkg, ignore_errors=True)
         for d in ("scripts", "patches", "inputs"):
             (pkg / d).mkdir(parents=True)
-        (pkg / "patches" / "provenance.patch").write_text(_patch(src, dst, list(ann["files"]) + (["_moirai_prov.py"] if (dst / "_moirai_prov.py").exists() else [])))
+        patch_list, patch_warn = patch_files(src, dst)
+        warnings += patch_warn
+        listed_missing = [f for f in (ann.get("files") or []) if f not in set(patch_list)]
+        if listed_missing:
+            warnings.append(f"the annotate stage lists {listed_missing} but they are not in the patch (identical to the source or skipped)")
+        (pkg / "patches" / "provenance.patch").write_text(_patch(src, dst, patch_list))
         (pkg / "inputs" / "spec.json").write_text(json.dumps(ann["spec"], indent=1))
         expected = {"smoke": ref_expected(T.read(smoke_run["traces"]))}
         if base.get("traces"):
@@ -1595,6 +1737,8 @@ Scientific artifacts: {', '.join(ann['spec'].get('scientific_artifacts', []))}.
 The app is launched by its own generator as a `flux batch` job (2 exclusive nodes; one `flux bulksubmit` chunk job per chunk on the worker node). The generator is given a per-chunk wrapper as its
 submit script; the wrapper starts `moirai-service` in the background of the chunk job's own shell, runs the original submit script, and stops the service. No service runs on the login node.
 
+`patches/provenance.patch` holds every annotated file: the diff of the whole annotated copy against the pinned app ({len(patch_list)} files), not only the files of the annotation spec.
+
 ## Use
 
 ```bash
@@ -1617,7 +1761,7 @@ activities and the entity types must match; when the run captures inputs and att
 | Script | Does |
 |---|---|
 | `00_check_prereqs.sh` | commands, `module`, and both venvs when reused |
-| `01_get_source.sh` | the app at its pinned commit plus `patches/provenance.patch` |
+| `01_get_source.sh` | the app at its pinned commit plus `patches/provenance.patch` (every annotated file) |
 | `02_setup_env.sh` | the moirai venv and the app venv; `REUSE_VENV=1` skips both |
 | `03_build.sh` | `moirai_env.sh`, the shim and the wrapper rendered from `scripts/submit_moirai.sh.tmpl` |
 | `04_run.sh` | smoke input, `run.sh` from the generator, `flux batch`, `flux watch`, the failure checks |
@@ -1628,6 +1772,8 @@ activities and the entity types must match; when the run captures inputs and att
 
 Reproduces the moirai provenance of {c['name']}: {counts['activities']} activities and {counts['entities']} entities in the original run.
 Scientific artifacts: {', '.join(ann['spec'].get('scientific_artifacts', []))}.
+
+`patches/provenance.patch` holds every annotated file: the diff of the whole annotated copy against the pinned app ({len(patch_list)} files), not only the files of the annotation spec.
 
 ## Use
 
@@ -1642,7 +1788,7 @@ The number of activities and the entity types must match `inputs/expected.json`;
 | Script | Does |
 |---|---|
 | `00_check_prereqs.sh` | commands and access |
-| `01_get_source.sh` | the app at its pinned state, plus `patches/provenance.patch` |
+| `01_get_source.sh` | the app at its pinned state, plus `patches/provenance.patch` (every annotated file) |
 | `02_setup_env.sh` | the runtime at the pinned versions; `REUSE_VENV=1` skips it |
 | `03_build.sh` | the patched app against moirai |
 | `04_run.sh` | the run under `moirai-service` |
@@ -1651,8 +1797,10 @@ The number of activities and the entity types must match `inputs/expected.json`;
         (pkg / "README.md").write_text(readme)
         files = sorted(str(f.relative_to(pkg)) for f in pkg.rglob("*") if f.is_file())
         P.record(pipeline, STAGE, status="running", outputs={"package": str(pkg), "mode": "batch" if batch else "generic", "files": len(files), "pins": pins, "warnings": warnings, "verified": None,
-                                                             "summary": f"{len(files)} files in final_provenance ({'batch' if batch else 'generic'} mode)"}, note="package built")
-        return {"status": "ok", "package": str(pkg), "mode": "batch" if batch else "generic", "files": files, "source": url or "bundled", "pins": pins, "warnings": warnings, "output_root": output_root}
+                                                             "patch_files": len(patch_list),
+                                                             "summary": f"{len(files)} files in final_provenance ({'batch' if batch else 'generic'} mode), patch holds {len(patch_list)} annotated files"}, note="package built")
+        return {"status": "ok", "package": str(pkg), "mode": "batch" if batch else "generic", "files": files, "source": url or "bundled", "pins": pins, "warnings": warnings, "output_root": output_root,
+                "patch": {"count": len(patch_list), "files": patch_list}}
 
     @mcp.tool()
     def repro_verify(pipeline: str, isolation_root: str = "", scale: str = "smoke", reuse_venv: str = "", limit: int = 3600, wait: int = 300, moirai_venv: str = "", in_place: str = "", output_root: str = "") -> dict:
@@ -1758,7 +1906,7 @@ The number of activities and the entity types must match `inputs/expected.json`;
 
     @mcp.tool()
     def repro_validate(pipeline: str) -> dict:
-        """Validate the package: it holds no user, workspace or job path, its scripts parse and source the loader, a batch package starts no service in 04_run.sh, and an isolated run passed with the
+        """Validate the package: it holds no user, workspace or job path (scripts, config.ini and patches/provenance.patch), its scripts parse and source the loader, a batch package starts no service in 04_run.sh, and an isolated run passed with the
         original activities and entity types (entity and edge counts only when the run captures no inputs or attributes). When the package was published (repro_publish_package recorded
         publish_root) the published tree is checked too, as repro_publish_validate does (group moirai).
         Use before the last gate. Returns the verdict {status, failed, unknown, passed, total}."""
@@ -1797,8 +1945,17 @@ The number of activities and the entity types must match `inputs/expected.json`;
     @mcp.tool()
     def repro_batch_selftest() -> dict:
         """Check the batch mode on pure renders, with no cluster: the per-chunk wrapper template, the 04_run text (both scales), the chunk-failure patterns on the real failing run.out text and a clean
-        one, the command parse and config render, and that no script holds a user, workspace, session or job path. Use after changing repro_package. Returns {status, line, cases, notes}."""
+        one, the command parse and config render, that no script holds a user, workspace, session or job path, and the provenance patch cases of repro_patch_selftest (cases named patch_*).
+        Use after changing repro_package. Returns {status, line, cases, notes}."""
         return _selftest()
+
+    @mcp.tool()
+    def repro_patch_selftest() -> dict:
+        """Sandbox test of the provenance patch, no cluster: a tmp pristine tree and an annotated tree where a file the annotate stage did not list differs. Covers: every differing text file
+        (unlisted, new, no trailing newline, the helper _moirai_prov.py) is in the patch, sorted; identical files, __pycache__, *.pyc, dft.log, *.pfw*, .git, binary files and files over 1 MB are not
+        (the last two come back as warnings); `patch -p1` applies the patch to a copy of the pristine tree and reproduces the annotated files; the portability finding fires on a home path and not on a
+        clean patch. Use after any change to repro_build's patch. Returns {status, line, cases}: line is 'repro patch selftest PASS ...' or 'FAIL <cases>'."""
+        return patch_selftest()
 
     @mcp.tool()
     def repro_check_selftest() -> dict:

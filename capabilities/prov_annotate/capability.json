@@ -1,7 +1,7 @@
 {
  "name": "prov_annotate",
  "description": "Add moirai provenance to an application - find data accesses, agree entity types and activities with the user, insert them into a copy (decorate a function, patch or subclass a method, annotate a statement, record a shell step of a Maestro YAML, invalidate, conditional edges), validate, and show the user an entity-type relationship diagram of what was annotated at the gate. Load for the annotate stage, or when a spec needs an inherited method, an inline subprocess step, a delete, a key from a local variable or an optional input, when the work is a shell command in a Maestro YAML `cmd:` step (AlphaFold 3, Rosetta FlexPepDock, BioTox, yaml_step), when a question about the parameters or flags of a step finds none recorded (a no-argument on_finish/run/__call__ hook whose command line was built in the constructor), when a gap says no_outputs or no_attributes (a hook that returns None keeps its result on self: record it with capture.outputs and as attributes; a question about quality, depth, size or counts of a data entity finds no attributes), or when the annotate verdict is inconclusive about PYTHONPATH, moirai_env.sh or maestro_dry.",
- "version": 15,
+ "version": 16,
  "enabled": true,
  "stages": [
   "annotate"
@@ -151,6 +151,13 @@
    "by": "haridev",
    "proposal": "ef4554caf1a2",
    "why": "moirai now records user_hash, group_hash, job and the configuration environment as process metadata at initialize (branch feat/process-metadata); the helper's run_context uses moirai's identity hash (moirai_hash of kind and MOIRAI_ID_SALT + name) so both name a user the same way."
+  },
+  {
+   "version": 16,
+   "ts": 1794464425.603541,
+   "by": "haridev",
+   "proposal": "f6f977bb7e34",
+   "why": "User: \"I want to add the perf annotation as a part of annotation sub capability for performance provenance it should add dftracer calls directly for performance apis.\" Stage 1 placeholder: a `performance` spec section applied by annotate_apply in the same pass (core/perf_annotate.py), validated by annotate_validate and drawn in annotate_diagram. Full skill, code and checks follow by capability_refine."
   }
  ]
 }
