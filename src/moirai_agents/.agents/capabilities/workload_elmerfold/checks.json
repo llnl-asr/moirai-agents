@@ -1,0 +1,36 @@
+[
+ {
+  "tool": "elmerfold_nodes",
+  "args": {
+   "chunks": 2
+  },
+  "expect": {
+   "contains": "3"
+  }
+ },
+ {
+  "tool": "elmerfold_type_cut",
+  "args": {
+   "name": "abcdefghijklmnopqrstuvwxyz0123456789"
+  },
+  "expect": {
+   "contains": "abcdefghijklmnopqrstuvwxyz01234"
+  }
+ },
+ {
+  "tool": "elmerfold_spec_validate",
+  "args": {
+   "spec": "{}"
+  },
+  "expect": {
+   "contains": "stage_area"
+  }
+ },
+ {
+  "tool": "elmerfold_gap_batch",
+  "args": {},
+  "expect": {
+   "contains": "subprocess_finish"
+  }
+ }
+]

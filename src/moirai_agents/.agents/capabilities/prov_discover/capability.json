@@ -1,7 +1,7 @@
 {
  "name": "prov_discover",
  "description": "Find the scientific artifact and every place the app touches data, and prepare the questions that decide what provenance to capture. Load for the discover stage, or any question about what should be captured as provenance.",
- "version": 1,
+ "version": 2,
  "enabled": true,
  "stages": [
   "discover"
@@ -30,6 +30,13 @@
   {
    "version": 1,
    "why": "moved from dftracer-agents' provenance mode"
+  },
+  {
+   "version": 2,
+   "ts": 1794457389.9341888,
+   "by": "haridev",
+   "proposal": "97a6aeac7f0b",
+   "why": "The user asked for the four aspects of provenance (traceability, accountability, decision making, performance), each its own capability, and for one reading capability (prov_read: TraceViewer) used by every graph, query and check. Discovery no longer rules out performance: it comes from dftracer's events."
   }
  ]
 }

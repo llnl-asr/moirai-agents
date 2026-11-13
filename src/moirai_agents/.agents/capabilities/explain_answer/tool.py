@@ -1,6 +1,8 @@
-"""Explain the answer of a computed answer: always a narrative that answers the question from the computed result - the direct answer
-first, then what differs, what stays the same and how it was found - every claim linked to where it can be checked: [R3] is row 3 of the
-result table, [S2] is step 2 of the plan. Written from the record, no model. The agent's write-up (when there is one) and the gaps follow."""
+"""Explain the answer of a computed answer. With the agent's write-up, checked against the result (every claim cites a step, every number
+is in the computed result), the write-up IS the answer: it reads like a reply in the chat - the direct answer, the spread, the coverage, how
+it was computed, the caveats - and its [S n] citations link the data. Without one (or with one the check flagged), a narrative written from
+the computed result - the direct answer first, then what differs, what stays the same and how it was found - every claim linked to where it
+can be checked: [R3] is row 3 of the result table, [S2] is step 2 of the plan. The gaps follow."""
 import re
 
 from moirai_agents.core import explain as X
@@ -287,8 +289,32 @@ def derived(answer: dict) -> list:
             for x in [m["k"], m["n"], _lvl(m)] + re.findall(r"\d+(?:\.\d+)?", m["known"][3])]
 
 
+def _stats_narrative(answer: dict):
+    """A stats result (a recorded value over every entity that records it) told directly: its mean over how many, the median and range."""
+    steps = answer.get("steps") or []
+    last = steps[-1].get("step", len(steps))
+    t = X.md_table((answer.get("result") or {}).get("table") or "")
+    if not t or not t["rows"]:
+        return None
+    c = {n: i for i, n in enumerate(t["columns"])}
+    paras = []
+    for i, r in enumerate(t["rows"], 1):
+        g = lambda k: X.cell_text(r[c[k]])           # noqa: E731
+        s = (f"The mean `{g('name')}` of the {g('of').replace('_', ' ')} entities is `{g('mean')}`, over {g('entities')} of them [R{i}] [S{last}]; "
+             f"the median is `{g('median')}`, from `{g('min')}` to `{g('max')}` [R{i}].")
+        if g("distinct values") != g("entities"):
+            s += (f" Identical values share one record: {g('distinct values')} are distinct, and their mean is `{g('mean of distinct')}` [R{i}].")
+        paras.append(s)
+    return paras, [_step_line(x) for x in steps] if len(steps) > 1 else [], None
+
+
 def narrative(answer: dict):
     """The answer told from the computed result, as paragraphs with [R] / [S] links, and the steps that led there."""
+    steps = answer.get("steps") or []
+    if steps and steps[-1].get("op") == "stats":
+        st = _stats_narrative(answer)
+        if st:
+            return st
     d = direct(answer)
     if d:
         steps = answer.get("steps") or []
@@ -327,33 +353,56 @@ def _narrative(answer: dict):
     return paras, how
 
 
+def _rest(syn: str) -> str:
+    """The write-up without its opening sentence (the summary says it)."""
+    lines = (syn or "").strip().splitlines()
+    for i, ln in enumerate(lines):
+        st = ln.strip()
+        if st and not st.startswith(("|", "#", "-", "*")):
+            m = re.match(r"(.+?[.!?])(\s+|$)", st)
+            lines[i] = st[m.end():] if m and not m.group(1).endswith(":") else ("" if not m else st)
+            break
+    return "\n".join(lines).strip()
+
+
 def explain(answer: dict) -> dict:
-    """The answer part: the direct answer to the question first (a verdict and its numbers when the question asks how good), then each
-    item's values, how it was found, the gaps; the agent's write-up and its check folded in the details."""
+    """The answer part. A checked write-up leads: its first sentence is the summary, the rest follows as blocks, then the steps it cites;
+    the narrative computed from the result goes in the details. Otherwise the narrative leads and the write-up (flagged) is in the details."""
     syn = answer.get("synthesis") or ""
     sc = answer.get("synthesis_check") or {}
     gaps = answer.get("gaps") or []
     paras, how, each = narrative(answer)
-    summary = paras[0]
-    if len(paras) > 1 and len(summary) + len(paras[1]) < X.SUMMARY_MAX:
-        summary += " " + paras[1]
-    rest = paras[1:] if summary == paras[0] else paras[2:]
-    body = [X.block("text", text=p) for p in rest]
-    if each:
-        body += [X.block("text", text=f"Each of the {len(each['rows'])}, best first by {each['columns'][1]}:"), each]
-    if how:
-        body += [X.block("text", text="How it was found:"), X.block("list", items=how)]
+    steps = answer.get("steps") or []
+    lead_syn = bool(syn.strip()) and bool(sc.get("ok"))
+    details = []
+    if lead_syn:
+        summary = _first_sentence(syn)
+        body = _blocks(_rest(syn))
+        if steps:
+            body += [X.block("text", text="The steps it cites:"), X.block("list", items=[_step_line(s) for s in steps])]
+        computed = [X.block("text", text=p) for p in paras] + ([each] if each else [])
+        details.append({"title": "Computed from the result, without the write-up", "blocks": computed})
+        details.append({"title": "Write-up checked against the result", "blocks": [X.block("note", tone="ok",
+                        text="every claim cites a step, and every number is in the computed result")]})
+    else:
+        summary = paras[0]
+        if len(paras) > 1 and len(summary) + len(paras[1]) < X.SUMMARY_MAX:
+            summary += " " + paras[1]
+        rest = paras[1:] if summary == paras[0] else paras[2:]
+        body = [X.block("text", text=p) for p in rest]
+        if each:
+            body += [X.block("text", text=f"Each of the {len(each['rows'])}, best first by {each['columns'][1]}:"), each]
+        if how:
+            body += [X.block("text", text="How it was found:"), X.block("list", items=how)]
+        if syn.strip():
+            details.append({"title": "The agent's write-up (flagged by the check)", "blocks": _blocks(syn)})
+            details.append({"title": "Write-up checked against the result", "blocks": [X.block("note", tone="warn",
+                            text="; ".join(sc.get("problems") or ["not checked"]))]})
     if gaps:
         kinds = sorted({GAP_WORD.get(g.get("kind"), g.get("kind", "?")) for g in gaps})
         body.append(X.block("note", tone="warn", text=f"The provenance could not show everything: {X.plural(len(gaps), 'gap')} ({', '.join(kinds)}), listed below."))
-    body.append(X.block("note", tone="ok", text="To check it: [R…] opens that row of the result table, [S…] selects that step and its records on the graph; "
+    body.append(X.block("note", tone="ok", text="To check it: [S…] selects that step and its records on the graph, [R…] opens that row of the result table; "
                                                  "every record read and cited is under Evidence."))
-    details = []
-    if syn.strip():
-        details.append({"title": "The agent's write-up", "blocks": _blocks(syn)})
-        details.append({"title": "Write-up checked against the result", "blocks": [X.block("note", tone="ok" if sc.get("ok") else "warn",
-                        text="every claim cites a step, and every number is in the computed result" if sc.get("ok") else
-                        "; ".join(sc.get("problems") or ["not checked"]))]})
     if gaps:
         details.append({"title": "Gaps", "blocks": [X.block("table", columns=["kind", "subject", "step", "detail"], numeric=[], total=len(gaps),
                                                             rows=[[GAP_WORD.get(g.get("kind"), g.get("kind", "")), g.get("subject", ""), f"S{g.get('step', '?')}",
@@ -370,8 +419,8 @@ def _links(text: str):
 def register(mcp):
     @mcp.tool()
     def explain_answer(answer: dict) -> dict:
-        """Explain the answer part of a computed answer: its write-up led by the first sentence (tables and bullets as blocks), the synthesis
-        check, and the gaps; without a write-up, says the computed result is the answer. Returns {part: answer, title, summary, facts, details}."""
+        """Explain the answer part of a computed answer: a checked write-up is the answer (its first sentence the summary, its tables and
+        bullets as blocks, the steps it cites); without one, the narrative computed from the result. Then the gaps. Returns {part: answer, title, summary, facts, details}."""
         return explain(answer)
 
     @mcp.tool()

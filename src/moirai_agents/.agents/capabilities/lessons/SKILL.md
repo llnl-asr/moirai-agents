@@ -22,7 +22,7 @@ description: Record and find lessons. Load before recording anything, and before
 
 ## Corner cases
 - If the fix can be a rule in code, it is a capability update, not a lesson.
-- Lessons on bundled capabilities are stored in the user layer, shadowing the bundled folder.
+- Lessons are written into the capability's own LESSONS.md in the package (src/moirai_agents/.agents/capabilities): there is one store, committed with the code.
 
 ## Corrector
 Predictor `lesson_add`, validator `lesson_validate`. A failed verdict comes here: fix the original tool or its input, then predict and validate again. The same failure twice stops the loop: change approach, or ask.

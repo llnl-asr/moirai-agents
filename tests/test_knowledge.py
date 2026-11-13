@@ -109,8 +109,8 @@ def lesson_on_demo(learnt, text):
 
 @needs_graphify
 def test_a_lesson_is_found_through_the_graph_and_read_alone(learnt):
-    lesson_on_demo(learnt, "uv venv fails on lustre from a compute node, build on the login node")
-    hit = next(r for r in K.lessons("uv venv fails with No such file on lustre")["results"] if "source" in r)
+    lesson_on_demo(learnt, "the quuxctl daemon fails on lustre from a compute node, build on the login node")    # words no real lesson uses
+    hit = next(r for r in K.lessons("quuxctl daemon fails on lustre")["results"] if "source" in r)
     assert hit["source"] == "capabilities/system_demo/LESSONS.md" and "L-1234abcd" in hit["title"]
     text = K.read(hit["source"], hit["line"])["text"]
     assert "login node" in text and "zebras" not in text

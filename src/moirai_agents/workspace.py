@@ -80,8 +80,7 @@ SETTINGS = {
     "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": f"python3 {HOOKS / 'live_log.py'}", "timeout": 10}]}],
               "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{VENV_SH} python {HOOKS / 'context.py'}", "timeout": 20}]}]},
     "permissions": {"deny": ["Bash(sudo *)", "Bash(sudo)", "Bash(rm -rf /*)", "Bash(rm -rf ~*)", "Write(/etc/*)", "Write(/var/*)",
-                             f"Edit({PKG}/**)", f"Write({PKG}/**)", f"MultiEdit({PKG}/**)",
-                             f"Edit({REPO}/capabilities/**)", f"Write({REPO}/capabilities/**)"]},
+                             f"Edit({PKG}/**)", f"Write({PKG}/**)", f"MultiEdit({PKG}/**)"]},
 }
 
 

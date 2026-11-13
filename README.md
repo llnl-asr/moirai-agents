@@ -27,7 +27,7 @@ The web server looks for overlapping or conflicting lessons and capabilities in 
 
 `capability_builder` is the capability that builds capabilities: `capability_new` and `capability_update` validate a proposal and run its checks in a sandbox, a person approves, and it goes live with no restart.
 
-Layers, lowest first: bundled, user (`workspace/.moirai-agents/capabilities`), project (`capabilities/` in this repo). A higher layer shadows a lower one wholesale, and the bundled layer is never written.
+There is one store, `src/moirai_agents/.agents/capabilities/`: what a person approves, and every lesson, is written there, with earlier versions under each capability's `versions/`, so the package always carries what was learnt and git shows every change. (Tests can still split the store into bundled, user and project layers with `MOIRAI_AGENTS_BUNDLED_CAPABILITIES`, `MOIRAI_AGENTS_USER_CAPABILITIES` and `MOIRAI_AGENTS_PROJECT_CAPABILITIES`.)
 
 ## The pipelines
 

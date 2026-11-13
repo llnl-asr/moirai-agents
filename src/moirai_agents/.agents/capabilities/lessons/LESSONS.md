@@ -1,1 +1,3 @@
 # Lessons: lessons
+
+- [L-27622bca] lesson_add fails with "OSError: [Errno 122] Disk quota exceeded" when ~/.moirai-agents (capabilities/lessons store) is over quota; two chat turns (template-failure and of2_template questions) lost their lessons and told the user to free quota. Self-heal wanted: lesson_add should catch the OSError, write the lesson to a fallback queue on another filesystem (workspace logs dir), return status 'queued' and report the quota (du -sh ~/.moirai-agents, lfs quota / quota -s) instead of a traceback; a later call flushes the queue. Until fixed, the user must free quota in ~/.moirai-agents; lessons pending from those turns: template-failure plan (answers 06095b2ba7, 295c9a65ee) and of2_template_search exit status gap (32d92ad8b3).

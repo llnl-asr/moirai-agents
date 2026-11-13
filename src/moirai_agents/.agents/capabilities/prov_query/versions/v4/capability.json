@@ -1,0 +1,58 @@
+{
+ "name": "prov_query",
+ "description": "Answer provenance questions - lineage, downstream impact, what happened when - from the traces through dftracer-utils' TraceViewer, with evidence: the question becomes a plan of concrete steps, each a TraceViewer query, the result is computed, and the write-up cites the steps. Load for the analysis pipeline's query stage and for any question in the Query view of a run, live run or dataset.",
+ "version": 4,
+ "enabled": true,
+ "stages": [
+  "query"
+ ],
+ "tools": [
+  "query_summary",
+  "query_entities",
+  "query_lineage",
+  "evidence_answer",
+  "evidence_synthesis",
+  "evidence_rerun",
+  "query_dataframe",
+  "query_validate"
+ ],
+ "pvc": {
+  "predictor": [
+   "query_summary",
+   "query_entities",
+   "query_lineage",
+   "evidence_answer",
+   "evidence_synthesis",
+   "query_dataframe"
+  ],
+  "validator": [
+   "query_validate"
+  ]
+ },
+ "review": [
+  "imports subprocess: runs commands",
+  "line 156: writes or deletes files (write_text)"
+ ],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  },
+  {
+   "version": 2,
+   "why": "answer_publish: evidence-backed answer cards (query plan, evidence, answer), checked against the traces"
+  },
+  {
+   "version": 3,
+   "ts": 1794197130.0,
+   "why": "No model in an answer: evidence_answer runs a plan of TraceViewer queries (resolved entities, time frames, lineage hops) and computes the result with its trail; evidence_synthesis attaches the agent's write-up, checked (citations [Sk], numbers from the result). answer_publish (agent-written answers) removed; query_summary/entities/lineage read through TraceViewer."
+  },
+  {
+   "version": 4,
+   "ts": 1794457437.2197409,
+   "by": "haridev",
+   "proposal": "5e2fe8976b0a",
+   "why": "The four aspects of provenance: evidence_answer documents their operations and the skill routes each aspect's questions."
+  }
+ ]
+}

@@ -271,3 +271,14 @@ def test_an_out_of_date_proposal_is_shown_as_such_and_redone_on_the_current_vers
     assert "stale" not in next(x for x in S.list_capabilities()["pending"] if x["id"] == redo["id"])
     a = S.apply(redo["id"], True)
     assert a["status"] == "ok" and "# newer" in (S.all_caps()["demo_cap"][1] / "tool.py").read_text() and "1 + x" in (S.all_caps()["demo_cap"][1] / "tool.py").read_text()
+
+
+def test_by_default_the_package_store_is_the_only_one_and_approvals_go_there(monkeypatch):
+    """No root capabilities/ folder and no user layer: what is approved and learnt is written into src/moirai_agents/.agents/capabilities."""
+    for v in ("MOIRAI_AGENTS_BUNDLED_CAPABILITIES", "MOIRAI_AGENTS_USER_CAPABILITIES", "MOIRAI_AGENTS_PROJECT_CAPABILITIES"):
+        monkeypatch.delenv(v, raising=False)
+    assert S.layers() == [("project", S.BUNDLED)]
+    assert S.layer_dir("user") == S.layer_dir("project") == S.BUNDLED
+    assert S.shadow("app_smoke") == S.BUNDLED / "app_smoke"          # lessons land in the capability's own folder
+    assert S.sync_shadows() == []
+    assert not (S.PKG.parents[1] / "capabilities").exists()

@@ -13,9 +13,10 @@ from moirai_agents.core import moirai_env as M
 from moirai_agents.core import pipeline as P
 
 STAGE = "explore"
-LANG = {".py": "python", ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".f90": "fortran", ".f": "fortran"}
+LANG = {".py": "python", ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp", ".cxx": "cpp", ".hpp": "cpp", ".f90": "fortran", ".f": "fortran",
+        ".nf": "nextflow"}
 BUILD = {"CMakeLists.txt": "cmake", "configure.ac": "autotools", "configure": "autotools", "meson.build": "meson", "Makefile": "make",
-         "makefile": "make", "pyproject.toml": "pip", "setup.py": "pip"}
+         "makefile": "make", "pyproject.toml": "pip", "setup.py": "pip", "nextflow.config": "nextflow"}
 SKIP = {".git", "__pycache__", "build", "dist", ".venv", "venv", "node_modules"}
 
 
@@ -61,6 +62,10 @@ def _app(src):
             elif lang in ("c", "cpp") and p.suffix != ".h" and p.stat().st_size < 2 << 20:
                 if re.search(r"^\s*int\s+main\s*\(", p.read_text(errors="replace"), re.M):
                     entries.append(rel)
+            elif lang == "nextflow" and p.stat().st_size < 2 << 20:
+                # an unnamed `workflow {` block is what `nextflow run` starts
+                if re.search(r"^workflow\s*\{", p.read_text(errors="replace"), re.M):
+                    entries.append(rel)
     git = _run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"])
     return {"root": str(root), "files": n, "languages": dict(langs.most_common()), "build_files": builds, "entry_points": entries[:40], "git_head": git}
 
@@ -92,7 +97,8 @@ def register(mcp):
             m = o["system"]["moirai"]
             v.check("moirai", m.get("ok"), m.get("error", "moirai found"), m.get("fix", ""))
             v.check("dftracer_utils", m.get("dftracer_utils"), "dftracer-utils is needed for the query stage", "pip install --pre dftracer-utils into the moirai venv")
-            v.check("language", bool(set(o["app"]["languages"]) & {"python", "c", "cpp"}), str(o["app"]["languages"]), "moirai annotates Python, C and C++")
+            v.check("language", bool(set(o["app"]["languages"]) & {"python", "c", "cpp", "nextflow"}), str(o["app"]["languages"]),
+                    "moirai annotates Python, C, C++ and Nextflow (shell steps)")
             v.check("entry_point", bool(o["app"]["entry_points"]), f"{len(o['app']['entry_points'])} found", "ask the user which file starts the app")
             shm = o["system"].get("dev_shm_free_mib")
             if shm is None:

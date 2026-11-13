@@ -1,0 +1,29 @@
+{
+ "name": "tools_raw_trace_scan",
+ "description": "Scan the raw *.pfw.gz provenance traces of a (live) pipeline in parallel for attribute values (for example mean_plddt of best_structure) without building the TraceViewer index, so a LOCKed or 5+ minute index never blocks an answer. Load when query_summary fails with a RocksDB LOCK, or a question needs an arithmetic mean/count over a very large live run.",
+ "version": 1,
+ "enabled": true,
+ "stages": [],
+ "tools": [
+  "raw_attribute_scan",
+  "raw_scan_selftest"
+ ],
+ "pvc": {
+  "predictor": [
+   "raw_attribute_scan"
+  ],
+  "validator": [
+   "raw_scan_selftest"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1794367489.152742,
+   "by": "haridev",
+   "proposal": "a7c4f0b4c3b1",
+   "why": "Chat b73b285e4af9 answered \"mean pLDDT on the 32 node run\" with an ad-hoc python script (/g/g92/haridev/plddt_live/run.py) after the TraceViewer index LOCK killed earlier turns; deterministic repeated work must be a tool, not ad-hoc shell."
+  }
+ ]
+}

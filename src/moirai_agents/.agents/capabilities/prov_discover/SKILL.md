@@ -5,7 +5,7 @@ description: Find the scientific artifact and every place the app touches data, 
 
 # Discover
 
-Provenance records **what data exists and how it became what it is**. It is data-centric only: no PAPI, power, GPU profilers, node counters or timing. Function-level POSIX events may stay on, but the deliverable is the graph.
+Provenance records **what data exists and how it became what it is**. Its entities are data-centric: no PAPI, power, GPU profiler values or timing as entities. Performance (time, I/O, parallelism, node counters) comes from dftracer's events in the same traces and the activities' durations (prov_performance); accountability from the run_context the helper records (prov_accountability).
 
 In scope, every place the app touches data:
 

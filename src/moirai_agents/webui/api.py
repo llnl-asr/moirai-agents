@@ -314,9 +314,9 @@ def get_route(h, app, life, u, q):
         except pipeline.PipelineError as e:
             return send_json(h, {"error": str(e)}, 404)
     if u.path == "/api/job/detail":
-        flux = q.get("flux", [""])[0]
-        if flux:
-            return send_json(h, jobs.flux_detail(flux))
+        sid = q.get("id", [""])[0] or q.get("flux", [""])[0]          # a scheduler job (Flux or Slurm); flux=<id> is the older form
+        if sid:
+            return send_json(h, jobs.sched_detail(q.get("sched", ["flux"])[0], sid))
         try:
             return send_json(h, jobs.detail(q.get("pipeline", [""])[0], q.get("job", [""])[0], user["workspace"]))
         except (OSError, ValueError, pipeline.PipelineError) as e:
@@ -404,7 +404,7 @@ def get_route(h, app, life, u, q):
     if u.path == "/api/consolidation":
         return send_json(h, consolidate.unkept(getattr(app, "consolidation", None) or {"lessons": [], "capabilities": []}))
     if u.path == "/api/submitted":
-        return send_json(h, {"jobs": jobs.submitted(float(q.get("since", ["0"])[0] or 0))})
+        return send_json(h, jobs.scheduler_view(float(q.get("since", ["0"])[0] or 0)))
     if u.path == "/api/capabilities":
         return send_json(h, capstore.list_capabilities())
     if u.path.startswith("/api/capability/"):
