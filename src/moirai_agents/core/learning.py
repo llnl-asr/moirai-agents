@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from ..env import state_dir
 
 from . import capstore
+from .shared import shared_change
 
 
 def _file() -> Path:
@@ -46,6 +47,7 @@ def _write(cap: str, text: str, lid: str) -> None:
         fh.write(f"\n- [{lid}] {text.strip()}\n")
 
 
+@shared_change("lesson for")
 def add(capability: str, text: str, source: str = "agent", evidence: str = "", stage: str = "", pipeline: str = "") -> dict:
     """source='user': stated by a person, applied now. source='agent': pending until a person approves it."""
     if not (text or "").strip():
@@ -75,6 +77,7 @@ def _unwrite(cap: str, lid: str) -> None:
     f.write_text(re.sub(rf"\n?- \[{re.escape(lid)}\] .*?(?=\n+- \[L-|\Z)", "", f.read_text(), flags=re.S).rstrip() + "\n")
 
 
+@shared_change("lesson decision")
 def decide(lid: str, approve: bool, by: str = "") -> dict:
     o = all_lessons().get(lid)
     if not o:
@@ -94,6 +97,7 @@ def decide(lid: str, approve: bool, by: str = "") -> dict:
     return {"status": "ok", "id": lid, "applied": approve}
 
 
+@shared_change("lessons merged")
 def merge(ids: List[str], text: str, capability: str, note: str, by: str = "") -> dict:
     """One pending lesson to replace several: they stay in force until a person accepts it."""
     rows = all_lessons()
@@ -110,6 +114,7 @@ def merge(ids: List[str], text: str, capability: str, note: str, by: str = "") -
     return {"status": "ok", "id": lid, "replaces": list(ids)}
 
 
+@shared_change("lesson revised")
 def revise(lid: str, text: str, capability: str = "", note: str = "", approve: bool = False, by: str = "") -> dict:
     """Refine a lesson. Pending: edited in place. Rejected: reopened with the edit. Applied: a pending correction that replaces it when accepted,
     or at once with approve. approve is a person's decision: only the panel passes it."""
@@ -134,6 +139,7 @@ def revise(lid: str, text: str, capability: str = "", note: str = "", approve: b
     return decide(lid, True, by) if approve else {"status": "ok", "id": lid, "applied": False}
 
 
+@shared_change("lessons retired")
 def retire(ids: List[str], by: str = "", winner: str = "", note: str = "") -> dict:
     """Take lessons out of force on a person's decision: replaced by `winner`, or dropped as wrong. Their history stays."""
     rows, done = all_lessons(), []

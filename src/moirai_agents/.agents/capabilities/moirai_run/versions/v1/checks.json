@@ -1,1 +1,0 @@
-[{"tool":"moirai_validate","args":{"pipeline":"nope-1","stage":"baseline"},"expect":{"raises":true}}]

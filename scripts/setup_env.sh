@@ -38,6 +38,15 @@ python -m pip install -q -e "$DASH"
 (cd "$DASH/web" && npm ci --no-audit --no-fund && npm run build)
 echo "MOIRAI_AGENTS_DFDASHBOARD_DIST=$DASH/web/dist"   # npm ci rebuilds node_modules for this system
 python -m pip install -q -e "$REPO[dev]"
+# The group's shared capability store (agent-capabilities): its package, then this project's capabilities linked
+# into it -- each entry of .agents/capabilities becomes a link to capabilities/<topic>/<name> there, shared with the
+# other agent projects, and a capability made here is moved into it. umask 007 keeps what is written group-usable.
+CAPS="${AGENT_CAPABILITIES_ROOT:-/p/vast1/dftracer-user/agent-capabilities}"
+if [ -d "$CAPS/agent_capabilities" ]; then
+  python -m pip install -q -e "$CAPS"
+  (umask 007; python -m agent_capabilities link "$REPO/src/moirai_agents/.agents/capabilities" --project moirai-agents >/dev/null) \
+    && echo "capabilities linked to $CAPS" || echo "WARNING: could not link capabilities to $CAPS"
+fi
 [ -f "$REPO/.env" ] || { cp "$REPO/.env.example" "$REPO/.env"; chmod 600 "$REPO/.env"; echo "created .env: fill it in"; }
 [ -f "$MOIRAI_SYSTEM_ENV" ] || { printf '# Settings for %s only, read before .env (e.g. MOIRAI_AGENTS_MOIRAI_PYTHON, MOIRAI_AGENTS_CLAUDE_BIN, MOIRAI_AGENTS_VENV).\n' "$MOIRAI_SYSTEM" > "$MOIRAI_SYSTEM_ENV"; chmod 600 "$MOIRAI_SYSTEM_ENV"; echo "created $MOIRAI_SYSTEM_ENV for settings of $MOIRAI_SYSTEM only"; }
 PYTHONPATH="$REPO/src" python -m moirai_agents.workspace

@@ -1,1 +1,0 @@
-{"description": "Scores how much of an answer was calculated versus inferred.", "level": "level_1", "tools": ["Read"], "skills": ["answer_confidence"], "permission_mode": "plan", "background": true, "instructions": "confidence_score on the answer (with its pipeline), then confidence_validate. Report the score, its label and every LLM-inferred part."}

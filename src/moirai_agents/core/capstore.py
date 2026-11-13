@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..env import state_dir
+from .shared import shared_change
 
 PKG = Path(__file__).resolve().parents[1]
 BUNDLED = PKG / ".agents" / "capabilities"
@@ -532,6 +533,7 @@ def _write_bundle(d: Path, code: str, skill: str, agent: dict, checks: List[dict
     shutil.rmtree(old, ignore_errors=True)
 
 
+@shared_change("apply", lambda r, a, k: f"moirai-agents: apply {r.get('name')} v{r.get('version')}")
 def apply(pid: str, confirmed: bool, by: str = "") -> dict:
     """Approve a staged proposal: re-verify, write the version, make it live. Requires confirmed=true."""
     if not confirmed:
@@ -678,14 +680,17 @@ def _set_enabled(name: str, on: bool) -> dict:
     return {"status": "ok", "name": name, "enabled": on}
 
 
+@shared_change("disable")
 def disable(name: str) -> dict:
     return _set_enabled(name, False)
 
 
+@shared_change("enable")
 def enable(name: str) -> dict:
     return _set_enabled(name, True)
 
 
+@shared_change("rollback", lambda r, a, k: f"moirai-agents: rollback {a[0]} to v{a[1] if len(a) > 1 else k.get('version')}")
 def rollback(name: str, version: int, confirmed: bool = False) -> dict:
     """Make an earlier version current again, recorded as a NEW version so history is never rewritten."""
     if not confirmed:

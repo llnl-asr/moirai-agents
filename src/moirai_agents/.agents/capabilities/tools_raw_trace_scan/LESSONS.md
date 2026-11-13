@@ -1,3 +1,0 @@
-# Lessons: tools_raw_trace_scan
-
-- [L-0136685f] Gap met on the live 32 node Elmerfold run: "which predictions did not produce a template" needs the sequence ids that have no template_features entity, across all 31 raw *.pfw.gz. raw_attribute_scan only returns attribute values/means; it cannot list ids of entity type A lacking an entity of type B. Proposed capability_update: a mode (e.g. missing_ids(trace_dir, base_type=sequence, other_type=template_features, key=sequence id)) that scans all files in parallel and returns counts plus the first N ids; a bare-id uri such as MGYP001796749278 (no .npz path) still counts as present. Until then say the missing sequences cannot be named. Needs the user's approval before building.

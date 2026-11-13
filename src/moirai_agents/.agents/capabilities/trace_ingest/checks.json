@@ -1,1 +1,0 @@
-[{"tool":"ingest_validate","args":{"pipeline":"nope-1"},"expect":{"raises":true}}]

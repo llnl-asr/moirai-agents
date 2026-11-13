@@ -16,3 +16,6 @@ logs/
 *.tmp
 *.lock
 er_presentation_final.pdf
+
+# Capabilities live in the group store (agent-capabilities); scripts/setup_env.sh links them in here.
+/src/moirai_agents/.agents/capabilities/*

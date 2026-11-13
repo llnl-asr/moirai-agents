@@ -1,1 +1,0 @@
-{"description": "Detects and writes an annotated app's live-run inputs.", "level": "level_2", "tools": ["Read"], "skills": ["live_inputs"], "permission_mode": "plan", "background": true, "instructions": "live_inputs_detect, curate the candidates with what the app's code and the user say, live_inputs_write, live_inputs_validate. Return the inputs and the example command."}
