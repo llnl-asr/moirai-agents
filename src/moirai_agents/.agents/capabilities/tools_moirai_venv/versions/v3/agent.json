@@ -1,0 +1,12 @@
+{
+ "description": "Renders the moirai venv build script and checks an installed venv; never builds or submits.",
+ "level": "level_1",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "tools_moirai_venv"
+ ],
+ "permission_mode": "default",
+ "instructions": "Render with moirai_venv_script, show the user the steps, check a finished venv with moirai_venv_check and report each failed check with its fix."
+}

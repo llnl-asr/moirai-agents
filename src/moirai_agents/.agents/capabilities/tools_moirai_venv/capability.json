@@ -1,7 +1,7 @@
 {
  "name": "tools_moirai_venv",
  "description": "Build and check the moirai venv (dftracer wheel with one shared libdftracer_core, moirai wheel rebuilt from HEAD, pydftracer common.py overlay, dftracer-utils) in a session on a system that has none (mammoth, Slurm). Load when explore_validate fails on moirai or dftracer_utils, MOIRAI_AGENTS_MOIRAI_PYTHON points to a missing venv, 'ModuleNotFoundError dftracer_utils', two libdftracer_core copies, 'ninja: build stopped' on rocksdb with gcc 10, or a stale moirai wheel.",
- "version": 3,
+ "version": 4,
  "enabled": true,
  "stages": [
   "explore"
@@ -23,14 +23,14 @@
  "review": [
   "line 100: writes or deletes files (write_text)",
   "line 101: writes or deletes files (write_text)",
-  "line 103: writes or deletes files (unlink)",
+  "line 102: writes or deletes files (write_text)",
+  "line 104: writes or deletes files (write_text)",
   "line 105: writes or deletes files (write_text)",
-  "line 107: writes or deletes files (write_text)",
-  "line 109: writes or deletes files (unlink)",
-  "line 110: writes or deletes files (rmdir)",
-  "line 96: writes or deletes files (write_text)",
-  "line 97: writes or deletes files (write_text)",
-  "line 98: writes or deletes files (write_text)"
+  "line 107: writes or deletes files (unlink)",
+  "line 109: writes or deletes files (write_text)",
+  "line 111: writes or deletes files (write_text)",
+  "line 113: writes or deletes files (unlink)",
+  "line 114: writes or deletes files (rmdir)"
  ],
  "history": [
   {
@@ -53,6 +53,13 @@
    "by": "haridev",
    "proposal": "a652629dccb7",
    "why": "Checked on a real pre-release venv composed with Cray MPICH 9.0 and HDF5 1.14 (tuolumne, 2026-11-13): one_core counted the compose tree's static archive libdftracer_core_base.a as a second core and failed a correct venv. It counts shared libdftracer_core*.so* outside dftracer/compose now; the selftest fixture has that archive."
+  },
+  {
+   "version": 4,
+   "ts": 1794601023.6054518,
+   "by": "haridev",
+   "proposal": "f89e80dd73a3",
+   "why": "User asked in chat d8e7b5f4c86b: \"install the prerelease of dftracer with pip install --pre dftracer[modules] and then run dftracer-compose to link all required features\". The run found compose needs cmake>=3.24 and breaks the import under the anaconda python without a libstdc++ preload; the skill had no step or corner case for it."
   }
  ]
 }

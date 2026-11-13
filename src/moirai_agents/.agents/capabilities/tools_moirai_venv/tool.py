@@ -36,8 +36,12 @@ cp {moirai_src}/python/moirai/__init__.py $SP/moirai/__init__.py
 (cd $SP/dftracer/lib64 && ln -sf libdftracer_core.so.4.3.0 libdftracer_core.so)
 # 5. compose dftracer for provenance, with the application's modules loaded: MPI and HDF5 as this machine has them, prebuilt or built here
 {"module load " + app_modules if app_modules else "# (no application modules given: compose against what is loaded)"}
+# dftracer-compose needs cmake >= 3.24: the venv's (step 3), not the system cmake (3.23.1 on mammoth fails at CMakeLists.txt:38)
+export PATH={v}/bin:$PATH
 if {v}/bin/python -c 'import moirai.compose' 2>/dev/null; then {v}/bin/python -m moirai.compose
 else {v}/bin/python -m dftracer.compose --enable {PROVENANCE_MODULES} --disable {PERFORMANCE_MODULES}; fi
+# the composed core must import under this python; if it does not (GLIBCXX_3.4.30 required by libicuuc.so.73 of the anaconda python), preload a newer libstdc++
+{v}/bin/python -c 'import dftracer.dftracer' || echo "NOTE: dftracer does not import: export LD_PRELOAD=<anaconda>/lib/libstdc++.so.6 (python, moirai-service start and stop) or compose with fewer modules"
 echo "site-packages: $SP  (now run moirai_venv_check)"
 """
 
@@ -72,7 +76,7 @@ def register(mcp):
     @mcp.tool()
     def moirai_venv_script(tools_dir: str, moirai_src: str, pydftracer_src: str, python_module: str = "python/3.12.2",
                            gcc_bin: str = "/usr/tce/packages/gcc/gcc-12.1.1-magic/bin", partition: str = "pdebug", app_modules: str = "") -> dict:
-        """Render (never run) the shell steps that build <tools_dir>/moirai-venv: python module venv, the dftracer pre-release with dftracer-modules, moirai wheel rebuilt with gcc 12 on one compute node, pydftracer common.py overlay, then dftracer composed for provenance (MPI, HDF5) with the application's modules loaded. Use when a system has no moirai venv. Args: tools_dir (session tools dir), moirai_src and pydftracer_src (checkouts, read only), python_module, gcc_bin, partition, app_modules (the modules the application loads, e.g. 'openmpi/4.1.2 hdf5-parallel/1.14.0'). Returns {status, script}."""
+        """Render (never run) the shell steps that build <tools_dir>/moirai-venv: python module venv, the dftracer pre-release with dftracer-modules, moirai wheel rebuilt with gcc 12 on one compute node, pydftracer common.py overlay, then dftracer composed for provenance (MPI, HDF5) with the application's modules loaded (venv cmake first on PATH, import test at the end). Use when a system has no moirai venv. Args: tools_dir (session tools dir), moirai_src and pydftracer_src (checkouts, read only), python_module, gcc_bin, partition, app_modules (the modules the application loads, e.g. 'openmpi/4.1.2 hdf5-parallel/1.14.0'). Returns {status, script}."""
         for n, p in (("tools_dir", tools_dir), ("moirai_src", moirai_src), ("pydftracer_src", pydftracer_src)):
             if not p.startswith("/"):
                 return {"status": "error", "problem": f"{n} must be absolute"}
