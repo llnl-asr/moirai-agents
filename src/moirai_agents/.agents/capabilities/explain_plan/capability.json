@@ -1,7 +1,7 @@
 {
  "name": "explain_plan",
  "description": "Explain the plan of a computed answer - what was asked of the traces, step by step - as a plain summary and folded details (arguments, time window, TraceViewer queries, records cited). Used by query_explain for the Query view.",
- "version": 1,
+ "version": 3,
  "enabled": true,
  "stages": [],
  "tools": [
@@ -22,6 +22,19 @@
    "version": 1,
    "ts": 1794241935.4,
    "why": "Query view: the plan part told high level first, details folded and formatted"
+  },
+  {
+   "version": 2,
+   "ts": 1794262515.5799294,
+   "by": "haridev",
+   "proposal": "62a7566743bd",
+   "why": "Consolidation: shared rules now live in query_explain; keep only what is specific to the plan part."
+  },
+  {
+   "version": 3,
+   "ts": 1794270403.798723,
+   "by": "haridev",
+   "why": "Restore the code, checks and agent of the current version: approving the consolidation proposal (made before the trace validators) had put back the older code. The consolidated SKILL.md stays."
   }
  ]
 }

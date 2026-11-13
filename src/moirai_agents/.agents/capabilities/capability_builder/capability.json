@@ -1,7 +1,7 @@
 {
  "name": "capability_builder",
  "description": "Build or change a capability (MCP tool + skill + scoped agent). Load before capability_new or capability_update, for process feedback, and to repair a failing tool.",
- "version": 1,
+ "version": 2,
  "enabled": true,
  "stages": [],
  "tools": [
@@ -17,13 +17,6 @@
   "capability_disable",
   "capability_enable"
  ],
- "review": [],
- "history": [
-  {
-   "version": 1,
-   "why": "bundled"
-  }
- ],
  "pvc": {
   "predictor": [
    "capability_new",
@@ -32,5 +25,19 @@
   "validator": [
    "capability_verify"
   ]
- }
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "why": "bundled"
+  },
+  {
+   "version": 2,
+   "ts": 1794450519.828862,
+   "by": "haridev",
+   "proposal": "3d7c11016e22",
+   "why": "The user's rule: every capability reads traces only through TraceViewer; capstore.analyze now refuses direct reads."
+  }
+ ]
 }

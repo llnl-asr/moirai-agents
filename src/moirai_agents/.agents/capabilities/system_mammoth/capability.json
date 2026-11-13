@@ -1,0 +1,33 @@
+{
+ "name": "system_mammoth",
+ "description": "Mammoth (mammoth34, LLNL, Slurm: pdebug 1 h, pbatch 24 h, no flux broker): check which group-owned data paths this account can read, per group via sg, since a shell and MCP server keep the groups of their start. Load when a dataset or database path gives permission denied, after the user is added to a group, or before choosing a launcher on mammoth.",
+ "version": 1,
+ "enabled": true,
+ "stages": [
+  "explore"
+ ],
+ "tools": [
+  "mammoth_path_access",
+  "mammoth_path_access_check"
+ ],
+ "pvc": {
+  "predictor": [
+   "mammoth_path_access"
+  ],
+  "validator": [
+   "mammoth_path_access_check"
+  ]
+ },
+ "review": [
+  "imports subprocess: runs commands"
+ ],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1794525659.8662384,
+   "by": "haridev",
+   "proposal": "93cb0da8c997",
+   "why": "Chat d8e7b5f4c86b (Annotate: tax-teller) on mammoth34: all 9 database paths were permission denied, the user was added to ibap and kpath, but the session still carried old groups; paths were probed by hand with sg kpath / sg ibap, and 2 files stayed owner-only (mode 600). The system also schedules with Slurm, not flux."
+  }
+ ]
+}

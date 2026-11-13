@@ -1,33 +1,180 @@
 {
  "name": "moirai_run",
- "description": "Run the annotated application under moirai-service, a smoke run then the baseline, with live provenance on the Dashboard. Load for the moirai_smoke and baseline stages.",
- "version": 1,
+ "description": "Run the annotated application under moirai-service, a smoke run then the baseline, with live provenance on the Dashboard; also apps launched by a generated `flux batch` run.sh (Elmerfold): the app job runs a generated per-chunk submit wrapper (submit_moirai.sh, given to run.sh as --submit-script, written beforehand by moirai_wrapper_write) that starts moirai-service inside the job's own shell; dry-run first; the batch is submitted DETACHED and its state is read from flux (a web server restart never cancels it); and a finished flux batch submitted by hand (BioTox launch.sh) attached with moirai_run_attach. Load for the moirai_smoke, baseline and live_run stages, for 'flux batch', 'run.sh', 'launch.sh', 'submit-script', 'Submit script ... does not exist', 'wrapper_write', 'bulksubmit', 'drain', 'exclusive', 'dftracer_service not found', 'no dftracer_service found', 'exited with exit code', 'failed' in run.out, 'false pass', 'spill-only', 'No running server found', 'the run has not started', 'attach', 'moirai_run_attach', 'submitted by hand', 'server restart', 'cancelled while queued', 'lost', 'flux_job_id', 'moirai_run_stop', 'live run'.",
+ "version": 12,
  "enabled": true,
  "stages": [
   "moirai_smoke",
-  "baseline"
+  "baseline",
+  "live_run"
  ],
  "tools": [
+  "moirai_wrapper_write",
+  "moirai_wrapper_selftest",
+  "moirai_stage_guard",
   "moirai_smoke_run",
   "moirai_baseline_run",
+  "moirai_live_run",
+  "moirai_run_attach",
+  "moirai_batch_plan",
+  "moirai_batch_render",
+  "moirai_service_resolve",
   "moirai_run_status",
   "moirai_run_stop",
   "moirai_validate"
  ],
- "review": [],
+ "pvc": {
+  "predictor": [
+   "moirai_wrapper_write",
+   "moirai_smoke_run",
+   "moirai_baseline_run",
+   "moirai_live_run",
+   "moirai_run_attach",
+   "moirai_batch_plan",
+   "moirai_batch_render",
+   "moirai_service_resolve"
+  ],
+  "validator": [
+   "moirai_validate",
+   "moirai_wrapper_selftest"
+  ]
+ },
+ "review": [
+  "imports shutil: copies/removes files",
+  "imports subprocess: runs commands",
+  "line 1125: writes or deletes files (write_text)",
+  "line 1126: writes or deletes files (write_text)",
+  "line 1127: writes or deletes files (write_text)",
+  "line 1133: writes or deletes files (write_text)",
+  "line 1254: writes or deletes files (write_text)",
+  "line 1256: writes or deletes files (write_text)",
+  "line 1259: writes or deletes files (write_text)",
+  "line 1261: writes or deletes files (write_text)",
+  "line 1265: writes or deletes files (write_text)",
+  "line 1269: writes or deletes files (write_text)",
+  "line 1270: writes or deletes files (write_text)",
+  "line 1284: writes or deletes files (write_text)",
+  "line 1286: writes or deletes files (write_text)",
+  "line 1287: writes or deletes files (write_text)",
+  "line 1288: writes or deletes files (write_text)",
+  "line 1301: writes or deletes files (write_bytes)",
+  "line 1364: writes or deletes files (write_text)",
+  "line 1386: writes or deletes files (write_text)",
+  "line 1410: writes or deletes files (write_bytes)",
+  "line 1411: writes or deletes files (write_bytes)",
+  "line 1413: writes or deletes files (write_text)",
+  "line 1414: writes or deletes files (write_text)",
+  "line 1418: writes or deletes files (write_bytes)",
+  "line 1427: writes or deletes files (unlink)",
+  "line 1439: writes or deletes files (write_text)",
+  "line 1445: writes or deletes files (write_text)",
+  "line 1446: writes or deletes files (write_text)",
+  "line 1448: writes or deletes files (write_text)",
+  "line 1451: writes or deletes files (write_text)",
+  "line 1455: writes or deletes files (write_text)",
+  "line 1458: writes or deletes files (write_text)",
+  "line 1462: writes or deletes files (write_text)",
+  "line 1467: writes or deletes files (write_text)",
+  "line 1492: writes or deletes files (write_text)",
+  "line 1510: writes or deletes files (write_text)",
+  "line 1514: writes or deletes files (write_text)",
+  "line 1563: writes or deletes files (write_text)",
+  "line 1568: writes or deletes files (unlink)",
+  "line 1573: writes or deletes files (write_text)",
+  "line 248: writes or deletes files (write_text)",
+  "line 422: writes or deletes files (write_text)",
+  "line 477: writes or deletes files (unlink)",
+  "line 510: writes or deletes files (unlink)",
+  "line 719: writes or deletes files (write_text)",
+  "line 726: writes or deletes files (write_text)",
+  "line 779: writes or deletes files (write_text)",
+  "line 795: writes or deletes files (write_text)",
+  "line 820: writes or deletes files (write_text)",
+  "line 887: writes or deletes files (write_text)",
+  "line 904: writes or deletes files (write_text)",
+  "line 958: writes or deletes files (unlink)",
+  "line 959: writes or deletes files (unlink)"
+ ],
  "history": [
   {
    "version": 1,
    "why": "bundled"
+  },
+  {
+   "version": 2,
+   "ts": 1793427193.7803764,
+   "by": "haridev",
+   "proposal": "104127322057",
+   "why": "Elmerfold is launched as `flux batch run.sh` (2 nodes + Rabbit, launch node drained). The old _script runs `flux run -N n moirai-service start`, which cannot place work on the drained launch node and never returns. Adds a batch mode (batch_script, queue) with a generated run-moirai.sh, a dry-run tool, and a per-host trace report."
+  },
+  {
+   "version": 3,
+   "ts": 1793427196.4089513,
+   "by": "haridev",
+   "proposal": "beb5bc3f6965",
+   "why": "User approved a 2-sequence smoke of Elmerfold on 2 nodes + Rabbit (40 min). Elmerfold launches as `flux batch run.sh` and drains the launch node, so the generic `flux run -N n moirai-service start` script cannot place services. Add a batch mode (run.sh rewritten with a moirai preamble and per-node pinned services), a dry-run tool, a dftracer_service resolver, and multi-host validation."
+  },
+  {
+   "version": 4,
+   "ts": 1793427666.8168838,
+   "by": "haridev",
+   "proposal": "d83c22b0b097",
+   "why": "v3 starts the per-node moirai-service with a pinned detached `flux submit --requires=host:<h>`. A flux-submitted service is a scheduled job holding cores, so the app's own `flux bulksubmit --nodes 1 --exclusive` jobs may wait forever. Replaced by ONE mechanism, `flux exec -r all` (setsid nohup, detached), which bypasses the scheduler. Verified on Tuolumne 2026-10-30 (pdebug, 1-node alloc; /p/lustre5/haridev/elmerfold/runs/flux-exec-test.out and flux-exec-env.out): flux exec returns in 1 s, the process survives, `flux resource list` still shows 96 cores free and 0 allocated, `flux run -N1 --exclusive hostname` still runs, flux exec passes the caller's env and cwd, `-r all` reaches every rank, no `flux idset` exists. Same rank set for start, ring wait and stop, so no host drift."
+  },
+  {
+   "version": 5,
+   "ts": 1793427668.2597702,
+   "by": "haridev",
+   "proposal": "fafb14bbbb5e",
+   "why": "Design change decided by the user. v3 rewrote the generated Elmerfold run.sh to start moirai-service as pinned detached `flux submit` jobs after the drain. Verified in the real run.sh (runs/moirai-smoke/run.sh, runs/smoke/run.sh): after the drain, prestage (`flux run --nodes $num_nodes --tasks-per-node 1`), the dbcast `flux run ... --exclusive` steps and the app job (`flux bulksubmit --nodes 1 --exclusive ... submit_smsp.sh '{}' ::: chunk.csv`) all need the whole worker node, so a one-core service job there blocks them until the limit. New design: a per-chunk submit wrapper (submit_moirai.sh) passed to the UNMODIFIED run.sh via --submit-script; it runs on the exclusive worker node, starts moirai-service in the background of its own shell, waits for the ring, runs the original submit_smsp.sh as a child, stops the service, keeps the rc. run.sh is no longer rewritten."
+  },
+  {
+   "version": 6,
+   "ts": 1793427972.383008,
+   "by": "haridev",
+   "proposal": "928f6b8cc77e",
+   "why": "Fix A (pipeline elmerfold-prov-20261030-125944, moirai_smoke). gen_launch_script.py line 849-850 requires --submit-script to be an EXISTING file, but submit_moirai.sh was only written by moirai_smoke_run at submit time, so the documented order could not work. New tool moirai_wrapper_write writes only the wrapper (755, idempotent, sha256), moirai_smoke_run/baseline verify the on-disk wrapper against the fresh render and rewrite and report a mismatch; plan note/docs and Order of use updated. Added moirai_wrapper_selftest."
+  },
+  {
+   "version": 7,
+   "ts": 1793429586.8651474,
+   "by": "haridev",
+   "proposal": "7346f2990e2d",
+   "why": "Pipeline elmerfold-prov-20261030-125944, moirai_smoke, first real submission (batch f3hFu78obrzb, wrapper job moirai-smoke-batch-934280540). D1 false pass: the per-chunk wrapper exited 2 ('moirai-wrapper: no dftracer_service found') but run.sh ended normally, so the batch was COMPLETED rc 0 and the wrapper job exited 0; run.out held 'flux-job: task(s) exited with exit code 2' and '<date>: f35QqToh9 failed'. The batch wrapper job now reads the batch --output file (parsed from run.sh '#flux: --output') and fails with distinct codes 20 (chunk failed, names job id and log), 21/22 (hosts.txt missing/empty), 23 (output file missing). D2 wrong resolver: moirai-service in the venv is a Python entry-point script, so dirname(readlink -f)/../../dftracer/bin is wrong; the wrapper now resolves the package through python (import dftracer), service_venv defaults from integrate outputs moirai.python and is verified at write time, and moirai_service_resolve reads the venv from the script shebang."
+  },
+  {
+   "version": 8,
+   "ts": 1793429590.3204768,
+   "by": "haridev",
+   "proposal": "359c89ca0dbe",
+   "why": "Two defects from the first real submission (pipeline elmerfold-prov-20261030-125944, batch job f3hFu78obrzb, wrapper job moirai-smoke-batch-934280540, 2026-10-30). D1 false pass: the per-chunk wrapper exited 2 (no dftracer_service found), the app never ran, but run.sh ends normally even when its flux bulksubmit chunk job fails, so the batch was COMPLETED rc 0 and the batch wrapper job exited 0; run.out held 'flux-job: task(s) exited with exit code 2' and '<date>: f35QqToh9 failed'. The batch wrapper job now reads the --output file named in run.sh's '#flux: --output' header and fails (exit 4, naming the chunk job id) on those lines, exit 5 when hosts.txt is missing or empty, exit 6 when the output file is unreadable. D2 wrong resolver: the fallback used dirname(readlink -f moirai-service)/../../dftracer/bin/dftracer_service, but the venv's moirai-service is a Python entry-point script. service_venv now defaults from integrate outputs moirai.python (venv root) and is verified at write time to hold an executable dftracer/bin/dftracer_service; the in-wrapper fallback resolves the package through python -c 'import dftracer'; moirai_service_resolve prefers the venv and reports binary_kind. Render is identical for an explicit or defaulted venv."
+  },
+  {
+   "version": 9,
+   "ts": 1793902682.0724874,
+   "by": "haridev",
+   "proposal": "e083aa46c0c8",
+   "why": "BioTox (pipeline biotox-prov-big-20261104-124916, moirai_smoke): the approved BioTox flow is biotox_run_script + biotox_run_check then `flux batch launch.sh` submitted by hand. Batch f3iKMXkX8ykB ended COMPLETED rc 0 after 4515 s with valid traces (moirai_trace_inventory ok) and a check_study result.json with ok true, but the stage has no outputs.job, so moirai_validate stops at 'ran' ('the run has not started'): only moirai_smoke_run/moirai_baseline_run record a job (_start/_start_batch). New tool moirai_run_attach(pipeline, stage, flux_job_id, output_file, result_json) records a FINISHED job with source 'attached' in the pipeline's own jobs dir and the stage outputs (job, traces, mode attached) exactly as a started job is read. rc is never taken from the caller: it is derived from `flux jobs -n -a -o '{state} {result} {returncode} {runtime}' <id>` (INACTIVE required, rc 0 only for COMPLETED and returncode 0) and from result_json 'ok' (false -> rc 1, problems in the log). Refuses an unfinished or unknown flux job, a stage other than moirai_smoke/baseline, an unreadable result_json/output_file; submits and cancels nothing. moirai_validate body moved to _validate (same checks); a stage without hosts.txt (attached BioTox: no wrapper) already skipped the per-host checks, now in attached mode the per-host evidence is taken from the trace inventory (prov_<host> file names): a host with only spill traces fails host_service_trace, host names found add a passing attached_hosts check, no names changes nothing; exit_0 is untouched. Selftest cases attach_* (fake flux, temp pipeline). SKILL.md: Rules, Constraints, Corner cases, Corrector row for 'the run has not started', Self-learn; personal paths removed."
+  },
+  {
+   "version": 10,
+   "ts": 1794189191.6,
+   "by": "haridev",
+   "why": "Live Run view: the live_run stage of a live pipeline (a multi-hour run of an annotated app, many per app). moirai_live_run starts it on the parent run pipeline's annotated tree and env (P.origin), default limit 12 h; validate judges spec coverage as an assumption for a live run."
+  },
+  {
+   "version": 11,
+   "ts": 1794269485.0636075,
+   "by": "haridev",
+   "proposal": "e1d213379f6b",
+   "why": "Batch f3j9BPvr1Agw (12 h, 32 nodes Elmerfold live run) was cancelled while queued, 76 min after submit, at 15:26:27 exactly when the web UI server restarted: the batch wrapper ran as a child of the server, held `flux watch` and a cancel trap on TERM/INT. Fix: detached submit (own session, nohup, clean env, stdin /dev/null), no cancel trap, flux job id recorded in the job record, status/validate derive state from flux and perform the post-run evaluation from flux + run.out."
+  },
+  {
+   "version": 12,
+   "ts": 1794426745.1495023,
+   "by": "haridev",
+   "proposal": "9f9f1a499d32",
+   "why": "Incident elmerfold_64-20261110-192435 (parent elmerfold-prov-20261030-125944): the published package wrapper had STAGE=.../traces/smoke baked in by 03_build.sh (SCALE=smoke), so a baseline/live run (SCALE=baseline) wrote its 130 prov files, hosts.txt and service logs to traces/smoke/raw while the pipeline's live_run/raw stayed empty; validate saw 0 activities and the job 'lost'. Changes: (1) stage_guard / moirai_stage_guard: before a command-mode run (and a batch submit) the wrapper's STAGE=, its MOIRAI_LOG_FILE dir and the SCALE= tag in the command must agree with the stage; mismatch refuses the start with the exact fix, or with retarget_wrapper=true rewrites only the STAGE= line (backup kept, raw dir created); (2) adopt_files/adopt_traces run from moirai_run_status and moirai_validate: files the wrapper's real STAGE/raw wrote since the job started are symlinked into the pipeline's raw dir, stale files from earlier attempts are moved to stale_raw_<ts>, the real STAGE dir, hosts.txt and stale dir are recorded in the stage outputs, the real stage's old hosts.txt is moved aside before the run, and validate gains a stage_tag check and a trace message naming the real dir; (3) command-mode jobs record the flux job id found in their log (L-aa7a6eec), status follows flux when the follower is gone or has exited early (no more 'lost' for a running batch, flux's failed rc wins over a runner rc 0), and moirai_run_stop also cancels the recorded flux job; the batch-mode detached submit of v11 is unchanged; (4) selftest cases guard_* / adopt_* / follow_command_* and checks, SKILL corner case and Corrector rows. Evidence: lessons L-aa7a6eec, L-c07389f2, L-389fca8b, L-9c04697e, L-0a9784cd, L-90492685 on moirai_run; user: 'fix the capability of live run to make sure the traces and tag is correct when the live run is executed'. Second proposal after the first failed its own selftest on two real defects: a pipeline-rendered wrapper is tagged with the stage name not the SCALE (accepted now), and a flux id printed after 'batch job:' need not hold a digit."
   }
- ],
- "pvc": {
-  "predictor": [
-   "moirai_smoke_run",
-   "moirai_baseline_run"
-  ],
-  "validator": [
-   "moirai_validate"
-  ]
- }
+ ]
 }

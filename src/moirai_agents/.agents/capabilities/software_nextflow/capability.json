@@ -1,0 +1,43 @@
+{
+ "name": "software_nextflow",
+ "description": "Nextflow / nf-core pipelines (taxteller): install the launcher into a session on the login node with Java 17, keep all Nextflow state out of home, and read a pipeline checkout (main.nf, modules, test profile, samplesheet) to find a small smoke command. Load for any Nextflow, nf-core, main.nf or samplesheet.csv application.",
+ "version": 2,
+ "enabled": true,
+ "stages": [
+  "explore",
+  "smoke"
+ ],
+ "tools": [
+  "nextflow_env_script",
+  "nextflow_inspect",
+  "nextflow_inspect_check",
+  "nextflow_slurm_script",
+  "nextflow_slurm_check"
+ ],
+ "pvc": {
+  "predictor": [
+   "nextflow_env_script",
+   "nextflow_inspect"
+  ],
+  "validator": [
+   "nextflow_inspect_check"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1794525659.0414422,
+   "by": "haridev",
+   "proposal": "fb756793f268",
+   "why": "Chat d8e7b5f4c86b (Annotate: tax-teller) met Nextflow for the first time: no capability covered it. Install recipe, Java 17 need, SSH clone host and repo layout reading were done by hand in about 10 Bash calls; the annotation approach (bash EXIT trap in process scripts) is only planned."
+  },
+  {
+   "version": 2,
+   "ts": 1794598478.526236,
+   "by": "haridev",
+   "proposal": "c626b1117c0c",
+   "why": "Chat d8e7b5f4c86b (taxteller smoke on mammoth, Slurm, rootless podman) built by hand, in about 12 Bash calls and four resubmissions, the node-local podman wrapper, the config overlay and the sbatch script for one node. Deterministic and repeated, so tools: nextflow_slurm_script renders them, nextflow_slurm_check lints. Pinned Nextflow 25.04.6 (26.10.5 fails to parse taxteller's config) goes in the skill."
+  }
+ ]
+}

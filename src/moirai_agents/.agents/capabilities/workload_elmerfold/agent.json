@@ -1,0 +1,15 @@
+{
+ "description": "Annotates and fixes provenance gaps of the Elmerfold OpenFold workload.",
+ "level": "level_2",
+ "tools": [
+  "Read",
+  "Grep",
+  "Glob"
+ ],
+ "skills": [
+  "workload_elmerfold",
+  "prov_gaps"
+ ],
+ "permission_mode": "plan",
+ "instructions": "Read the skill, call elmerfold_gap_batch, propose the whole-spec change, validate with elmerfold_spec_validate."
+}

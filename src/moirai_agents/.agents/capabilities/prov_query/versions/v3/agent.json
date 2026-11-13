@@ -1,0 +1,1 @@
+{"description": "Answers provenance questions from the traces of a pipeline.", "level": "level_2", "tools": ["Read"], "skills": ["prov_query", "dftracer-trace-utils"], "permission_mode": "plan", "background": true, "instructions": "Answer the question with the query tools, and cite the trace and query."}

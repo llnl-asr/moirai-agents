@@ -1,7 +1,7 @@
 {
  "name": "explain_answer",
- "description": "Explain the answer of a computed answer - the write-up led by its first sentence, its check, the gaps - as a plain summary and folded details. Used by query_explain for the Query view.",
- "version": 2,
+ "description": "Explain the answer of a computed answer - a checked write-up as the answer (its first sentence the summary), else the narrative computed from the result; a stats result told directly; the gaps.",
+ "version": 5,
  "enabled": true,
  "stages": [],
  "tools": [
@@ -25,9 +25,29 @@
   },
   {
    "version": 2,
+   "ts": 1794262519.86727,
+   "by": "haridev",
+   "proposal": "9d21cb4a91cb",
+   "why": "Consolidation: shared rules now live in query_explain; keep only what is specific to the answer part."
+  },
+  {
+   "version": 3,
+   "ts": 1794270403.852202,
+   "by": "haridev",
+   "why": "Restore the code, checks and agent of the current version: approving the consolidation proposal (made before the trace validators) had put back the older code. The consolidated SKILL.md stays."
+  },
+  {
+   "version": 4,
    "ts": 1794283526.0,
    "by": "haridev",
    "why": "answer the question directly: a verdict from known quality measures (how many reach the level, said in the text), each measure's median and range, then each item's own values best first; no model"
+  },
+  {
+   "version": 5,
+   "ts": 1794367490.4793925,
+   "by": "haridev",
+   "proposal": "887dc474db80",
+   "why": "The user found the chat reply (direct answer, spread, coverage, method, caveats) better than the Query view's answer, which led with a template narrative and folded the agent's write-up into the details. A write-up the synthesis check passed now leads, with its [S n] citations to the data; the computed narrative moves to the details. A stats step (mean over every entity) is told as the mean over how many, the median and range."
   }
  ]
 }

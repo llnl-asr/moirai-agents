@@ -1,1 +1,13 @@
-{"description": "Explains the answer part of a computed answer.", "level": "level_1", "tools": ["Read"], "skills": ["explain_answer"], "permission_mode": "plan", "background": true, "instructions": "explain_answer on the answer, then explain_answer_check. Return the explanation and the verdict."}
+{
+ "description": "Explains the answer part of a computed answer.",
+ "level": "level_1",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "explain_answer"
+ ],
+ "permission_mode": "plan",
+ "background": true,
+ "instructions": "explain_answer on the answer, then explain_answer_check. Return the explanation and the verdict."
+}

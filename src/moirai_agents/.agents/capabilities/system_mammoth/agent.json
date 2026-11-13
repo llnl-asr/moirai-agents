@@ -1,0 +1,12 @@
+{
+ "description": "Reports read access of data paths on mammoth.",
+ "level": "level_1",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "system_mammoth"
+ ],
+ "permission_mode": "default",
+ "instructions": "Probe paths with the tools; report what is unreadable and why. Change nothing."
+}

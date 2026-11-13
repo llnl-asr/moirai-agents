@@ -1,0 +1,58 @@
+{
+ "name": "tools_moirai_venv",
+ "description": "Build and check the moirai venv (dftracer wheel with one shared libdftracer_core, moirai wheel rebuilt from HEAD, pydftracer common.py overlay, dftracer-utils) in a session on a system that has none (mammoth, Slurm). Load when explore_validate fails on moirai or dftracer_utils, MOIRAI_AGENTS_MOIRAI_PYTHON points to a missing venv, 'ModuleNotFoundError dftracer_utils', two libdftracer_core copies, 'ninja: build stopped' on rocksdb with gcc 10, or a stale moirai wheel.",
+ "version": 3,
+ "enabled": true,
+ "stages": [
+  "explore"
+ ],
+ "tools": [
+  "moirai_venv_script",
+  "moirai_venv_check",
+  "moirai_venv_selftest"
+ ],
+ "pvc": {
+  "predictor": [
+   "moirai_venv_script"
+  ],
+  "validator": [
+   "moirai_venv_check",
+   "moirai_venv_selftest"
+  ]
+ },
+ "review": [
+  "line 100: writes or deletes files (write_text)",
+  "line 101: writes or deletes files (write_text)",
+  "line 103: writes or deletes files (unlink)",
+  "line 105: writes or deletes files (write_text)",
+  "line 107: writes or deletes files (write_text)",
+  "line 109: writes or deletes files (unlink)",
+  "line 110: writes or deletes files (rmdir)",
+  "line 96: writes or deletes files (write_text)",
+  "line 97: writes or deletes files (write_text)",
+  "line 98: writes or deletes files (write_text)"
+ ],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1794525660.6176622,
+   "by": "haridev",
+   "proposal": "037e46745095",
+   "why": "Chat d8e7b5f4c86b (Annotate: tax-teller) built the moirai venv on mammoth by hand in about 30 Bash calls after the user chose 'Build the venv in the session on this system'. The recipe (python/3.12.2 module, PyPI dftracer wheel repaired to one core copy, prebuilt moirai wheel stale so rebuilt with gcc 12 on a pdebug node, pydftracer common.py overlay, dftracer-utils imports as dftracer.utils) is deterministic and was only a lesson on app_explore."
+  },
+  {
+   "version": 2,
+   "ts": 1794600111.4565845,
+   "by": "haridev",
+   "proposal": "6f03e22b2111",
+   "why": "User: every tool should use the dftracer pre-release with its prebuilt modules and compose as needed. The pre-release (>=2.2.0.post57.dev0) ships ONE libdftracer_core and dftracer-modules, so step 2 installs dftracer[modules] instead of downloading and patchelf-repairing the wheel, and a new step 5 composes dftracer for provenance (MPI, HDF5) with the application's modules loaded; moirai_venv_check gains 'composed'."
+  },
+  {
+   "version": 3,
+   "ts": 1794600286.0191872,
+   "by": "haridev",
+   "proposal": "a652629dccb7",
+   "why": "Checked on a real pre-release venv composed with Cray MPICH 9.0 and HDF5 1.14 (tuolumne, 2026-11-13): one_core counted the compose tree's static archive libdftracer_core_base.a as a second core and failed a correct venv. It counts shared libdftracer_core*.so* outside dftracer/compose now; the selftest fixture has that archive."
+  }
+ ]
+}

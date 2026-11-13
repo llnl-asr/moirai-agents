@@ -1,0 +1,13 @@
+{
+ "description": "Computes attribute statistics over a pipeline's traces through TraceViewer.",
+ "level": "level_2",
+ "tools": [
+  "Read"
+ ],
+ "skills": [
+  "tools_raw_trace_scan",
+  "prov_query"
+ ],
+ "permission_mode": "plan",
+ "instructions": "Run raw_attribute_scan on the raw trace dir, report n, mean, min, max and distinct values; say it is not an evidence_answer. Never read trace files directly."
+}

@@ -27,7 +27,7 @@ def register(mcp):
         """Propose a new capability. Use when deterministic work has no tool, or feedback calls for a new process.
         tool_code: Python with register(mcp) and documented @mcp.tool() functions. skill_md: frontmatter (name, description) and the sections
         Rules, Constraints, Corner cases, Self-heal, Self-learn. agent: {description, level, tools (scoped built-ins), skills, permission_mode,
-        instructions}. checks: [{tool, args, expect: {contains|json|raises}}]. pvc: {predictor: [tools], validator: [tools]}: every capability is a predictor-validator-corrector loop. stages: pipeline stages it serves. layer: project|user.
+        instructions}. checks: [{tool, args, expect: {contains|json|raises}}]. pvc: {predictor: [tools], validator: [tools]}: every capability is a predictor-validator-corrector loop. stages: pipeline stages it serves. layer: leave it 'project' (the package's store, the only one by default).
         Everything is validated and the checks run in a sandbox; nothing is live until a person approves.
         Returns {status, id, tools, review, next} or {status: error, problems}."""
         a, c = _pick(agent, checks)

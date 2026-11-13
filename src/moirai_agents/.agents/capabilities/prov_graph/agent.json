@@ -9,5 +9,5 @@
  ],
  "permission_mode": "plan",
  "background": true,
- "instructions": "Run graph_check, then graph_validate. Return the verdict, the counts by type, one lineage example and the exact fixes. Do not compare run outputs: that is not this stage."
+ "instructions": "Run graph_check, graph_compare and graph_validate. Return the verdict, the counts, one lineage example, the exact fixes, and name any timestamp_only members for the user to judge."
 }

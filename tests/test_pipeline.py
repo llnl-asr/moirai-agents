@@ -110,7 +110,22 @@ def test_a_batch_job_shows_the_file_it_wrote_to(tmp_path):
     f = tmp_path / "run.out"
     f.write_text("predicted 2 structures\n")
     out = J._redirected(f"[0]: stdout redirected to {f}\n[0]: stderr redirected to {f}\n[1]: stdout redirected to /nonexistent/x\n")
-    assert out.count("predicted 2 structures") == 1 and "/nonexistent/x: No such file" in out
+    assert out.count("predicted 2 structures") == 1 and "/nonexistent/x: No such file" in out and "redirected to" not in out
+    assert J._redirected(f"[0]: stdout redirected to {f}\n") == "predicted 2 structures\n"      # one file: its text, no header
+
+
+def test_flux_and_slurm_show_output_the_same_way(monkeypatch, tmp_path):
+    from moirai_agents.core import jobs as J
+    f = tmp_path / "job.out"
+    f.write_text("step 1\nstep 2\n")
+    monkeypatch.setattr(J, "_flux_text", lambda args, timeout: '{"attributes": {"system": {"cwd": "/w"}}, "tasks": [{"command": ["run"]}]}'
+                        if args[1] == "info" else f"[0]: stdout redirected to {f}\n[0]: stderr redirected to {f}\n")
+    flux = J.flux_detail("fAbc123")
+    monkeypatch.setattr(J, "_run", lambda cmd, timeout=0: f"JobId=9 JobName=j BatchFlag=0 Command=run WorkDir=/w StdOut={f} StdErr={f}"
+                        if cmd[:2] == ["scontrol", "show"] else None)
+    slurm = J.slurm_detail("9")
+    assert flux["output"] == slurm["output"] == "step 1\nstep 2\n" and flux["files"] == slurm["files"] == [str(f)]
+    assert set(flux) == set(slurm)
 
 
 def test_a_scheduler_job_id_is_checked():
@@ -122,6 +137,7 @@ def test_scheduler_jobs_come_latest_update_first(monkeypatch):
     from moirai_agents.core import jobs as J
     line = lambda jid, sub, run, end: J._flux_row(f"{jid}|INACTIVE|COMPLETED|x|q|1|{sub}|1|{run}|{end}")
     monkeypatch.setitem(J._flux_cache, "at", time.time())
+    monkeypatch.setitem(J._flux_cache, "since", 0.0)
     monkeypatch.setitem(J._flux_cache, "rows", [line("old", 10, 11, 12), line("late", 1, 2, 90), line("queued", 50, 0, 0)])
     assert [j["id"] for j in J.submitted()] == ["late", "queued", "old"]
     assert [j["id"] for j in J.submitted(since=5)] == ["queued", "old"]
@@ -132,6 +148,45 @@ def test_no_scheduler_means_no_submitted_jobs(monkeypatch):
     monkeypatch.setitem(J._flux_cache, "at", 0.0)
     monkeypatch.setenv("PATH", "/nonexistent")
     assert J.submitted() == []
+
+
+def test_slurm_rows_are_grouped_like_flux_ones():
+    from moirai_agents.core import jobs as J
+    row = lambda st, el="00:01:05": J._slurm_row(f"42|{st}|job|pdebug|1|2026-11-12T15:05:34|{el}|2026-11-12T15:05:40|2026-11-12T15:06:39")
+    assert [row(s)["group"] for s in ("PENDING", "RUNNING", "COMPLETED", "FAILED", "CANCELLED by 35619", "TIMEOUT", "OUT_OF_MEMORY")] == \
+        ["sched", "run", "ok", "bad", "bad", "bad", "bad"]
+    r = row("CANCELLED by 35619", "1-02:00:03")
+    assert r["sched"] == "slurm" and r["state"] == "CANCELLED" and r["result"] == "CANCELLED by 35619" and r["runtime"] == 93603
+    assert r["updated"] == J._slurm_time("2026-11-12T15:06:39") > r["submitted"] > 0
+    q = J._slurm_row("43|PENDING|job|pdebug|2|2026-11-12T15:05:34|0:00|N/A", squeue=True)
+    assert q["group"] == "sched" and q["runtime"] == 0 and q["updated"] == q["submitted"]
+    assert J._slurm_row("short|line") is None
+
+
+def test_only_schedulers_that_answer_are_listed(monkeypatch):
+    from moirai_agents.core import jobs as J
+    monkeypatch.setitem(J._sched_cache, "at", 0.0)
+    monkeypatch.setenv("MOIRAI_AGENTS_SCHEDULER", "flux,slurm")
+    monkeypatch.setattr(J, "_flux_jobs", lambda since: None)        # a flux client without a broker, as on a Slurm system
+    monkeypatch.setattr(J, "_slurm_jobs", lambda since: [J._slurm_row("7|RUNNING|j|p|1|2026-11-12T15:05:34|0:10|2026-11-12T15:05:34|Unknown")])
+    v = J.scheduler_view()
+    assert v["schedulers"] == ["slurm"] and [j["id"] for j in v["jobs"]] == ["7"]
+
+
+def test_slurm_job_details(monkeypatch, tmp_path):
+    from moirai_agents.core import jobs as J
+    assert J.sched_detail("slurm", "1; rm -rf /")["status"] == "error" and J.sched_detail("pbs", "1")["status"] == "error"
+    (tmp_path / "out-9.log").write_text("hello from slurm\n")
+    show = f"JobId=9 JobName=my job BatchFlag=1 Command=/a/run.sh x WorkDir={tmp_path} StdErr={tmp_path}/out-9.log StdOut={tmp_path}/out-9.log TimeLimit=01:00:00"
+    calls = {("scontrol", "show"): show, ("scontrol", "write"): "#!/bin/bash\necho hi\n"}
+    monkeypatch.setattr(J, "_run", lambda cmd, timeout=0: calls.get(tuple(cmd[:2])))
+    d = J.sched_detail("slurm", "9")
+    assert d["command"].startswith("#!/bin/bash") and d["cwd"] == str(tmp_path) and d["output"] == "hello from slurm\n" and d["duration"] == 3600
+    gone = {("sacct", "-X"): f"{tmp_path}||old|out-%j.log|\n", ("sacct", "-j"): "Batch Script for 9\n" + "-" * 40 + "\nNONE\n"}
+    monkeypatch.setattr(J, "_run", lambda cmd, timeout=0: gone.get(tuple(cmd[:2])))
+    d = J.sched_detail("slurm", "9")       # the controller forgot it: sacct, with the %j pattern made concrete
+    assert d["command"] == "" and d["output"] == "hello from slurm\n" and d["files"] == [str(tmp_path / "out-9.log")]
+    assert J._slurm_path("o-%x-%A_%a.%5j", "12_3", "n", "/w") == "/w/o-n-12_3.012_3" and J._slurm_path("/abs/%u-%%", "5", "n", "/w").startswith("/abs/")
 
 
 def at_gate(call, monkeypatch, on=True):

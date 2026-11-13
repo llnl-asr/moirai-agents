@@ -8,7 +8,10 @@
     <name>/checks.json       known input -> expected output, run in a sandbox on every change
     <name>/versions/v<N>/    every earlier version, so rollback is one call
 
-Layers (a higher one shadows a lower one wholesale): bundled -> user -> project (``capabilities/`` of the repo: committed, shared). Changes follow the
+One store: ``src/moirai_agents/.agents/capabilities``, in the package and committed. What a person approves (and every lesson) is written
+there, so the package always carries what was learnt. Tests (and anyone who wants a scratch store) can still split it in layers,
+lowest first, a higher one shadowing a lower one wholesale: bundled -> user -> project, with MOIRAI_AGENTS_BUNDLED_CAPABILITIES,
+MOIRAI_AGENTS_USER_CAPABILITIES and MOIRAI_AGENTS_PROJECT_CAPABILITIES; a layer whose directory is the bundled one is that store. Changes follow the
 predictor/validator discipline: propose (static checks, duplicate fingerprint, bundle checks, sandboxed checks),
 then a person approves, then it is live without a restart. Nothing runs in the server before approval.
 """
@@ -93,14 +96,21 @@ class _State:
 
 
 def layers() -> List[Tuple[str, Path]]:
-    """Lowest precedence first."""
-    return [("bundled", Path(os.environ.get("MOIRAI_AGENTS_BUNDLED_CAPABILITIES", BUNDLED))),
-            ("user", Path(os.environ.get("MOIRAI_AGENTS_USER_CAPABILITIES") or state_dir("capabilities")).expanduser()),
-            ("project", Path(os.environ.get("MOIRAI_AGENTS_PROJECT_CAPABILITIES", PKG.parents[1] / "capabilities")).expanduser())]
+    """Lowest precedence first. By default one layer, ``project``: the package's own store, where approvals are written. A user layer
+    exists only when MOIRAI_AGENTS_USER_CAPABILITIES names one; a project directory other than the package's (tests) keeps the
+    package's store below it as the read-only ``bundled`` layer."""
+    bundled = Path(os.environ.get("MOIRAI_AGENTS_BUNDLED_CAPABILITIES") or BUNDLED).expanduser()
+    project = Path(os.environ.get("MOIRAI_AGENTS_PROJECT_CAPABILITIES") or bundled).expanduser()
+    out = [] if project.resolve() == bundled.resolve() else [("bundled", bundled)]
+    if os.environ.get("MOIRAI_AGENTS_USER_CAPABILITIES"):
+        out.append(("user", Path(os.environ["MOIRAI_AGENTS_USER_CAPABILITIES"]).expanduser()))
+    return out + [("project", project)]
 
 
 def layer_dir(layer: str) -> Path:
-    return dict(layers())[layer]
+    """A layer's directory; a layer this store does not have (no user layer by default) means the project one."""
+    ls = dict(layers())
+    return ls.get(layer) or ls["project"]
 
 
 def all_caps() -> Dict[str, Tuple[str, Path, dict]]:
@@ -427,7 +437,8 @@ def propose(name: str, tool_code: str, skill_md: str, agent: dict, checks: List[
     if not NAME_RX.match(name):
         return _err("name must be lowercase letters, digits and '_' (3-41 chars), starting with a letter")
     if layer not in ("project", "user"):
-        return _err("layer must be 'project' (committed with the workspace) or 'user' (only you)")
+        return _err("layer must be 'project' (the package's store, committed) or 'user' (only where a user layer is configured)")
+    layer = layer if layer in dict(layers()) else "project"
     if not description.strip() or not why.strip():
         return _err("say what it does (description) and why it should exist (why)")
     v = validate_bundle(name, tool_code, skill_md, agent, checks, pvc)
@@ -629,9 +640,11 @@ def sync_shadows() -> List[str]:
     replaced kept under versions/. A copy changed on purpose (capability_update: an entry the bundled history lacks) is never touched.
     Returns the names synced."""
     out = []
-    user = layer_dir("user")
+    if "user" not in dict(layers()):
+        return out
+    user, base = layer_dir("user"), dict(layers()).get("bundled") or layer_dir("project")
     for d in sorted(user.glob("*/capability.json")) if user.exists() else []:
-        name, src = d.parent.name, BUNDLED / d.parent.name
+        name, src = d.parent.name, base / d.parent.name
         if not (src / "capability.json").is_file():
             continue
         try:

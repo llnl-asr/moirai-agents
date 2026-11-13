@@ -146,8 +146,9 @@ def test_the_views_read_apps_live_runs_and_the_aggregated_graph(tmp_path):
 
 
 def test_the_live_run_tools_in_the_project_layer(tmp_path, monkeypatch):
-    """moirai_run and repro_package of the repo's capabilities/ (the layer the server loads) carry the live run's stages."""
-    monkeypatch.setenv("MOIRAI_AGENTS_PROJECT_CAPABILITIES", str(REPO / "capabilities"))
+    """moirai_run and repro_package of the package's store (what the server loads) carry the live run's stages."""
+    from moirai_agents.core.capstore import BUNDLED
+    monkeypatch.setenv("MOIRAI_AGENTS_PROJECT_CAPABILITIES", str(BUNDLED))
     from moirai_agents.core import capstore
     capstore._State.loaded, capstore._State.fingerprint = {}, ""
     t = {}
@@ -255,7 +256,7 @@ def test_the_annotation_helper_captures_inputs_outputs_and_attributes(tmp_path):
     import importlib.util
     import subprocess
     import sys
-    spec = importlib.util.spec_from_file_location("prov_annotate_tool", REPO / "capabilities/prov_annotate/tool.py")
+    spec = importlib.util.spec_from_file_location("prov_annotate_tool", REPO / "src/moirai_agents/.agents/capabilities/prov_annotate/tool.py")
     t = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(t)
     (tmp_path / "fake").mkdir()

@@ -1,0 +1,14 @@
+{
+ "description": "Reads Nextflow pipeline checkouts and renders the session environment for the Nextflow launcher; never runs a pipeline.",
+ "level": "level_1",
+ "tools": [
+  "Read",
+  "Grep",
+  "Glob"
+ ],
+ "skills": [
+  "software_nextflow"
+ ],
+ "permission_mode": "default",
+ "instructions": "Inspect a Nextflow checkout with nextflow_inspect, render the env with nextflow_env_script, validate with nextflow_inspect_check. Do not run jobs."
+}

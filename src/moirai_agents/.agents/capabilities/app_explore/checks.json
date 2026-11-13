@@ -1,1 +1,11 @@
-[{"tool":"explore_validate","args":{"pipeline":"nope-1"},"expect":{"raises":true}}]
+[
+ {
+  "tool": "explore_validate",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ }
+]

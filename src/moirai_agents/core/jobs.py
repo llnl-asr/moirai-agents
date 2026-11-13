@@ -6,6 +6,7 @@ import json
 import os
 import re
 import signal
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -109,13 +110,22 @@ def stop(pid: str, jid: str) -> Dict[str, Any]:
     return {"status": "ok", "id": jid, "stopped": j["status"] == "running"}
 
 
+# ---- the scheduler: Flux or Slurm, whichever answers on this system (both, if both do). MOIRAI_AGENTS_SCHEDULER=flux|slurm|none pins it.
+SCHED_COUNT, SCHED_TIMEOUT_S, SCHED_CACHE_S = 100, 8, 10
+FLUX_COUNT, FLUX_TIMEOUT_S, FLUX_CACHE_S = SCHED_COUNT, SCHED_TIMEOUT_S, SCHED_CACHE_S
 FLUX_FORMAT = "{id.f58}|{state}|{result}|{name}|{queue}|{nnodes}|{t_submit}|{runtime}|{t_run}|{t_inactive}"
-FLUX_COUNT, FLUX_TIMEOUT_S, FLUX_CACHE_S = 100, 8, 10
 FLUX_WAITING = ("DEPEND", "PRIORITY", "SCHED")
 FLUX_ID = re.compile(r"^[A-Za-z0-9]{2,32}$")
 FLUX_REDIRECT = re.compile(r"(?:stdout|stderr) redirected to (\S+)")
 FLUX_ATTACH_S, OUTPUT_CHARS = 5, 20000
-_flux_cache: Dict[str, Any] = {"at": 0.0, "rows": []}
+SLURM_FORMAT = "JobID,State,JobName,Partition,NNodes,Submit,Elapsed,Start,End"
+SLURM_SQUEUE = "%i|%T|%j|%P|%D|%V|%M|%S"
+SLURM_WAITING = ("PENDING", "REQUEUED", "REQUEUE_HOLD", "REQUEUE_FED", "RESV_DEL_HOLD")
+SLURM_RUNNING = ("RUNNING", "CONFIGURING", "COMPLETING", "SUSPENDED", "STAGE_OUT", "SIGNALING", "RESIZING", "STOPPED")
+SLURM_ID = re.compile(r"^[0-9]+(?:_[0-9]+)?(?:\+[0-9]+)?$")
+SCHEDULERS = ("flux", "slurm")
+_sched_cache: Dict[str, Any] = {"at": 0.0, "since": None, "rows": [], "available": []}
+_flux_cache = _sched_cache
 
 
 def _flux_row(line: str) -> Optional[Dict[str, Any]]:
@@ -126,23 +136,102 @@ def _flux_row(line: str) -> Optional[Dict[str, Any]]:
     jid, st, result, name, queue, nodes, submitted, runtime, started, ended = f
     group = "sched" if st in FLUX_WAITING else "run" if st != "INACTIVE" else "ok" if result == "COMPLETED" else "bad"
     try:
-        return {"id": jid, "state": st, "result": result, "name": name, "queue": queue, "nodes": nodes, "submitted": float(submitted), "runtime": float(runtime or 0), "group": group,
-                "updated": max(float(submitted), float(started or 0), float(ended or 0))}
+        return {"id": jid, "sched": "flux", "state": st, "result": result, "name": name, "queue": queue, "nodes": nodes, "submitted": float(submitted),
+                "runtime": float(runtime or 0), "group": group, "updated": max(float(submitted), float(started or 0), float(ended or 0))}
     except ValueError:
         return None
 
 
+def _slurm_time(s: str) -> float:
+    """A Slurm timestamp (local time, 2026-11-12T15:05:34) as epoch seconds; 0 for Unknown/None/N/A."""
+    try:
+        return time.mktime(time.strptime(s.strip(), "%Y-%m-%dT%H:%M:%S"))
+    except ValueError:
+        return 0.0
+
+
+def _slurm_elapsed(s: str) -> float:
+    """[D-][HH:]MM:SS as seconds."""
+    days, _, hms = s.strip().rpartition("-")
+    try:
+        parts = [float(x) for x in hms.split(":")]
+        sec = sum(v * 60 ** i for i, v in enumerate(reversed(parts)))
+        return sec + (float(days) * 86400 if days else 0)
+    except ValueError:
+        return 0.0
+
+
+def _slurm_group(st: str) -> str:
+    return "sched" if st in SLURM_WAITING else "run" if st in SLURM_RUNNING else "ok" if st == "COMPLETED" else "bad"
+
+
+def _slurm_row(line: str, squeue: bool = False) -> Optional[Dict[str, Any]]:
+    """One line of sacct (SLURM_FORMAT) or squeue (SLURM_SQUEUE): id|state|name|partition|nodes|submit|elapsed|start[|end]."""
+    f = line.strip().split("|")
+    if len(f) < (8 if squeue else 9) or not f[0]:
+        return None
+    jid, st_full, name, queue, nodes, submit, elapsed, start = f[:8]
+    end = "" if squeue else f[8]
+    st = (st_full.split() or [""])[0].rstrip("+")          # "CANCELLED by 1234", "OUT_OF_MEMORY"
+    sub = _slurm_time(submit)
+    return {"id": jid, "sched": "slurm", "state": st, "result": st_full.strip() if _slurm_group(st) in ("ok", "bad") else "", "name": name,
+            "queue": queue, "nodes": nodes, "submitted": sub, "runtime": _slurm_elapsed(elapsed), "group": _slurm_group(st),
+            "updated": max(sub, _slurm_time(start), _slurm_time(end))}
+
+
+def _run(cmd: List[str], timeout: float = SCHED_TIMEOUT_S) -> Optional[str]:
+    """stdout of a scheduler command, or None when the command is missing, fails or hangs (the scheduler is not usable here)."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _flux_jobs(since: float) -> Optional[List[Dict[str, Any]]]:
+    out = _run(["flux", "jobs", "-a", "-n", f"--count={SCHED_COUNT}", "-o", FLUX_FORMAT])
+    return None if out is None else [x for x in map(_flux_row, out.splitlines()) if x]
+
+
+def _slurm_jobs(since: float) -> Optional[List[Dict[str, Any]]]:
+    """sacct (finished jobs too) where accounting is on; squeue (queued and running only) where it is not."""
+    user = os.environ.get("USER") or ""
+    start = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(since or time.time() - 86400))
+    out = _run(["sacct", "-X", "-n", "-P", "-u", user, "-S", start, f"--format={SLURM_FORMAT}"])
+    if out is not None:
+        return [x for x in map(_slurm_row, out.splitlines()) if x][-SCHED_COUNT:]
+    out = _run(["squeue", "-h", "-u", user, "-o", SLURM_SQUEUE])
+    return None if out is None else [x for x in (_slurm_row(ln, squeue=True) for ln in out.splitlines()) if x]
+
+
+def schedulers() -> List[str]:
+    """The schedulers this system may have, in the order they are asked: MOIRAI_AGENTS_SCHEDULER, else every one whose client is installed."""
+    pin = os.environ.get("MOIRAI_AGENTS_SCHEDULER", "").strip().lower()
+    if pin:
+        return [s for s in re.split(r"[,\s]+", pin) if s in SCHEDULERS]
+    return [s for s, prog in (("flux", "flux"), ("slurm", "squeue")) if shutil.which(prog)]
+
+
 def submitted(since: float = 0.0) -> List[Dict[str, Any]]:
-    """This user's jobs in the scheduler since a time, the latest update first. Empty where there is no flux. Read at most once per FLUX_CACHE_S, since the panel polls."""
+    """This user's jobs in every scheduler that answers here (Flux, Slurm), since a time, the latest update first; each row says
+    which scheduler (``sched``). Empty where there is none. Read at most once per SCHED_CACHE_S, since the panel polls."""
+    return scheduler_view(since)["jobs"]
+
+
+def scheduler_view(since: float = 0.0) -> Dict[str, Any]:
+    """{jobs, schedulers}: the jobs as :func:`submitted`, and the schedulers that answered (an installed client without a running
+    service, like flux on a Slurm system, is left out)."""
     now = time.time()
-    if now - _flux_cache["at"] >= FLUX_CACHE_S:
-        _flux_cache["at"] = now
-        try:
-            r = subprocess.run(["flux", "jobs", "-a", "-n", f"--count={FLUX_COUNT}", "-o", FLUX_FORMAT], capture_output=True, text=True, timeout=FLUX_TIMEOUT_S)
-            _flux_cache["rows"] = [x for x in map(_flux_row, r.stdout.splitlines()) if x] if r.returncode == 0 else []
-        except (OSError, subprocess.TimeoutExpired):
-            _flux_cache["rows"] = []
-    return sorted((j for j in _flux_cache["rows"] if j["submitted"] >= since), key=lambda j: -j["updated"])
+    if now - _sched_cache["at"] >= SCHED_CACHE_S or (_sched_cache["since"] is not None and since < _sched_cache["since"]):
+        rows, avail = [], []
+        for s in schedulers():
+            got = (_flux_jobs if s == "flux" else _slurm_jobs)(since)
+            if got is not None:
+                avail.append(s)
+                rows += got
+        _sched_cache.update(at=now, since=since, rows=rows, available=avail)
+    jobs = sorted((j for j in _sched_cache["rows"] if j["submitted"] >= since), key=lambda j: -j["updated"])
+    return {"jobs": jobs, "schedulers": list(_sched_cache["available"])}
 
 
 def _command(path: str) -> str:
@@ -173,15 +262,109 @@ def _flux_text(args: List[str], timeout: float) -> str:
         return ""
 
 
-def _redirected(attached: str) -> str:
-    """A batch job sends its output to a file and attach only says so: show that file too, as far as it can be read."""
-    out = attached
-    for path in dict.fromkeys(FLUX_REDIRECT.findall(attached)):
+def _read_outputs(paths: List[str]) -> str:
+    """What a job wrote to its output files: the text alone when there is one file (stdout and stderr in the same file count
+    once), each under a ``--- path ---`` line when there are several, and a ``--- path: reason ---`` line for one that cannot be read.
+    Flux and Slurm jobs show their output the same way through this."""
+    paths = list(dict.fromkeys(p for p in paths if p))
+    out = ""
+    for path in paths:
         try:
-            out += f"\n--- {path} ---\n" + Path(path).read_text(errors="replace")[-OUTPUT_CHARS:]
+            text = Path(path).read_text(errors="replace")[-OUTPUT_CHARS:]
+            out += (f"--- {path} ---\n" if len(paths) > 1 else "") + text + ("" if text.endswith("\n") or not text else "\n")
         except OSError as e:
-            out += f"\n--- {path}: {e.strerror} ---\n"
+            out += f"--- {path}: {e.strerror} ---\n"
     return out
+
+
+def _redirected(attached: str) -> str:
+    """A Flux batch job sends its output to a file and attach only says so ("stdout redirected to X"): the file's text instead
+    of those lines, with whatever else attach printed before it."""
+    files = FLUX_REDIRECT.findall(attached)
+    rest = "\n".join(ln for ln in attached.splitlines() if not FLUX_REDIRECT.search(ln)).strip("\n")
+    return (rest + "\n" if rest else "") + _read_outputs(files)
+
+
+def sched_detail(sched: str, jid: str) -> Dict[str, Any]:
+    """What a scheduler job runs, where, and what it wrote so far, from Flux or Slurm."""
+    if sched == "slurm":
+        return slurm_detail(jid)
+    if sched in ("", "flux"):
+        return flux_detail(jid)
+    return {"status": "error", "error": f"unknown scheduler {sched}"}
+
+
+def _kv(text: str) -> Dict[str, str]:
+    """scontrol -o: Key=Value pairs on one line; a value may hold spaces (Command=, Comment=) up to the next Key=."""
+    out, key = {}, None
+    for tok in text.strip().split(" "):
+        k, eq, v = tok.partition("=")
+        if eq and re.fullmatch(r"[A-Za-z][A-Za-z0-9_:/]*", k):
+            key, out[k] = k, v
+        elif key:
+            out[key] += " " + tok
+    return out
+
+
+def _slurm_path(pattern: str, jid: str, name: str, workdir: str) -> str:
+    """A Slurm output-file pattern (%j, %A, %a, %x, %u, %%) made concrete, relative to the job's working directory."""
+    if not pattern:
+        return ""
+    base, _, task = jid.partition("_")
+    subs = {"j": jid.split("+")[0], "A": base, "a": task or "", "x": name, "u": os.environ.get("USER", ""), "%": "%"}
+    path = re.sub(r"%(\d*)([jAaxu%])", lambda m: subs[m.group(2)].zfill(int(m.group(1) or 0)), pattern)
+    return path if os.path.isabs(path) or not workdir else os.path.join(workdir, path)
+
+
+def _script_from(submit: str, workdir: str) -> str:
+    """The script an sbatch line ran, read from disk, for a job whose script Slurm did not keep. It may have changed since, and says so."""
+    for tok in submit.split()[1:]:
+        f = Path(tok if os.path.isabs(tok) else os.path.join(workdir or ".", tok))
+        try:
+            if not tok.startswith("-") and f.is_file() and f.stat().st_size < 1_000_000 and f.read_bytes()[:2] == b"#!":
+                text = f.read_text(errors="replace")
+                lines = text.splitlines(keepends=True)
+                return lines[0] + f"# {f}, as it is on disk now (Slurm kept no copy); submitted as: {submit}\n" + "".join(lines[1:])
+        except OSError:
+            continue
+    return ""
+
+
+def _sacct_script(text: str) -> str:
+    """sacct --batch-script without its banner; empty when Slurm kept none (an srun job, or scripts not stored)."""
+    body = "\n".join(ln for ln in text.splitlines() if not ln.startswith("Batch Script for") and not re.fullmatch(r"-{10,}", ln))
+    return "" if body.strip() in ("", "NONE") else body.strip("\n") + "\n"
+
+
+def slurm_detail(jid: str) -> Dict[str, Any]:
+    """A Slurm job: scontrol while the controller remembers it (queued, running, just ended), sacct after. Output comes from
+    the job's StdOut/StdErr files (default slurm-<id>.out in its working directory); an srun job without a file has none to show."""
+    if not SLURM_ID.match(jid or ""):
+        return {"status": "error", "error": "bad job id"}
+    info = _kv(_run(["scontrol", "show", "job", "-o", jid]) or "")
+    name = info.get("JobName", "")
+    if info:
+        workdir, command = info.get("WorkDir", ""), info.get("Command", "")
+        batch = info.get("BatchFlag") == "1" and _run(["scontrol", "write", "batch_script", jid, "-"])
+        outs = [info.get("StdOut", ""), info.get("StdErr", "")]
+    else:
+        row = (_run(["sacct", "-X", "-n", "-P", "-j", jid, "--format=WorkDir,SubmitLine,JobName,StdOut,StdErr"]) or "").strip().splitlines()
+        if not row:      # an older sacct without SubmitLine/StdOut
+            row = (_run(["sacct", "-X", "-n", "-P", "-j", jid, "--format=WorkDir,JobName"]) or "").strip().splitlines()
+            row = [row[0] + "|||" if row else ""]
+        f = (row[0] if row else "").split("|") + [""] * 5
+        workdir, command, name = f[0], f[1], f[2]
+        batch = _sacct_script(_run(["sacct", "-j", jid, "--batch-script"]) or "") or (command.startswith("sbatch") and _script_from(command, workdir))
+        outs = [_slurm_path(f[3], jid, name, workdir), _slurm_path(f[4], jid, name, workdir)]
+        if not (outs[0] or outs[1]) and not command.startswith("srun"):
+            outs = [os.path.join(workdir, f"slurm-{jid.split('+')[0]}.out")] if workdir else []
+    if not (info or workdir or command):
+        return {"status": "error", "error": f"Slurm does not know job {jid} (sacct and scontrol have nothing on it)"}
+    files = list(dict.fromkeys(o for o in outs if o))
+    output = _read_outputs(files)[-OUTPUT_CHARS:] if files else "(no output file: an srun job writes to the terminal that started it)"
+    limit = info.get("TimeLimit", "")
+    return {"id": jid, "sched": "slurm", "command": batch or command, "cwd": workdir, "files": files,
+            "duration": _slurm_elapsed(limit) if limit[:1].isdigit() else None, "output": output}
 
 
 def flux_detail(jid: str) -> Dict[str, Any]:
@@ -194,8 +377,9 @@ def flux_detail(jid: str) -> Dict[str, Any]:
         spec = {}
     sysattr = (spec.get("attributes") or {}).get("system") or {}
     tasks = spec.get("tasks") or [{}]
-    output = _redirected(_flux_text(["job", "attach", "--read-only", jid], FLUX_ATTACH_S))[-OUTPUT_CHARS:]
+    attached = _flux_text(["job", "attach", "--read-only", jid], FLUX_ATTACH_S)
+    output = _redirected(attached)[-OUTPUT_CHARS:]
     batch = ((sysattr.get("files") or {}).get("script") or {}).get("data")
-    return {"id": jid, "command": batch if isinstance(batch, str) and batch else " ".join(map(str, tasks[0].get("command") or [])), "cwd": sysattr.get("cwd", ""),
-            "duration": sysattr.get("duration"), "output": output}
+    return {"id": jid, "sched": "flux", "command": batch if isinstance(batch, str) and batch else " ".join(map(str, tasks[0].get("command") or [])),
+            "cwd": sysattr.get("cwd", ""), "files": list(dict.fromkeys(FLUX_REDIRECT.findall(attached))), "duration": sysattr.get("duration"), "output": output}
 
