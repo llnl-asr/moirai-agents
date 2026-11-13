@@ -16,5 +16,29 @@
   "expect": {
    "contains": "gcc-12"
   }
+ },
+ {
+  "tool": "moirai_venv_script",
+  "args": {
+   "tools_dir": "/tmp/s/tools",
+   "moirai_src": "/tmp/moirai",
+   "pydftracer_src": "/tmp/pydftracer",
+   "app_modules": "openmpi/4.1.2"
+  },
+  "expect": {
+   "contains": "dftracer[modules]>=2.2.0.post57.dev0"
+  }
+ },
+ {
+  "tool": "moirai_venv_script",
+  "args": {
+   "tools_dir": "/tmp/s/tools",
+   "moirai_src": "/tmp/moirai",
+   "pydftracer_src": "/tmp/pydftracer",
+   "app_modules": "openmpi/4.1.2"
+  },
+  "expect": {
+   "contains": "--enable mpi,hdf5 --disable papi,hwloc,hip,cuda"
+  }
  }
 ]

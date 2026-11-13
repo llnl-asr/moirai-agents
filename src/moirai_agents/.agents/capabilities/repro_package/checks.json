@@ -55,5 +55,12 @@
   "expect": {
    "raises": true
   }
+ },
+ {
+  "tool": "repro_install_selftest",
+  "args": {},
+  "expect": {
+   "contains": "\"status\": \"pass\""
+  }
  }
 ]

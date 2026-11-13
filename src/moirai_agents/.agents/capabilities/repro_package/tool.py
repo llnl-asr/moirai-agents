@@ -39,7 +39,7 @@ JOBID = re.compile(r"\bf[1-9A-Za-z]{9,}\b")
 PIN = r'''
 import importlib.metadata as m, json
 out = {}
-for n in ("dftracer", "moirai", "dftracer-utils"):
+for n in ("dftracer", "dftracer-modules", "moirai", "dftracer-utils"):
     try:
         d = m.distribution(n)
     except m.PackageNotFoundError:
@@ -48,6 +48,15 @@ for n in ("dftracer", "moirai", "dftracer-utils"):
     u = json.loads(u) if u else {}
     v = u.get("vcs_info") or {}
     out[n] = f"{n} @ git+{u['url']}@{v['commit_id']}" if v.get("commit_id") else f"{n}=={d.version}"
+# The modules dftracer-compose linked into the run's dftracer: "mpi,hdf5", "none", or absent for a dftracer without compose.
+try:
+    import dftracer, glob, os
+    comp = glob.glob(os.path.join(os.path.dirname(dftracer.__file__), "lib*", "dftracer", "composition.txt"))
+    if comp:
+        linked = [l.split()[0] for l in open(comp[0]) if l.split()[2:3] == ["linked"]]
+        out["dftracer-composition"] = ",".join(linked) or "none"
+except Exception:
+    pass
 print(json.dumps(out))
 '''
 LIB = r'''#!/bin/bash
@@ -63,6 +72,16 @@ while IFS= read -r line || [[ -n "$line" ]]; do
 done < "$CONFIG"
 require() { for v in "$@"; do [[ -n "${!v:-}" ]] || { echo "config: $v is required" >&2; exit 2; }; done; }
 log() { echo "[$(date +%H:%M:%S)] $(basename "$0"): $*"; }
+# dftracer composed as the run had it: DFTRACER_MODULES (the modules linked then; "none"; empty when unknown, then MPI and HDF5,
+# what provenance needs), linked from dftracer-modules' prebuilt variants or built here, against the modules this shell has loaded.
+compose_dftracer() {
+  local py="$1" want="${DFTRACER_MODULES:-mpi,hdf5}" off="" m
+  "$py" -c 'import dftracer.compose' 2>/dev/null || { log "this dftracer has no dftracer-compose: nothing to compose"; return 0; }
+  [[ "$want" == none ]] && want=""
+  for m in mpi hdf5 papi hwloc hip cuda; do [[ ",$want," == *",$m,"* ]] || off+="${off:+,}$m"; done
+  log "composing dftracer: ${want:-no module} (off: ${off:-none})"
+  "$py" -m dftracer.compose ${want:+--enable "$want"} ${off:+--disable "$off"}
+}
 require OUTPUT_ROOT VENV SCALE
 export SRC="$OUTPUT_ROOT/src" TRACES="$OUTPUT_ROOT/traces/$SCALE/raw" PY="$VENV/bin/python"
 mkdir -p "$OUTPUT_ROOT" "$TRACES"
@@ -87,9 +106,15 @@ log "source ready in $SRC"
 if [[ "$REUSE_VENV" == 1 ]]; then log "reusing $VENV"; exit 0; fi
 python3 -m venv "$VENV"
 "$PY" -m pip install -q --upgrade pip scikit-build-core pybind11
-DFTRACER_WHEEL=1 "$PY" -m pip install -q "$DFTRACER_SPEC"
+if [[ "$DFTRACER_SPEC" == *git+* ]]; then
+  DFTRACER_WHEEL=1 "$PY" -m pip install -q "$DFTRACER_SPEC"     # the run used dftracer built from git
+else
+  # the dftracer pre-release the run used, with its prebuilt modules at the same version
+  "$PY" -m pip install -q --pre "${DFTRACER_SPEC/#dftracer/dftracer[modules]}" "${DFTRACER_MODULES_SPEC:-${DFTRACER_SPEC/#dftracer/dftracer-modules}}"
+fi
 "$PY" -m pip install -q --no-build-isolation "$MOIRAI_SPEC"
 "$PY" -m pip install -q "${UTILS_SPEC:-dftracer-utils}"      # prov_check.py reads the traces through its TraceViewer
+compose_dftracer "$PY"
 ''',
     "03_build.sh": r'''# Build the patched application against moirai.
 SITE="$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
@@ -311,9 +336,15 @@ fi
 if [[ ! -x "$MPY" ]]; then
   python3 -m venv "$MOIRAI_VENV"
   "$MPY" -m pip install -q --upgrade pip scikit-build-core pybind11
-  DFTRACER_WHEEL=1 "$MPY" -m pip install -q "$DFTRACER_SPEC"
+  if [[ "$DFTRACER_SPEC" == *git+* ]]; then
+    DFTRACER_WHEEL=1 "$MPY" -m pip install -q "$DFTRACER_SPEC"     # the run used dftracer built from git
+  else
+    # the dftracer pre-release the run used, with its prebuilt modules at the same version
+    "$MPY" -m pip install -q --pre "${DFTRACER_SPEC/#dftracer/dftracer[modules]}" "${DFTRACER_MODULES_SPEC:-${DFTRACER_SPEC/#dftracer/dftracer-modules}}"
+  fi
   "$MPY" -m pip install -q --no-build-isolation "$MOIRAI_SPEC"
   "$MPY" -m pip install -q "${UTILS_SPEC:-dftracer-utils}"      # prov_check.py reads the traces through its TraceViewer
+  compose_dftracer "$MPY"
 fi
 if [[ ! -x "$PY" ]]; then
   [[ -n "$APP_SETUP_COMMAND" ]] || { echo "no app venv at $VENV and APP_SETUP_COMMAND is empty: build it as README says" >&2; exit 1; }
@@ -541,7 +572,8 @@ def _batch_cfg(app, output_root, url, ref, pins, cmd, src=""):
              "[paths]", f"APP={app}", f"OUTPUT_ROOT={_site(output_root)}", "# the app's own venv (no moirai in it) and the moirai venv", "VENV=${OUTPUT_ROOT}/env",
              "MOIRAI_VENV=${OUTPUT_ROOT}/moirai-venv", "# 1 uses both existing venvs as they are.", "REUSE_VENV=0", "",
              "[repos]", f"APP_URL={url}", f"APP_REF={ref}", f"DFTRACER_SPEC={pins.get('dftracer', '')}", f"MOIRAI_SPEC={pins.get('moirai', '')}",
-             f"UTILS_SPEC={pins.get('dftracer-utils', '')}", "", "[run]", "# batch: the app is launched as a flux batch; smoke or baseline.", "MODE=batch", "SCALE=smoke",
+             f"UTILS_SPEC={pins.get('dftracer-utils', '')}", f"DFTRACER_MODULES_SPEC={pins.get('dftracer-modules', '')}",
+             "# the modules dftracer-compose linked in the run (none: none; empty: MPI and HDF5)", f"DFTRACER_MODULES={pins.get('dftracer-composition', '')}", "", "[run]", "# batch: the app is launched as a flux batch; smoke or baseline.", "MODE=batch", "SCALE=smoke",
              f"INCHUNKS={g['inchunks']}", "# smoke input: the first SMOKE_LINES lines of the first chunk", "SMOKE_LINES=2", f"APP_CONFIG={g['config']}",
              f"SUBMIT_SCRIPT={g['submit_script']}", f"PRESTAGE={g['prestage']}", f"APP_CWD={cwd}", f"QUEUE={g['queue'] or 'pdebug'}",
              "# flux batch time limits in minutes", "LIMIT_MIN_smoke=30", f"LIMIT_MIN_baseline={max(g['minutes'], 60)}", "MODULES=mpifileutils/0.11.1",
@@ -1714,7 +1746,9 @@ def register(mcp):
         else:
             cfg = ["# The ONLY file with site or user values. Every script sources scripts/lib_load_config.sh, which reads it. The environment overrides it.", "", "[paths]",
                    f"APP={app}", f"OUTPUT_ROOT={_site(output_root)}", "VENV=${OUTPUT_ROOT}/env", "# 1 uses an existing venv with moirai in it.", "REUSE_VENV=0", "", "[repos]",
-                   f"APP_URL={url}", f"APP_REF={ref}", f"DFTRACER_SPEC={pins.get('dftracer', '')}", f"MOIRAI_SPEC={pins.get('moirai', '')}", f"UTILS_SPEC={pins.get('dftracer-utils', '')}", "", "[run]",
+                   f"APP_URL={url}", f"APP_REF={ref}", f"DFTRACER_SPEC={pins.get('dftracer', '')}", f"MOIRAI_SPEC={pins.get('moirai', '')}", f"UTILS_SPEC={pins.get('dftracer-utils', '')}",
+                   f"DFTRACER_MODULES_SPEC={pins.get('dftracer-modules', '')}", "# the modules dftracer-compose linked in the run (none: none; empty: MPI and HDF5)",
+                   f"DFTRACER_MODULES={pins.get('dftracer-composition', '')}", "", "[run]",
                    "# smoke or baseline.", "SCALE=smoke", f"COMMAND_smoke={_site(smoke_run.get('command') or c['command'])}", f"COMMAND_baseline={_site(base.get('command') or c['command'])}",
                    f"LAUNCHER={base.get('launcher', '')}", f"BUILD_COMMAND={_site(integ.get('build_command') or '')}", ""]
             cfg_text, steps, run_all = "\n".join(cfg), STEPS, RUN_ALL
@@ -2170,3 +2204,28 @@ The number of activities and the entity types must match `inputs/expected.json`;
         for name, ok, detail, fix in publish_checks(o.get("package"), publish_root, app, group, (lambda d: T.read(d).counts()) if deep else None):
             v.check(name, ok, detail, fix)
         return P.finish_validation(pipeline, v)
+
+    @mcp.tool()
+    def repro_install_selftest() -> dict:
+        """Self-test of how a package installs dftracer: the generic and batch setup scripts install the dftracer pre-release with dftracer-modules (a git spec still
+        builds), and the shared compose_dftracer function composes what the run had, run in bash against a stand-in python that records its arguments: the run's
+        modules (enable them, disable the rest), none (disable all), unknown (MPI and HDF5), and a dftracer without compose (nothing). Returns {status: pass|fail, detail}."""
+        problems = []
+        for label, text in (("generic", STEPS["02_setup_env.sh"]), ("batch", BATCH_STEPS["02_setup_env.sh"])):
+            if text and ("dftracer[modules]" not in text or "compose_dftracer" not in text or "*git+*" not in text):
+                problems.append(f"{label} 02_setup_env.sh does not install the pre-release with modules and compose")
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d) / "py"
+            fake.write_text('#!/bin/bash\n[[ "$1" == -c ]] && exit ${NOCOMPOSE:-0}\necho "ARGS $*"\n')
+            fake.chmod(0o755)
+            fn = LIB[LIB.index("log() {"):LIB.index("require OUTPUT_ROOT")]
+            cases = (("mpi,hdf5", "0", "ARGS -m dftracer.compose --enable mpi,hdf5 --disable papi,hwloc,hip,cuda"),
+                     ("none", "0", "ARGS -m dftracer.compose --disable mpi,hdf5,papi,hwloc,hip,cuda"),
+                     ("", "0", "ARGS -m dftracer.compose --enable mpi,hdf5 --disable papi,hwloc,hip,cuda"),
+                     ("mpi", "1", "nothing to compose"))
+            for modules, nocompose, want in cases:
+                r = subprocess.run(["bash", "-c", fn + f'\ncompose_dftracer "{fake}"'], capture_output=True, text=True, timeout=30,
+                                   env={**os.environ, "DFTRACER_MODULES": modules, "NOCOMPOSE": nocompose})
+                if want not in r.stdout:
+                    problems.append(f"DFTRACER_MODULES={modules!r}: expected {want!r}, got {r.stdout.strip()!r} {r.stderr.strip()!r}")
+        return {"status": "pass" if not problems else "fail", "detail": "; ".join(problems) or "pre-release install and compose_dftracer as expected"}

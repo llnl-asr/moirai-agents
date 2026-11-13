@@ -35,7 +35,8 @@ def python() -> Optional[str]:
 def locate() -> Dict[str, Any]:
     """{ok, python, service, moirai, dftracer_utils, include, lib, dft_include}, or {ok: False, error, fix}."""
     py = python()
-    fix = "pip install moirai dftracer-utils into a venv and set MOIRAI_AGENTS_MOIRAI_PYTHON=<venv>/bin/python in .env"
+    fix = ("pip install --pre 'dftracer[modules]' dftracer-modules moirai dftracer-utils into a venv, compose dftracer with the application's modules loaded "
+           "(moirai-compose, or dftracer-compose --enable mpi,hdf5 --disable papi,hwloc,hip,cuda), and set MOIRAI_AGENTS_MOIRAI_PYTHON=<venv>/bin/python in .env")
     try:
         r = subprocess.run([py, "-c", _PROBE], capture_output=True, text=True, timeout=60)
         info = json.loads(r.stdout)

@@ -8,7 +8,7 @@ Cross-references: [[app_explore]], [[moirai_integrate]], [[system_mammoth]], [[t
 
 ## Rules
 - Ask the user first (app_explore gate): the user chose "Build the venv in the session on this system" over giving another path. Never edit the shared .env without showing the edit.
-- Render the steps with moirai_venv_script, run them in order, then moirai_venv_check on the venv's site-packages. Steps: module python/3.12.2 venv; PyPI `pip download --pre dftracer` wheel; repair to ONE libdftracer_core (patchelf the NEEDED names to libdftracer_core.so.4.3.0, drop dftracer.libs core copies); install moirai (rebuild, never trust build/ci-wheel: compare its moirai/__init__.py with python/moirai/__init__.py); overlay pydftracer common.py from branch fix/attach-to-moirai-core; check.
+- Render the steps with moirai_venv_script, run them in order, then moirai_venv_check on the venv's site-packages. Steps: module python/3.12.2 venv; `pip install --pre "dftracer[modules]" dftracer-modules` (the pre-release, >=2.2.0.post57.dev0: ONE libdftracer_core, no repair); install moirai (rebuild, never trust build/ci-wheel: compare its moirai/__init__.py with python/moirai/__init__.py); overlay pydftracer common.py from branch fix/attach-to-moirai-core; compose dftracer for provenance with the application's modules loaded (moirai-compose, or dftracer-compose --enable mpi,hdf5 --disable papi,hwloc,hip,cuda: MPI and HDF5 linked from the prebuilt variants or built here); check.
 - All caches (PIP_CACHE_DIR, TMPDIR, XDG_*) go under <session>/tools/cache, nothing in home.
 - Compile only on one pdebug node (srun -N1 -p pdebug -t 60), install pure python on the login node.
 
@@ -23,7 +23,7 @@ Cross-references: [[app_explore]], [[moirai_integrate]], [[system_mammoth]], [[t
 - `dftracer.finalize()` called on the module raises TypeError (missing self) and then segfaults: do not call it in the test; a decorated test function must log 3 of 3 events with no core file.
 
 ## Corrector
-moirai_venv_check names the failed check: two cores -> repair the wheel again; moirai init differs -> rebuild/overlay; no dftracer.utils -> pip install dftracer-utils. The same failure twice stops the loop.
+moirai_venv_check names the failed check: not composed -> run the compose step with the application's modules loaded; two cores -> compose (it links libdftracer_core.so to the one library), or the dftracer is older than the pre-release; moirai init differs -> rebuild/overlay; no dftracer.utils -> pip install dftracer-utils. The same failure twice stops the loop.
 
 ## Self-heal
 - If a tool here is wrong, capability_update it; do not work around it in shell.
