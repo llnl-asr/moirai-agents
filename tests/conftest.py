@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO / "src"))
 def isolated(tmp_path, monkeypatch):
     """Nothing a test does reaches the real store."""
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("MOIRAI_AGENTS_AUTO_PULL", "0")          # tests never pull the real checkouts
     monkeypatch.setenv("MOIRAI_AGENTS_USER_WORKSPACE", str(tmp_path / "uw"))
     monkeypatch.setenv("MOIRAI_AGENTS_NO_SESSIONS", "1")     # a session needs dftracer-agents: test_session.py turns this off
     monkeypatch.setenv("MOIRAI_AGENTS_PIPELINES_DIR", str(tmp_path / "pipelines"))

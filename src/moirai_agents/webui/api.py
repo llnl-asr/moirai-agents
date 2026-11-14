@@ -265,16 +265,26 @@ def proxy(h, app, user, path, method="GET", body=None):
     h.close_connection = True
 
 
-def _contrib(what: str) -> dict:
-    """The Rebase and Push buttons: what moirai-agents contributed to dftracer-agents and phronix (status), bringing
-    their clones up to date and rebasing the contribution branches with conflicts merged (update: lessons, worked
-    entries and capability.json by themselves, anything else by the agent), or that and pushing them (push), which
-    returns each pull request's link."""
+def _repos(action: str = "", project: str = "", fetch: bool = False) -> dict:
+    """The Repositories panel: every code base moirai-agents runs (this checkout, the dftracer-agents and phronix
+    clones). The clones stay on their integration branch (develop); per repository: Pull latest (local contribution
+    commits replayed on origin, conflicts merged: lessons, worked entries and capability.json by themselves, anything
+    else by the agent), Push (pull latest, then push the local commits on a new contrib/moirai-agents-<date-time>
+    branch, with the link that opens the pull request) and Switch to develop (back to origin once pushed)."""
     from phronix.engine import upstream
+    only = project or None
     try:
-        if what == "push":                          # rebase (conflicts merged, by the agent if needed), then push
-            return upstream.push()
-        return upstream.status() if what == "status" else upstream.update(resolve=True)
+        if action == "pull":
+            return upstream.pull(project) if project else upstream.pull_all()
+        if action == "rebase":
+            return upstream.update(resolve=True, only=only)
+        if action == "push":
+            return upstream.push(only=only)
+        if action == "switch":
+            return upstream.switch_to_branch(project)
+        if action == "refresh":
+            return upstream.refresh(only=only)
+        return upstream.repos(fetch=fetch)
     except Exception as e:                          # the panel shows it
         return {"error": f"{type(e).__name__}: {e}"}
 
@@ -427,8 +437,8 @@ def get_route(h, app, life, u, q):
         return send_json(h, jobs.scheduler_view(float(q.get("since", ["0"])[0] or 0)))
     if u.path == "/api/capabilities":
         return send_json(h, capstore.list_capabilities())
-    if u.path == "/api/capabilities/contributions":
-        return send_json(h, _contrib("status"))
+    if u.path == "/api/repos":
+        return send_json(h, _repos(fetch=q.get("fetch", ["0"])[0] == "1"))
     if u.path.startswith("/api/capability/"):
         return send_json(h, capstore.get(u.path.rsplit("/", 1)[1]))
     if u.path == "/api/lessons":
@@ -569,11 +579,9 @@ def post_route(h, app, life, u, body):
         with t.cond:
             t.cond.wait_for(lambda: t.done, timeout=30)
         return send_json(h, {"ok": True, "queued": 0})
-    if u.path == "/api/capabilities/push":
-        return send_json(h, _contrib("push"))
-    if u.path == "/api/capabilities/update":
-        r = _contrib("update")
-        capstore._State.fingerprint = ""            # load what the clones brought
+    if u.path == "/api/repos/action":
+        r = _repos(str(body.get("action") or ""), str(body.get("project") or ""))
+        capstore._State.fingerprint = ""            # load what a pull or rebase brought
         return send_json(h, r)
     if u.path in ("/api/capability/decide", "/api/lesson/decide"):
         if u.path.startswith("/api/lesson"):

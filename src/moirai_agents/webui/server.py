@@ -269,6 +269,14 @@ def main(argv=None) -> int:
     from .consolidation import Consolidation
     app.consolidator = Consolidation(R.STATE)
     threading.Thread(target=watch_consolidation, args=(app,), daemon=True, name="consolidation").start()
+    # keep the code current: pull this checkout and the dftracer-agents / phronix clones (fast-forward only, clean
+    # checkouts only) at start and every MOIRAI_AGENTS_AUTO_PULL_MINUTES (10); MOIRAI_AGENTS_AUTO_PULL=0 turns it off.
+    # A pulled change to this package re-executes the server (self-refresh); capabilities reload on the next request.
+    try:
+        from phronix.engine import upstream as _up
+        _up.start_auto_pull(on_pull=lambda rep: setattr(capstore._State, "fingerprint", ""))
+    except Exception as e:                      # never keep the web UI from starting
+        print(f"[auto-pull] not started: {type(e).__name__}: {e}", file=sys.stderr)
     from . import background
     app.background = background.Background(app)
     threading.Thread(target=background.watch, args=(app,), daemon=True, name="background").start()

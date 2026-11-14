@@ -124,24 +124,37 @@ async function pollCaps(force){if(!me||(!force&&editing('#capabilities')))return
  if(d.pending.length){const s=document.querySelector('details[data-sec=capabilities]');if(s)s.open=true}
  $('#capabilities').querySelectorAll('[data-c]').forEach(b=>b.onclick=async()=>{b.disabled=true;const m=b.closest('.capp').querySelector('.cmsg');m.textContent=b.dataset.a?'approving…':'rejecting…';
   const r=await act('api/capability/decide',{id:b.dataset.c,approve:!!b.dataset.a,note:b.dataset.note||''});if(r&&r.status==='error'){m.textContent=r.error;b.disabled=false;return}pollCaps(true)})}
-// ---- Rebase / Push: contributions to the projects upstream (dftracer-agents, phronix)
-const contribLabel=s=>{const n=((s&&s.upstream)||[]).reduce((a,u)=>a+(((u.contribution||{}).ahead)||0),0);return n?`Rebase (${n} to contribute)`:'Rebase'};
-const contribHtml=r=>(r.upstream||[]).map(u=>{const c=u.contribution||{},t=u.to_do||{},pr=u.pull_request||t.pull_request||c.pull_request;
- const merged=[...(u.rebase_resolved||[]).map(f=>f.split('/').slice(-2).join('/')+' (merged)'),...(u.rebase_merged_by_agent||[]).map(f=>f.split('/').slice(-2).join('/')+' (merged by the agent)')];
- const head=`<b>${esc(u.project)}</b>: `+(u.rebase==='conflict'?`<span class="bad">conflict not merged (${esc((u.conflicts||[]).join(', '))}): branch left as it was${u.rebase_error?' - '+esc(u.rebase_error):''}</span> `:'')+(c.ahead?`${c.ahead} commit(s) on ${esc(c.branch)}`:'nothing to contribute')+(u.clone_note?` · ${esc(u.clone_note)}`:'');
- const mtxt=merged.length?`<div>${esc(merged.join(', '))}</div>`:'';
- const pushed=u.pushed===true?`<div>pushed ✓ - open the pull request: <a href="${esc(pr||'')}" target="_blank" rel="noopener">${esc(pr||'')}</a></div>`:u.pushed===false?`<div class="bad">not pushed: ${esc(u.push_error||u.push_note||'')}</div>`:(c.ahead&&pr?`<div>press Push to push it; then the pull request: ${esc(pr)}</div>`:'');
- return `<div>${head}${mtxt}${pushed}</div>`}).join('');
-async function pollContrib(){const b=$('#csync');if(!b||!me||b.disabled)return;const s=await api('api/capabilities/contributions');if(!s)return;
- if(s.error){b.textContent='Rebase';b.title=s.error;return}b.textContent=contribLabel(s)}
-async function contribAct(path,label,busy){const b=$('#csync'),p=$('#cpush'),m=$('#csyncmsg');
- b.disabled=p.disabled=true;(path.endsWith('push')?p:b).textContent=busy;m.hidden=false;m.textContent=busy+' (a conflict the agent merges takes a minute or two)…';
- const r=await act(path,{});b.disabled=p.disabled=false;p.textContent='Push';
- if(!r||r.error){m.textContent=label+' failed: '+((r&&r.error)||'no answer');return pollContrib()}
- m.innerHTML=contribHtml(r)||'nothing upstream';pollCaps(true);pollContrib()}
-$('#csync').addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();contribAct('api/capabilities/update','Rebase','Rebasing')});
-$('#cpush').addEventListener('click',ev=>{ev.preventDefault();ev.stopPropagation();contribAct('api/capabilities/push','Push','Pushing')});
-setInterval(pollContrib,120000);setTimeout(pollContrib,1500);
+// ---- Repositories: this project's checkout and each upstream clone (dftracer-agents, phronix): pull, rebase, push
+const PUSH_STATE={not_pushed:'not pushed',pushed:'pushed',needs_push:'new commits not pushed',nothing:'nothing to contribute'};
+const ACT_LABEL={pull:'Pull latest',rebase:'Pull latest',push:'Push',switch:'Switch to develop'},ACT_BUSY={pull:'Pulling…',rebase:'Pulling…',push:'Pushing…',switch:'Switching…'};
+const ACT_TIP={pull:'Fetch, then replay the local contribution commits on origin (conflicts merged; the agent merges what is not a lesson, worked entry or capability.json)',push:'Pull latest, then push the local commits on a new contrib branch and give the link that creates the pull request',switch:'Return the clone to origin\'s integration branch (once its commits are pushed)'};
+const prLink=(u,label)=>u?` · <a class="prlink" href="${esc(u)}" target="_blank" rel="noopener">${label||'Create pull request ↗'}</a>`:'';
+const repoRow=r=>{const c=r.contribution||{},ib=r.integration_branch||c.branch||'',sync=r.behind?`<span class="bad">${r.behind} behind origin/${esc(r.branch)}</span>`:(r.branch?`up to date with origin/${esc(r.branch)}`:'');
+ const off=r.role==='upstream'&&r.on_integration_branch===false?` · <span class="bad">not on ${esc(ib)}</span>`:'';
+ const clone=`<div class="s">${esc(r.role||'')} · ${esc(r.branch||'')} @ ${esc(r.head||'')}${off} · ${sync}${r.dirty?' · <span class="bad">uncommitted changes</span>':''}${r.note?' · '+esc(r.note):''}</div>`;
+ const contrib=r.role==='upstream'?`<div class="s">contributions on ${esc(ib)}: ${c.ahead?c.ahead+' local commit(s)':'none'}${c.push_state&&c.push_state!=='nothing'?' · '+esc(PUSH_STATE[c.push_state]||c.push_state):''}${c.pushed_branch&&c.ahead?' · pushed as '+esc(c.pushed_branch):''}${c.ahead?prLink(c.pull_request):''}</div>`:'';
+ const btns=(r.actions||[]).map(a=>`<button class="x" data-repo="${esc(r.project)}" data-act="${a}" title="${esc(ACT_TIP[a]||'')}">${a==='switch'?'Switch to '+esc(ib||'develop'):ACT_LABEL[a]}</button>`).join(' ');
+ return `<div class="cap"><div class="n"><b>${esc(r.project)}</b> ${btns}</div>${clone}${contrib}</div>`};
+const repoResult=(act,r)=>{if(!r||r.error)return 'failed: '+esc((r&&r.error)||'no answer')+(r&&r.unpushed?' ('+esc(r.unpushed.join('; '))+')':'');
+ if(act==='switch')return `now on ${esc(r.branch||'')} @ ${esc(r.head||'')}`;
+ const ups=r.upstream||(r.repo?[r]:r.rebase!==undefined?[r]:[]);if(act==='pull'&&r.repo){const p=r.repo;return p.pulled?`pulled ${p.pulled} commit(s)`:esc(p.note||p.error||'already up to date')}
+ return ups.map(u=>{const merged=[...(u.rebase_resolved||[]).map(f=>f.split('/').slice(-2).join('/')+' (merged)'),...(u.rebase_merged_by_agent||[]).map(f=>f.split('/').slice(-2).join('/')+' (merged by the agent)')];
+  const pr=u.pull_request||(u.contribution||{}).pull_request;
+  return `<b>${esc(u.project)}</b>: `+(u.rebase==='conflict'?`<span class="bad">conflict not merged (${esc((u.conflicts||[]).join(', '))}): clone left as it was${u.rebase_error?' - '+esc(u.rebase_error):''}</span>`:u.rebase?`pull ${esc(u.rebase)}${u.pulled?' ('+u.pulled+' new)':''}${u.note?' - '+esc(u.note):''}`:'')+(merged.length?' · '+esc(merged.join(', ')):'')
+   +(u.pushed===true?` · pushed ✓ as ${esc(u.pushed_branch||'')}${prLink(pr)} · then <b>Switch to ${esc(u.switch_to||'develop')}</b>`:u.pushed===false?` · ${esc(u.push_error||u.push_note||'')}${prLink(pr)}`:'')
+   +(u.push_state&&u.pushed===undefined?' · '+esc(PUSH_STATE[u.push_state]||u.push_state)+(u.pull_request&&u.push_state==='pushed'?prLink(u.pull_request):''):'')+(u.next&&u.next!=='nothing'?` · next: <b>${esc(u.next)}</b>`:'')}).join('<br>')||'done'};
+async function pollRepos(fetch){const box=$('#repos');if(!box||!me||box.dataset.busy)return;const d=await api('api/repos'+(fetch?'?fetch=1':''));if(!d)return;
+ if(d.error){box.innerHTML=`<div class="bad">${esc(d.error)}</div>`;return}
+ const rs=d.repos||[],todo=rs.filter(r=>r.behind||r.on_integration_branch===false||['not_pushed','needs_push'].includes((r.contribution||{}).push_state)).length;
+ $('#rcount').textContent=`(${rs.length}${todo?' · '+todo+' to update':''})`;box.innerHTML=rs.map(repoRow).join('')||'<div class="lesson st">no repositories</div>'}
+$('#repos').addEventListener('click',async ev=>{const b=ev.target.closest('button[data-act]');if(!b)return;ev.preventDefault();
+ const box=$('#repos'),m=$('#reposmsg'),act=b.dataset.act,proj=b.dataset.repo;box.dataset.busy='1';box.querySelectorAll('button').forEach(x=>x.disabled=true);
+ b.textContent=ACT_BUSY[act];m.hidden=false;m.textContent=`${ACT_BUSY[act]} ${proj}`+(act==='push'||act==='rebase'||(act==='pull'&&proj)?' (a conflict the agent merges takes a minute or two)':'');
+ const r=await act_(proj,act);delete box.dataset.busy;m.innerHTML=`${esc(ACT_LABEL[act])} ${esc(proj)}: `+repoResult(act,r);pollRepos();pollCaps(true)});
+const act_=(project,action)=>act('api/repos/action',{project,action});
+$('#rrefresh').addEventListener('click',async ev=>{ev.preventDefault();ev.stopPropagation();const b=$('#rrefresh'),m=$('#reposmsg');b.disabled=true;b.textContent='Refreshing…';
+ const r=await act_('', 'refresh');m.hidden=false;m.innerHTML='Refresh: '+repoResult('refresh',r);b.disabled=false;b.textContent='Refresh';pollRepos(false)});
+setInterval(()=>pollRepos(false),120000);setTimeout(()=>pollRepos(true),1500);
 $('#capabilities').addEventListener('click',async ev=>{const b=ev.target.closest('button');if(!b)return;const root=$('#capabilities');
  if(b.dataset.ed)return toggleEdit(root,b.dataset.ed);
  if(b.dataset.redo){const p=CAPS[b.dataset.redo];if(!p)return;b.disabled=true;b.closest('.capp').querySelector('.cmsg').textContent='sent to the agent: it redoes the change on the current version, then asks you again';
