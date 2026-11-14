@@ -1,0 +1,60 @@
+{
+ "name": "tools_nextflow_annotate",
+ "description": "Annotate a COPY of a Nextflow (nf-core) pipeline such as taxteller so every process task reports its activity and entities to moirai: a bash EXIT trap at the top of each process script block calls a generated helper, idempotent marked blocks, Groovy escaping of $ and backslash, entity plan per process (reads, results, databases by path size mtime, seqscreen run directory, recentrifuge reports), entity relations and a diagram, a moirai_overlay.config (env, podman bind mounts of the helper, moirai python and /dev/shm) and the job-script lines (dftracer with moirai, one moirai-service per node). Load for the annotate stage of a Nextflow pipeline, when a process script needs provenance, when nextflow -preview or a parse fails after annotation, when a process exit status or caching changed, or when the annotated task records nothing.",
+ "version": 4,
+ "enabled": true,
+ "stages": [
+  "annotate"
+ ],
+ "tools": [
+  "nextflow_annotate_spec",
+  "nextflow_annotate_diagram",
+  "nextflow_annotate_apply",
+  "nextflow_annotate_validate",
+  "nextflow_annotate_preview",
+  "nextflow_annotate_selftest"
+ ],
+ "pvc": {
+  "predictor": [
+   "nextflow_annotate_spec",
+   "nextflow_annotate_apply",
+   "nextflow_annotate_preview",
+   "nextflow_annotate_diagram"
+  ],
+  "validator": [
+   "nextflow_annotate_validate",
+   "nextflow_annotate_selftest"
+  ]
+ },
+ "review": [],
+ "history": [
+  {
+   "version": 1,
+   "ts": 1794623934.4359117,
+   "by": "haridev",
+   "proposal": "7682bc6b1158",
+   "why": "Taxteller (pipeline tax-teller-20261112-142121) is a Nextflow pipeline; prov_annotate supports Python, C/C++ and Maestro yaml_step only (lesson L-7bfd89de planned a separate step capability). User approved the process/entity diagram and said \"ok continue the pipeline\". Stage 1 of the staging order (L-3c35680e, L-cc2ec2c8): skill plus a stub tool; the whole tool_code follows by capability_refine."
+  },
+  {
+   "version": 2,
+   "ts": 1794624617.2833052,
+   "by": "haridev",
+   "proposal": "d667fb6120f5",
+   "why": "Fix 1: _check_tree anchor compared an index of the STRIPPED text with the ANNOTATED lines, so every process after the first annotated one in a file failed (taxteller custom_kaiju/main.nf holds six). The opener is now mapped to the annotated text (_anchored). Fix 2: nextflow -preview ran inside the annotated copy and left .nextflow.log and .nextflow there, so stray_files failed on the next validate; _nf_parse now sends the log to a temp dir and removes the byproducts it created. Two new selftest checks (21 and 22 of 22)."
+  },
+  {
+   "version": 3,
+   "ts": 1794625034.051813,
+   "by": "haridev",
+   "proposal": "e3abc7b372a4",
+   "why": "Bug: the hook block passed --container \"${task.container}\" raw but the helper base64-decodes it (_b64(a.container)), so the container input and the software container@... entity were garbage on every process (e.g. container@<binary> for null). Encode it like key/ext with (task.container ?: ''), have the helper skip an empty or 'null' container, teach the preview renderer the Elvis form, and add selftest checks (container recorded verbatim; empty/null records none)."
+  },
+  {
+   "version": 4,
+   "ts": 1794625432.2979891,
+   "by": "haridev",
+   "proposal": "167c024e016b",
+   "why": "Taxteller (pipeline tax-teller-20261112-142121) is a Nextflow pipeline; prov_annotate supports Python, C/C++ and Maestro yaml_step only (lesson L-7bfd89de planned a separate step capability). User approved the process/entity diagram and asked to continue. Stage 1 of the repro_package staging order (L-3c35680e, L-cc2ec2c8): skill plus a stub tool, the whole tool_code follows by capability_refine."
+  }
+ ]
+}

@@ -1,0 +1,17 @@
+{
+ "description": "Annotates a copy of a Nextflow pipeline with moirai provenance hooks from an agreed per-process spec.",
+ "level": "level_3",
+ "tools": [
+  "Read",
+  "Grep",
+  "Glob"
+ ],
+ "skills": [
+  "tools_nextflow_annotate",
+  "prov_annotate",
+  "software_nextflow"
+ ],
+ "permission_mode": "default",
+ "background": true,
+ "instructions": "Read the agreed discovery record and the module scripts. Run nextflow_annotate_spec, show nextflow_annotate_diagram to the user, then nextflow_annotate_apply and nextflow_annotate_validate. Try a process with nextflow_annotate_preview on fixture values before applying. Never edit the source tree; never call exit in a hook; a failed validator verdict goes to the Corrector section of the skill."
+}

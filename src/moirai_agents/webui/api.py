@@ -266,12 +266,15 @@ def proxy(h, app, user, path, method="GET", body=None):
 
 
 def _contrib(what: str) -> dict:
-    """The Update button: what moirai-agents contributed to dftracer-agents and phronix (status), or bringing their
-    clones up to date and rebasing the contribution branches (update). Nothing is pushed: the result says what to push
-    and where to open each pull request."""
+    """The Rebase and Push buttons: what moirai-agents contributed to dftracer-agents and phronix (status), bringing
+    their clones up to date and rebasing the contribution branches with conflicts merged (update: lessons, worked
+    entries and capability.json by themselves, anything else by the agent), or that and pushing them (push), which
+    returns each pull request's link."""
     from phronix.engine import upstream
     try:
-        return upstream.status() if what == "status" else upstream.update()
+        if what == "push":                          # rebase (conflicts merged, by the agent if needed), then push
+            return upstream.push()
+        return upstream.status() if what == "status" else upstream.update(resolve=True)
     except Exception as e:                          # the panel shows it
         return {"error": f"{type(e).__name__}: {e}"}
 
@@ -566,6 +569,8 @@ def post_route(h, app, life, u, body):
         with t.cond:
             t.cond.wait_for(lambda: t.done, timeout=30)
         return send_json(h, {"ok": True, "queued": 0})
+    if u.path == "/api/capabilities/push":
+        return send_json(h, _contrib("push"))
     if u.path == "/api/capabilities/update":
         r = _contrib("update")
         capstore._State.fingerprint = ""            # load what the clones brought

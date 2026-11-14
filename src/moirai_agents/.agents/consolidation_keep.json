@@ -4,6 +4,14 @@
   "why": "one is about the site, one the tool"
  },
  {
+  "ids": "L-5b0c690e|L-f0294b6c",
+  "why": "Complementary, not contradictory: L-f0294b6c is the login-node install of Nextflow with Java 17 (app_smoke); L-5b0c690e is how to run -preview with the nf17 wrapper, absolute --input and stray-file cleanup (software_nextflow). The 26.10.5 install versus the NXF_VER=25.04.6 pin is a runtime pin recorded elsewhere, not a clash."
+ },
+ {
+  "ids": "L-639c53db|L-7f71396a|L-d4de4308|L-ee6ac409",
+  "why": "Different on purpose: they share only the taxteller session and the registry/plugin topic. The plugin install (software_nextflow), the access recheck and registry denial (workload_elmerfold), the registry login recipe (system_mammoth) and the smoke plan (app_smoke) each belong to a different capability and do not contradict each other."
+ },
+ {
   "ids": "L-76b0e254|L-a0e99a53",
   "why": "they are about different clusters"
  },
