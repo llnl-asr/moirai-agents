@@ -79,17 +79,24 @@ $('#wbview').addEventListener('click',async e=>{const pb=e.target.closest('[data
 // ---- the list on the left: the apps (and datasets); the selected one stays selected across the views
 async function wbLoad(){if(!me)return;const d=await api('api/workbench');if(!d||d.error)return;WB.items=d;renderNow(d);
  if(!document.body.classList.contains('views'))return;
- if(!WB.app&&session){const it=[...d.apps,...d.lives,...d.datasets,...(d.published||[])].find(x=>x.chat===session||x.query_chat===session);if(it){WB.app=appOf(it.id);savePick()}}
  if(WB.app&&!wbItem(WB.app)){WB.app=null;savePick()}
+ // a chat can own several pipelines (an attempt that never started, then the real one): follow the one that is moving
+ const started=x=>(x.steps||[]).some(s=>s.status!=='pending'),newest=xs=>xs.reduce((a,b)=>(b.updated||0)>(a.updated||0)?b:a,xs[0]);
+ if(session){const mine=[...d.apps,...d.lives,...d.datasets,...(d.published||[])].filter(x=>x.chat===session||x.query_chat===session);
+  const cur=WB.app&&wbItem(WB.app),moving=mine.filter(started);
+  if(!WB.app&&mine.length){WB.app=appOf(newest(moving.length?moving:mine).id);savePick()}
+  else if(cur&&mine.includes(cur)&&!started(cur)&&moving.length&&!WB.chosen){WB.app=appOf(newest(moving).id);savePick()}}
+ const dup=new Set(d.apps.map(x=>x.name).filter((n,i,a)=>a.indexOf(n)!==i)),
+  when=x=>{const m=/(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})\d{2}$/.exec(x.id);return m?` <span class="s">${m[2]}-${m[3]} ${m[4]}:${m[5]}</span>`:''};
  const row=x=>{const [cls,word]=WB_STATE[x.state]||['',x.state],lv=livesOf(x.id),run=lv.filter(l=>l.state==='running').length,og=(x.gaps||[]).filter(g=>g.status==='open').length;
-  return `<div class="wbi ${WB.app===x.id?'on':''}" data-id="${esc(x.id)}" title="${esc(x.id)}"><span class="wbd ${cls}"></span><span class="t">${esc(x.name)}</span><span class="s">${esc(word)}${lv.length?` · ${lv.length} run${lv.length>1?'s':''}${run?` (${run} live)`:''}`:''}${og?` · ${og} gap${og>1?'s':''}`:''}</span></div>`};
+  return `<div class="wbi ${WB.app===x.id?'on':''}" data-id="${esc(x.id)}" title="${esc(x.id)}"><span class="wbd ${cls}"></span><span class="t">${esc(x.name)}${dup.has(x.name)?when(x):''}</span><span class="s">${esc(word)}${lv.length?` · ${lv.length} run${lv.length>1?'s':''}${run?` (${run} live)`:''}`:''}${og?` · ${og} gap${og>1?'s':''}`:''}</span></div>`};
  $('#wblist').innerHTML=`<div class="shead">Apps<a data-new="blank" title="A new app with an empty chat in each of Annotate, Live Run and Query">+ new app</a><a data-new="app">+ annotate an app</a></div>${d.apps.map(row).join('')||'<div class="wbe">none yet</div>'}
   <div class="shead">Datasets<a data-new="data">+ open data</a></div>${d.datasets.map(row).join('')||'<div class="wbe">none yet</div>'}`;
- $('#wblist').querySelectorAll('.wbi').forEach(e=>e.onclick=()=>{WB.app=e.dataset.id;savePick();const it=wbItem(WB.app);if(it&&it.kind==='analysis'&&WB.view!=='query')return wbShow('query');wbOpenView()});
+ $('#wblist').querySelectorAll('.wbi').forEach(e=>e.onclick=()=>{WB.app=e.dataset.id;WB.chosen=true;savePick();const it=wbItem(WB.app);if(it&&it.kind==='analysis'&&WB.view!=='query')return wbShow('query');wbOpenView()});
  $('#wblist').querySelectorAll('[data-new]').forEach(a=>a.onclick=e=>{e.preventDefault();WB.app=null;savePick();WB.sel=null;
   document.querySelectorAll('#wblist .wbi').forEach(x=>x.classList.remove('on'));if(a.dataset.new==='data'&&WB.view!=='query'){WB.view='query';showTab('wb')}
   if(a.dataset.new==='blank'&&WB.view!=='ann'){WB.view='ann';showTab('wb')}wbHome(a.dataset.new)});
- if(WB.sel){const it=wbItem(WB.sel.id);if(it)WB.sel.item=it}}
+ if(WB.sel){const it=wbItem(WB.sel.id);if(it)WB.sel.item=it;if(WB.app&&appOf(WB.sel.id)!==WB.app)wbOpenView()}}
 function wbPoolOf(v){const d=WB.items;return v==='query'?[...d.apps,...d.datasets]:d.apps}
 function wbItem(id){const d=WB.items;return [...d.apps,...d.lives,...d.datasets,...(d.published||[])].find(x=>x.id===id)}
 
@@ -288,11 +295,14 @@ function aggInfo(boxId,d){const b=$('#'+boxId);if(!b)return;b.hidden=false;
 
 // ---- Annotate view: the steps, the diagram (promised, then promised vs recorded), the diff in words, publish the code
 async function wbAnnotate(first){if(!WB.sel||!WB.sel.item)return;const it=WB.sel.item,pid=it.id,v=$('#wbview');
- const d=await api('api/workbench/aggregate?pipeline='+encodeURIComponent(pid));if(!WB.sel||WB.sel.id!==pid||WB.view!=='ann')return;
+ const [d,sd]=await Promise.all([api('api/workbench/aggregate?pipeline='+encodeURIComponent(pid)),api(`api/pipeline/${encodeURIComponent(pid)}/annotate`)]);if(!WB.sel||WB.sel.id!==pid||WB.view!=='ann')return;
+ // what the agent published for this step (prov_diagram): shown in place of an empty diagram, so a plan drawn at the gate is seen before the annotation exists
+ const pub=(sd&&!sd.error&&sd.diagrams)||[],noAgg=!(d&&d.nodes&&d.nodes.length)&&!(d&&d.reading),pubOnly=noAgg&&pub.length>0;
+ const pubHtml=pub.length?`<div class="wb-pubdg">${pubOnly?'':'<div class="wb-sec">Drawn by the agent for this step</div>'}${pub.map(x=>dgHtml(pid,x)).join('')}</div>`:'';
  const steps=it.steps||[],setup=steps.filter(s=>!['graph','package'].includes(s.name)).map(s=>s.name),gst=steps.find(s=>s.name==='graph')||{},pk=steps.find(s=>s.name==='package')||{};
  const mode=d&&d.mode,sum=(d&&d.summary)||{},reading=d&&d.reading,title=mode==='diff'?'Promised by the annotation vs recorded by the run':mode==='expected'?'What the annotation will record'+(reading?' · reading what the run recorded…':''):'The diagram';
  const lists=mode==='diff'?[['missing','Promised, never recorded',[...(d.missing_types||[]).map(t=>'type '+t),...(d.missing||[])]],['conditional','Promised under a condition, not recorded',d.conditional||[]],['unexpected','Recorded, not in the annotation',[...(d.unexpected_types||[]).map(t=>'type '+t),...(d.unexpected||[])]]]:[];
- const verdict=reading?'<div class="sub">Reading what the run recorded (a large run takes a minute the first time). The comparison appears here when it is read.</div>':mode!=='diff'?`<div class="sub">${mode==='expected'?'The run has not recorded anything yet: this is what the annotation promises. After the baseline, the recorded diagram is compared with it here.':'No annotation yet.'}</div>`:
+ const verdict=pubOnly?'<div class="sub">The annotation is not written yet. Check the diagram the agent drew for it, then approve or correct it in the chat on the left.</div>':reading?'<div class="sub">Reading what the run recorded (a large run takes a minute the first time). The comparison appears here when it is read.</div>':mode!=='diff'?`<div class="sub">${mode==='expected'?'The run has not recorded anything yet: this is what the annotation promises. After the baseline, the recorded diagram is compared with it here.':'No annotation yet.'}</div>`:
   d.clean?`<div class="wb-ok">✓ Everything the annotation promised was recorded${sum.unexpected?`, plus ${sum.unexpected} relationship${sum.unexpected>1?'s':''} it did not promise`:''}.</div>`:`<div class="wb-bad">✗ ${sum.missing+((d.missing_types||[]).length)} promised relationship(s) or type(s) were never recorded.</div>`;
  const side=`<div class="wb-card"><div class="wb-sec">The check</div>${verdict}
    ${mode==='diff'?`<div class="ag-sum">${['matched','missing','conditional','unexpected'].map(k=>`<span class="ag-st ${k}"><b>${sum[k]||0}</b> ${k}</span>`).join('')}</div>`:''}
@@ -306,12 +316,13 @@ async function wbAnnotate(first){if(!WB.sel||!WB.sel.item)return;const it=WB.sel
    `<div class="sub">What a scientist can tune when starting a live run. The agent writes them once it has explored and annotated the app.</div><button class="btn" id="wbdetect" style="margin-top:6px">Detect them now</button>`}</div>
   ${gapsCard(it)}${pro()||WB.stage?'<div class="wb-card" id="wbstage"></div>':''}`;
  const html=headOf(it)+`<div class="wb-strip"><span class="sub">annotate</span>${strip(it,setup)}<span class="sub" style="margin-left:12px">check &amp; publish</span>${strip(it,['graph','package'])}</div>${needYou(it)}${it.draft?`<div class="wb-need">✎ <b>${esc(it.name)}</b> is a new, blank app. Tell the agent in the chat on the left where the app is (a directory or git URL) and a small test command; it plans and annotates it from there. Live Run and Query have their own chats for this app.</div>`:''}${nowCard(it)}
-  <div class="vw-grid"><div class="vw-main"><div class="wq-tools"><b class="vw-t">${title}</b>${aggLegend(mode)}<span class="wq-btns"><button id="agfit">fit</button></span></div>
-   <div id="aggann" class="vw-graph"></div><div id="agginfo" class="wq-info" hidden></div></div><div class="vw-side">${side}</div></div>`;
- if(v.dataset.h!==html){v.dataset.h=html;const keepG=AGG.ann&&$('#aggann');const old=keepG?$('#aggann'):null;v.innerHTML=html;if(old)$('#aggann').replaceWith(old);wireHead(v);$('#agfit').onclick=()=>aggFit(AGG.ann&&AGG.ann.cy);
+  <div class="vw-grid"><div class="vw-main">${pubOnly?`<div class="wq-tools"><b class="vw-t">The diagram the agent drew for this step</b></div>${pubHtml}`:
+   `<div class="wq-tools"><b class="vw-t">${title}</b>${aggLegend(mode)}<span class="wq-btns"><button id="agfit">fit</button></span></div>
+   <div id="aggann" class="vw-graph"></div><div id="agginfo" class="wq-info" hidden></div>${pubHtml}`}</div><div class="vw-side">${side}</div></div>`;
+ if(v.dataset.h!==html){v.dataset.h=html;const keepG=AGG.ann&&$('#aggann');const old=keepG?$('#aggann'):null;v.innerHTML=html;if(old&&$('#aggann'))$('#aggann').replaceWith(old);wireHead(v);if($('#agfit'))$('#agfit').onclick=()=>aggFit(AGG.ann&&AGG.ann.cy);
   const gg=$('#wbgapall');if(gg)gg.onclick=()=>workAllGaps(pid,gg);wireGaps(v,it);
   const dt=$('#wbdetect');if(dt)dt.onclick=()=>sendText('Describe this app\'s live-run inputs (what a scientist tunes when starting a long run): live_inputs_detect, curate them with what you know of the app, live_inputs_write and live_inputs_validate, then show them to me.',running,[])}
- await drawAgg('ann','aggann',d,null,x=>aggInfo('agginfo',x));if(first&&AGG.ann)aggFit(AGG.ann.cy);stageDetail()}
+ if(!pubOnly){await drawAgg('ann','aggann',d,null,x=>aggInfo('agginfo',x));if(first&&AGG.ann)aggFit(AGG.ann.cy)}stageDetail()}
 
 // ---- Live Run view: the run's chat on the left; here the graph forming live (aggregated, instances, temporal), then publish the data
 async function wbLive(first){if(!WB.sel||!WB.sel.item)return;const it=WB.sel.item,pid=it.id,v=$('#wbview');
