@@ -31,8 +31,14 @@ CHILD_TIMEOUT_S = float(os.environ.get("MOIRAI_AGENTS_CONSOLIDATION_TIMEOUT_S", 
 
 
 def caps_fingerprint() -> str:
-    """Changes when a capability is added, removed, moved to another layer, or has its SKILL.md or capability.json changed."""
+    """Changes when a capability is added, removed, moved to another layer, or has its SKILL.md or capability.json changed,
+    and when the comparison itself (the engine's consolidate module) changes."""
     h = hashlib.sha1()
+    try:
+        st = Path(consolidate.__file__).stat()
+        h.update(f"engine\0{st.st_mtime_ns}:{st.st_size}".encode())
+    except (OSError, TypeError):
+        pass
     for name, (layer, d, _meta) in sorted(capstore.all_caps().items()):
         h.update(f"{name}\0{layer}\0{d}".encode())
         for f in ("SKILL.md", "capability.json"):

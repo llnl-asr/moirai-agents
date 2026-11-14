@@ -1,7 +1,7 @@
 {
  "name": "tools_moirai_venv",
  "description": "Build and check the moirai venv (dftracer wheel with one shared libdftracer_core, moirai wheel rebuilt from HEAD, pydftracer common.py overlay, dftracer-utils) in a session on a system that has none (mammoth, Slurm). Load when explore_validate fails on moirai or dftracer_utils, MOIRAI_AGENTS_MOIRAI_PYTHON points to a missing venv, 'ModuleNotFoundError dftracer_utils', two libdftracer_core copies, 'ninja: build stopped' on rocksdb with gcc 10, or a stale moirai wheel.",
- "version": 4,
+ "version": 5,
  "enabled": true,
  "stages": [
   "explore"
@@ -60,6 +60,12 @@
    "by": "haridev",
    "proposal": "f89e80dd73a3",
    "why": "User asked in chat d8e7b5f4c86b: \"install the prerelease of dftracer with pip install --pre dftracer[modules] and then run dftracer-compose to link all required features\". The run found compose needs cmake>=3.24 and breaks the import under the anaconda python without a libstdc++ preload; the skill had no step or corner case for it."
+  },
+  {
+   "version": 5,
+   "ts": 1794622523,
+   "by": "fixall",
+   "why": "consolidation: the general dftracer install rules (pre-release, compose's cmake, system libraries) are dftracer_install's; this skill keeps what is mammoth's and refers there"
   }
  ]
 }
