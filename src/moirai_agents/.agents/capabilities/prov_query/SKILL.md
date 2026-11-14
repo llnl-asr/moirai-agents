@@ -32,6 +32,10 @@ the result; the user can re-run it.
 - A very large run: the first query builds the TraceViewer index (about a minute for 10M records); later queries take seconds.
 - Entity records carry no time: `produced_since`/`produced_until` select entities by the time of the activity that produced them.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
 Validator `query_validate` (the analysis pipeline's query stage).
 

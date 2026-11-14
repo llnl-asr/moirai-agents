@@ -32,6 +32,10 @@ choices only exist once the app is understood, so the annotation phase writes th
 - A batch app (flux batch run.sh): nodes, queue and time limit are inputs of the batch line.
 - Seeds that live inside the input file (BioTox modelSeeds): the tunable is how seeds are chunked, not a seed value.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
 Validator `live_inputs_validate`.
 

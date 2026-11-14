@@ -21,6 +21,10 @@ description: Explore the system and the application before anything changes. Loa
 - Fortran only: moirai has no Fortran API. Say so at the gate.
 - No `/dev/shm`: moirai still writes spill files, and live monitoring works on them.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
 Predictor `explore_run`, validator `explore_validate`. A failed verdict comes here: fix the original tool or its input, then predict and validate again. The same failure twice stops the loop: change approach, or ask.
 

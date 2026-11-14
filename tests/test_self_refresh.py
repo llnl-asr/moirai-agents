@@ -32,11 +32,11 @@ def test_mcp_capability_edit_is_live_and_notified(tmp_path):
     root = copy(tmp_path)
     m = Mcp(mcp_env(tmp_path, root))
     m.rpc("initialize")
-    assert "lesson_list" in names(m)
-    f = root / "moirai_agents/.agents/capabilities/lessons/tool.py"
-    f.write_text(f.read_text().replace("    @mcp.tool()\n    def lesson_list", '    @mcp.tool()\n    def lesson_ping() -> str:\n        """A new tool added while running. Returns ok."""\n        return "ok"\n\n    @mcp.tool()\n    def lesson_list'))
+    assert {"prov_read_files", "lesson_list"} <= names(m)          # moirai's own capabilities, and phronix's from the upstream layer
+    f = root / "moirai_agents/.agents/capabilities/prov_read/tool.py"      # one of moirai's: the upstream layers are read-only here
+    f.write_text(f.read_text().replace("    @mcp.tool()\n    def prov_read_files", '    @mcp.tool()\n    def prov_read_ping() -> str:\n        """A new tool added while running. Returns ok."""\n        return "ok"\n\n    @mcp.tool()\n    def prov_read_files'))
     assert m.wait_note()
-    assert m.rpc("tools/call", {"name": "lesson_ping", "arguments": {}})["content"][0]["text"] == "ok"
+    assert m.rpc("tools/call", {"name": "prov_read_ping", "arguments": {}})["content"][0]["text"] == "ok"
     m.p.kill()
 
 

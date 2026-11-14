@@ -1,6 +1,6 @@
 ---
 name: prov_graph
-description: Build the provenance graph of the baseline run and gate on its health - every artifact produced and rooted in real inputs; compare plain vs traced outputs by content hash, inside tar and zstd members, separating timestamp-only differences from real ones, and record the user's acceptance of timestamp-only members. Load for the graph stage, graph_compare, "outputs identical", tar differs, compared_members 0, self-compare, timestamp_only, accept_timestamp_only, science_unchanged inconclusive.
+description: Build the provenance graph of the baseline run, diff the aggregated entity-relationship graph the annotation promised against the one recorded, run the graph inference algorithms (none yet), and gate on its health - every artifact produced and rooted in real inputs; optionally compare plain vs traced outputs by content hash, inside tar and zstd members, separating timestamp-only differences from real ones, and record the user's acceptance of timestamp-only members. Load for the graph stage, graph_compare, "outputs identical", tar differs, compared_members 0, self-compare, timestamp_only, accept_timestamp_only, science_unchanged inconclusive.
 ---
 
 Cross-references: [[prov_annotate]] [[prov_discover]] [[tools_moirai]]
@@ -8,8 +8,11 @@ Cross-references: [[prov_annotate]] [[prov_discover]] [[tools_moirai]]
 # Graph health gate
 
 ## Rules
-- `graph_check`, `graph_compare`, `graph_validate`. Done means all of it holds: provenance recorded, no dangling id, every artifact type present with a producer, every root a real input agreed in the spec, every type described.
-- At the gate, report entity and activity counts by type and one full lineage example, root to artifact to consumers.
+- `graph_check`, then `graph_validate` (`graph_compare` when the plain and traced outputs are to be compared). Done means all of it holds: provenance recorded, no dangling id, every artifact type present with a producer, every root a real input agreed in the spec, every type described, everything the spec promises recorded, and no inference algorithm failed.
+- `graph_check` reads the graph through `core.answers.graph` (the incremental reader the query tools share) and records `health.diff`: the aggregated entity-relationship graph the spec promised against the one the baseline recorded (the Annotate view draws matched, missing, conditional and unexpected). Missing fails `expected_recorded`; conditional and unexpected are stated for the user, never blocking.
+- At the gate, report the diff first (matched / missing / conditional / unexpected, in words), then entity and activity counts by type and one full lineage example, root to artifact to consumers.
+- A graph inference algorithm is a `(name, fn(graph, spec) -> dict)` entry in `INFERENCES` (none yet), with a check in checks.json; its result lands in `health.inferences[name]`, and one that raises fails `inferences_ran`.
+- `science_unchanged` is judged only after `graph_compare` has run for the pipeline; the graph stage itself compares no outputs.
 - Verify the run did not change the science: `graph_compare` hashes content with sha256, opens tar archives and compares member by member, and decompresses `.zst` members (zstandard module, else the `zstd` CLI, else the member is `compressed, compared as bytes`). Never trust size or whole-file equality of a tar alone.
 - Compare plain against traced outputs of two different runs, e.g. `graph_compare(pipeline, plain_dir=<runs/smoke/output>, traced_dir=<runs/moirai-baseline-N/output>)`. File list: the `files` argument (relative paths) first; else every regular file under `plain_dir` when both dirs are given (cap 500, said in `notes`); else smoke's `outputs_created` (absolute entries made relative to `plain_dir`, others ignored with a note).
 - A member is `timestamp_only` when after decompression every differing line matches the volatile patterns (default: lines starting `Date`/`Command`, timestamps, `/mnt/nnf/<uuid>` paths) and at most 8 lines differ; otherwise `different`.
@@ -35,8 +38,12 @@ Cross-references: [[prov_annotate]] [[prov_discover]] [[tools_moirai]]
 - `plain_dir` equal to `traced_dir` gives a note and nothing compared.
 - `compare_timestamp_only` keeps the first 20 members; the full list is in the `graph_compare` return value.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
-Predictors `graph_check`, `graph_compare`, validator `graph_validate`. A failed verdict comes here: fix the original tool or its input, then predict and validate again. The same failure twice stops the loop: change approach, or ask.
+Predictors `graph_check`, `graph_compare` (optional), validator `graph_validate`. A failed verdict comes here: fix the original tool or its input, then predict and validate again. The same failure twice stops the loop: change approach, or ask.
 
 | Failed check | Correct |
 |---|---|
@@ -46,6 +53,8 @@ Predictors `graph_check`, `graph_compare`, validator `graph_validate`. A failed 
 | `artifacts_produced` | add `generated` at the writer |
 | `roots_are_inputs` | a producer upstream is not annotated: go back to `prov_annotate` |
 | `types_described` | fix the spec's descriptions, then `annotate_apply` |
+| `expected_recorded` | a spec edge or type was never recorded: the baseline input did not reach that code, or the annotation there is wrong (`prov_annotate`) |
+| `inferences_ran` | an algorithm in `INFERENCES` raised: fix it with `capability_update`, then `graph_check` again |
 | `science_unchanged` (fail) | a real content difference in a member: inspect it with `graph_compare_dirs`; tracing may have changed behaviour |
 | `science_unchanged` (inconclusive, compared_members 0 or "same file as plain") | the comparison compared a file with itself or nothing: compare plain against traced outputs of two different runs; rerun `graph_compare` with `plain_dir`, `traced_dir` of different runs and `files` (relative, e.g. `chunk_000000/<id>.tar`), or check with `graph_compare_dirs` |
 | `science_unchanged` (inconclusive, only timestamp/command-line differences) | show the user the named members; if they accept, record it: rerun `graph_compare` with the same arguments plus `accept_timestamp_only=<the user's words>`, then `graph_validate`. Without their acceptance leave it inconclusive |

@@ -49,6 +49,8 @@ def new(**kw):
 
 @pytest.mark.parametrize("name", sorted(p.name for p in S.BUNDLED.iterdir() if p.is_dir()))
 def test_every_bundled_capability_passes_its_own_validators(name):
+    if not S.available(name):
+        pytest.skip(f"{name} is another project's capability (needs {S.missing_projects((S.BUNDLED / name / 'tool.py').read_text())})")
     r = S.verify(name)
     assert r["status"] == "ok", r
 
@@ -56,7 +58,7 @@ def test_every_bundled_capability_passes_its_own_validators(name):
 def test_everything_is_a_capability():
     from conftest import tools
     t = tools()
-    assert len(t) == sum(len(m["tools"]) for _, _, m in S.all_caps().values())
+    assert len(t) == sum(len(m["tools"]) for n, (_, _, m) in S.all_caps().items() if S.available(n))
     assert {"capability_new", "pipeline_new", "lesson_add", "query_dataframe", "moirai_baseline_run"} <= set(t)
     assert all(v["capability"] for v in t.values())
 
@@ -277,7 +279,9 @@ def test_by_default_the_package_store_is_the_only_one_and_approvals_go_there(mon
     """No root capabilities/ folder and no user layer: what is approved and learnt is written into src/moirai_agents/.agents/capabilities."""
     for v in ("MOIRAI_AGENTS_BUNDLED_CAPABILITIES", "MOIRAI_AGENTS_USER_CAPABILITIES", "MOIRAI_AGENTS_PROJECT_CAPABILITIES"):
         monkeypatch.delenv(v, raising=False)
-    assert S.layers() == [("project", S.BUNDLED)]
+    from moirai_agents.core import _engine
+    ups = [sc.project for sc in _engine.upstream()]                  # phronix, dftracer-agents: read-only, below moirai's own store
+    assert [n for n, _ in S.layers()] == ups + ["project"] and S.layers()[-1] == ("project", S.BUNDLED)
     assert S.layer_dir("user") == S.layer_dir("project") == S.BUNDLED
     assert S.shadow("app_smoke") == S.BUNDLED / "app_smoke"          # lessons land in the capability's own folder
     assert S.sync_shadows() == []

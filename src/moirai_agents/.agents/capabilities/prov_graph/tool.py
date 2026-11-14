@@ -1,7 +1,10 @@
-"""Run pipeline stage 8: the graph health gate. The run is done only when every artifact has a producer and reaches real inputs.
+"""Run pipeline stage 8: the graph. Build the provenance graph of the baseline run, run the graph inference algorithms, diff it against what the
+spec promises, and gate on its health: every artifact has a producer and reaches real inputs.
 
-Moved from dftracer-agents' provenance mode, reading moirai's records.
-graph_compare compares by sha256 and descends into tar archives member by member (and into .zst members).
+Moved from dftracer-agents' provenance mode, reading moirai's records. The graph is read through core.answers.graph, the incremental
+per-pipeline reader the query tools share, so the graph stage and every later question read each record once.
+graph_compare (optional) compares plain vs traced outputs by sha256 and descends into tar archives member by member (and into .zst members);
+science_unchanged is judged only once it has run.
 """
 import hashlib
 import io
@@ -13,8 +16,9 @@ import tempfile
 from collections import Counter
 from pathlib import Path
 
+from moirai_agents.core import aggregate as G
+from moirai_agents.core import answers as A
 from moirai_agents.core import pipeline as P
-from moirai_agents.core import provtrace as T
 
 STAGE = "graph"
 ROOT_ROLES = {"input", "parameter", "reference"}
@@ -28,6 +32,10 @@ VOLATILE_DEFAULT = [
     r"\b(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d+\s+\d{2}:\d{2}:\d{2}",
     r"/mnt/nnf/[0-9a-fA-F-]{8,}",
 ]
+
+# Graph inference algorithms: (name, fn(graph, spec) -> dict). Each runs in graph_check, after the graph is built, and its
+# result is recorded under outputs.inferences[name]. None yet: add one here (with a check in checks.json) when it exists.
+INFERENCES = []
 
 
 def _health(g, spec):
@@ -67,6 +75,16 @@ def _health(g, spec):
             "artifact_types_missing": sorted(a for a in artifacts if not by_type.get(a)), "artifacts_without_producer": len(unproduced),
             "types_undescribed": sorted(t for t in by_type if not (g.types.get(t) or {}).get("description")),
             "roots_not_inputs": bad_roots, "lineage_example": next(iter(lineage.values()), None), "artifacts": len(lineage)}
+
+
+def _infer(g, spec):
+    out = {}
+    for name, fn in INFERENCES:
+        try:
+            out[name] = fn(g, spec)
+        except Exception as e:  # noqa: BLE001  one failing algorithm must not hide the graph's health
+            out[name] = {"status": "error", "error": str(e)[:300]}
+    return out
 
 
 def _digest(path):
@@ -313,15 +331,19 @@ def _selftest():
 def register(mcp):
     @mcp.tool()
     def graph_check(pipeline: str) -> dict:
-        """Build the provenance graph of the baseline run and measure its health against the spec, and write <pipeline>/graph.json. Use after the baseline.
-        Returns {activities, entities, entities_by_type, dangling, artifact_types_missing, artifacts_without_producer, types_undescribed, roots_not_inputs, lineage_example}."""
+        """Build the provenance graph of the baseline run, run the graph inference algorithms, measure its health against the spec, and write <pipeline>/graph.json.
+        Use after the baseline. Returns {activities, entities, entities_by_type, dangling, artifact_types_missing, artifacts_without_producer, types_undescribed,
+        roots_not_inputs, lineage_example, inferences, diff: {summary, missing, conditional, unexpected, missing_types, unexpected_types, clean}} - diff compares the
+        aggregated entity-relationship graph the spec promises with the one the baseline recorded (the Annotate view draws it)."""
         c = P.load(pipeline)
-        traces = P.stage(c, "baseline")["outputs"].get("traces")
-        if not traces:
+        if not P.stage(c, "baseline")["outputs"].get("traces"):
             return {"status": "error", "error": "the baseline stage has no traces"}
         spec = P.stage(c, "annotate")["outputs"].get("spec") or {}
-        g = T.read(traces)
+        g, _ = A.graph(c)
         h = _health(g, spec)
+        h["inferences"] = _infer(g, spec)
+        d = G.diff(G.expected(spec), G.runtime(g))       # the Annotate view's diff: what the annotation promised vs what the baseline recorded
+        h["diff"] = {k: d[k] for k in ("summary", "missing", "conditional", "unexpected", "missing_types", "unexpected_types", "clean")}
         (P.work(c) / "graph.json").write_text(json.dumps({**g.view(10**9), "health": h}, default=str))
         P.record(pipeline, STAGE, status="running", outputs={"health": h, "summary": f"{h['artifacts']} artifact(s), {h['activities']} activities, {h['dangling']} dangling"}, note="graph built")
         return h
@@ -409,8 +431,9 @@ def register(mcp):
 
     @mcp.tool()
     def graph_validate(pipeline: str) -> dict:
-        """The health gate: provenance was recorded, no dangling id, every artifact type present with a producer, every root a real input, every type described. Use before the gate.
-        science_unchanged: pass when outputs are identical, or when only timestamp differences exist and the user's words accepted them (graph_compare accept_timestamp_only); inconclusive when only timestamp differences exist without that acceptance (named),
+        """The health gate: provenance was recorded, no dangling id, every artifact type present with a producer, every root a real input, every type described,
+        everything the spec promises recorded (the diff; conditional and unexpected edges are stated, never blocking), and no graph inference algorithm failed. Use before the gate.
+        science_unchanged is checked only once graph_compare has run (the graph stage itself compares no outputs): pass when outputs are identical, or when only timestamp differences exist and the user's words accepted them (graph_compare accept_timestamp_only); inconclusive when only timestamp differences exist without that acceptance (named),
         nothing was compared, files were missing or self-compared, or compared_members is 0; fail on real content differences. Returns the verdict {status, failed, unknown, passed, total}."""
         o = P.stage(P.load(pipeline), STAGE)["outputs"]
         v = P.Verdict(STAGE)
@@ -422,11 +445,22 @@ def register(mcp):
             v.check("artifacts_produced", h["artifacts_without_producer"] == 0, f"{h['artifacts_without_producer']} without a producer", "add generated at the writer: every artifact needs a producer activity")
             v.check("roots_are_inputs", not h["roots_not_inputs"], str(h["roots_not_inputs"])[:300], "a producer upstream is not annotated: walk back and add it")
             v.check("types_described", not h["types_undescribed"], f"undescribed: {h['types_undescribed']}", "declare the type with its description in the spec, and annotate again")
-            state, msg = science_status(o)
+            d = h.get("diff")
+            if d is not None:
+                v.check("expected_recorded", not d["missing"] and not d["missing_types"], f"in the spec, never recorded: {(d['missing_types'] + d['missing'])[:8]}",
+                        "the code path did not run in the baseline (use an input that reaches it) or the annotation is wrong there: back to prov_annotate")
+                # the user's call, shown in the diff and at the gate: recorded as information, never blocking
+                v.check("conditional_recorded", True, f"conditional, not recorded this run: {d['conditional'][:8]}" if d["conditional"] else "every conditional edge recorded")
+                v.check("only_expected", True, f"recorded, not in the spec: {(d['unexpected_types'] + d['unexpected'])[:8]}"
+                         if d["unexpected"] or d["unexpected_types"] else "nothing outside the spec")
+            bad = sorted(k for k, r in (h.get("inferences") or {}).items() if isinstance(r, dict) and r.get("status") == "error")
+            if (h.get("inferences") or {}):
+                v.check("inferences_ran", not bad, f"failed: {bad}", "fix the algorithm in prov_graph's INFERENCES, then graph_check again")
+            state, msg = science_status(o) if "compare" in o else ("skip", "")
             if state == "fail":
                 v.check("science_unchanged", False, msg, "a real content difference: find the member and the cause (tracing changed behaviour?) before accepting")
             elif state == "inconclusive":
                 v.inconclusive("science_unchanged", msg)
-            else:
+            elif state == "pass":
                 v.check("science_unchanged", True, "", "")
         return P.finish_validation(pipeline, v)

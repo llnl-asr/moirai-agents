@@ -16,3 +16,7 @@ logs/
 *.tmp
 *.lock
 er_presentation_final.pdf
+
+
+# Upstream clones (dftracer-agents, phronix) and their contribution worktrees (vendor/contrib/)
+/vendor/

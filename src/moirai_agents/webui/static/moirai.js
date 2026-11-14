@@ -124,6 +124,20 @@ async function pollCaps(force){if(!me||(!force&&editing('#capabilities')))return
  if(d.pending.length){const s=document.querySelector('details[data-sec=capabilities]');if(s)s.open=true}
  $('#capabilities').querySelectorAll('[data-c]').forEach(b=>b.onclick=async()=>{b.disabled=true;const m=b.closest('.capp').querySelector('.cmsg');m.textContent=b.dataset.a?'approving…':'rejecting…';
   const r=await act('api/capability/decide',{id:b.dataset.c,approve:!!b.dataset.a,note:b.dataset.note||''});if(r&&r.status==='error'){m.textContent=r.error;b.disabled=false;return}pollCaps(true)})}
+// ---- Update: contributions to the projects upstream (dftracer-agents, phronix)
+const contribLabel=s=>{const n=((s&&s.upstream)||[]).reduce((a,u)=>a+(((u.contribution||{}).ahead)||0),0);return n?`Update (${n} to contribute)`:'Update'};
+const contribHtml=r=>(r.upstream||[]).map(u=>{const c=u.contribution||{},t=u.to_do||{},pr=t.pull_request||c.pull_request;
+ const head=`<b>${esc(u.project)}</b>: `+(u.rebase==='conflict'?'<span class="bad">rebase conflict, branch left as it was</span> ':'')+(c.ahead?`${c.ahead} commit(s) on ${esc(c.branch)}`:'nothing to contribute')+(u.clone_note?` · ${esc(u.clone_note)}`:'');
+ const steps=c.ahead?`<div>push: <code>${esc(t.push||'git -C '+(c.worktree||'')+' push -u origin '+(c.branch||''))}</code></div>`+(pr?`<div>then open the pull request: <a href="${esc(pr)}" target="_blank" rel="noopener">${esc(pr)}</a></div>`:''):'';
+ return `<div>${head}${steps}</div>`}).join('');
+async function pollContrib(){const b=$('#csync');if(!b||!me||b.disabled)return;const s=await api('api/capabilities/contributions');if(!s)return;
+ if(s.error){b.textContent='Update';b.title=s.error;return}b.textContent=contribLabel(s)}
+$('#csync').addEventListener('click',async ev=>{ev.preventDefault();ev.stopPropagation();const b=$('#csync'),m=$('#csyncmsg');
+ b.disabled=true;b.textContent='Updating…';m.hidden=false;m.textContent='updating the clones and rebasing the contribution branches…';
+ const r=await act('api/capabilities/update',{});b.disabled=false;
+ if(!r||r.error){m.textContent='Update failed: '+((r&&r.error)||'no answer');return pollContrib()}
+ m.innerHTML=contribHtml(r)||'nothing upstream';pollCaps(true);pollContrib()});
+setInterval(pollContrib,120000);setTimeout(pollContrib,1500);
 $('#capabilities').addEventListener('click',async ev=>{const b=ev.target.closest('button');if(!b)return;const root=$('#capabilities');
  if(b.dataset.ed)return toggleEdit(root,b.dataset.ed);
  if(b.dataset.redo){const p=CAPS[b.dataset.redo];if(!p)return;b.disabled=true;b.closest('.capp').querySelector('.cmsg').textContent='sent to the agent: it redoes the change on the current version, then asks you again';

@@ -25,6 +25,10 @@ Cross-references: [[app_explore]], [[moirai_integrate]], [[system_mammoth]], [[t
 - PYTHONPATH of the agent (moirai-agents/src) must be unset while verifying, or it shadows the venv.
 - `dftracer.finalize()` called on the module raises TypeError (missing self) and then segfaults: do not call it in the test; a decorated test function must log 3 of 3 events with no core file.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
 moirai_venv_check names the failed check: not composed -> run the compose step with the application's modules loaded and the venv's cmake first on PATH; two cores -> compose (it links libdftracer_core.so to the one library), or the dftracer is older than the pre-release; moirai init differs -> rebuild/overlay; no dftracer.utils -> pip install dftracer-utils. The checks do not run Python: when they pass but decorators log 0 events, run the import test and apply the libstdc++ preload corner case. The same failure twice stops the loop.
 

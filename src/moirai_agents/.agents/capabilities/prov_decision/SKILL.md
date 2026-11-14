@@ -29,6 +29,10 @@ Scope: Why trust the result: quality metrics (scores, confidences, error estimat
 - A step can pass (returncode=0) and still produce poor output: report quality metrics next to the outcomes.
 - Identical metric values share one entity: stats counts each once per entity it describes.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
 Validator `decision_check` (and `decision_selftest` for the capability itself).
 

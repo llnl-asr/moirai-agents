@@ -26,6 +26,10 @@ Scope: Where did this come from: the workflow instance and app instance, the pro
 - A subprocess or callback the decorator does not reach shows as missing_producer: the fix is in prov_gaps / prov_annotate (missed_function).
 - Identical values share one attribute entity: count per entity it is part_of.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
 Validator `traceability_check` (and `traceability_selftest` for the capability itself).
 

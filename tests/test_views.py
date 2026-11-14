@@ -441,7 +441,7 @@ def test_an_explanation_reads_tables_with_several_values_and_keeps_values_exact(
 
 def test_query_explain_gives_four_parts_summary_first_and_passes_its_checks():
     from moirai_agents.core import capstore as S
-    fix = json.loads((Path(S.__file__).parent.parent / ".agents/capabilities/query_explain/checks.json").read_text())[0]["args"]["answer"]
+    fix = json.loads((S.BUNDLED / "query_explain/checks.json").read_text())[0]["args"]["answer"]
     r = S.call("query_explain", "query_explain", answer=fix)
     assert [p["part"] for p in r["parts"]] == ["plan", "result", "answer", "evidence"] and not r["problems"]
     assert all(p["summary"] and len(p["summary"]) <= 320 for p in r["parts"])

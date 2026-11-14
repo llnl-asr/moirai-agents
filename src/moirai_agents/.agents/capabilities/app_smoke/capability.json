@@ -1,7 +1,7 @@
 {
  "name": "app_smoke",
  "description": "Build and smoke-test the original application, unchanged. Load for the smoke stage of a run pipeline, when the smoke run wrote its data outside the session (data_dir), or for a flux batch smoke job.",
- "version": 3,
+ "version": 5,
  "enabled": true,
  "stages": [
   "smoke"
@@ -28,7 +28,9 @@
    "smoke_data_verdict"
   ]
  },
- "review": [],
+ "review": [
+  "imports subprocess: runs commands"
+ ],
  "history": [
   {
    "version": 1,
@@ -47,6 +49,20 @@
    "by": "haridev",
    "proposal": "a69e05330a45",
    "why": "Job smoke-934167821 (pipeline elmerfold-prov-20261030-125944, flux batch f3hERTfUyEVd, rc 0, 457.4 s) wrote 10 tars to /p/lustre5/haridev/elmerfold/runs/smoke/output/chunk_000000, outside the session; smoke_validate said inconclusive 'ask the user where its data goes' and the user answered with the dir, but neither smoke_run nor smoke_validate could take it, so pipeline_advance stayed blocked. Fix: optional data_dir on smoke_run (recorded) and smoke_validate (argument, else the recorded one) inventoried into outputs_created/summary and judged as the outputs check; pure helpers smoke_data_inventory and smoke_data_verdict carry the checks; rc check kept, batch rc noted."
+  },
+  {
+   "version": 4,
+   "ts": 1794621790.2609746,
+   "by": "haridev",
+   "proposal": "ded8109f29de",
+   "why": "taxteller smoke on mammoth (Slurm, no flux broker) was a hand-submitted sbatch job; smoke_validate only knew smoke_run jobs or session steps and failed with \"smoke_run has not run\" although sacct showed COMPLETED 0:0 and Nextflow rc 0. Add smoke_validate(slurm_job_id=...): reads sacct for that job (State COMPLETED, ExitCode 0:0 on every step) and judges it like a job rc, then lists data_dir as before."
+  },
+  {
+   "version": 5,
+   "ts": 1794621888.0863538,
+   "by": "haridev",
+   "proposal": "5bcd4eab394b",
+   "why": "smoke_validate(slurm_job_id=319353) crashed with AttributeError: 'int' object has no attribute 'strip': the MCP call delivers a numeric-looking job id as an int. Coerce with str() before strip (same for data_dir), and reject a non-numeric Slurm job id with a clear error."
   }
  ]
 }

@@ -12,10 +12,12 @@ from moirai_agents.core import pipeline as P
 
 STAGE = "discover"
 CASES = Path(__file__).resolve().parent / "CASES.md"
-SKIP_DIRS = {".git", "build", "_build", "__pycache__", ".venv", "venv", "node_modules", "CMakeFiles", "traces"}
+SKIP_DIRS = {".git", "build", "_build", "__pycache__", ".venv", "venv", "node_modules", "CMakeFiles", "traces", "work", ".nextflow"}
 PY_EXT = {".py"}
 C_EXT = {".c", ".h", ".cc", ".cpp", ".cxx", ".C", ".hpp", ".hh", ".hxx", ".cu", ".hip"}
-FUNC = {"py": re.compile(r"^\s*(?:async\s+)?def\s+(\w+)\s*\("), "c": re.compile(r"^[A-Za-z_][\w\s\*:<>,&~]*?\b(\w+)\s*\([^;]*$")}
+NF_EXT = {".nf"}
+FUNC = {"py": re.compile(r"^\s*(?:async\s+)?def\s+(\w+)\s*\("), "c": re.compile(r"^[A-Za-z_][\w\s\*:<>,&~]*?\b(\w+)\s*\([^;]*$"),
+        "nf": re.compile(r"^\s*(?:process|workflow)\s+(\w+)\s*\{")}
 NOT_FUNCS = {"if", "for", "while", "switch", "return", "sizeof", "catch", "elif"}
 
 SCIENCE_EXT = {
@@ -75,7 +77,17 @@ PATTERNS = [
     (r"\b(cuda|hip)Memcpy\w*\s*\(|\bKokkos::deep_copy\b", "communicate", "c"),
     (r"\.(fit|predict|forward|backward|transform|fit_transform)\s*\(|\boptimizer\.step\b", "compute", "py"),
     (r"\.to\(\s*['\"]?(cuda|cpu|device)|\.cuda\(\)|\.cpu\(\)", "communicate", "py"),
+    # Nextflow: process input/output declarations, publishDir, parameters that name data, tool commands of script blocks
+    (r"^\s*publishDir\b", "write", "nf"),
+    (r"^\s*(?:path|file)\s*[\(\w'\"\*]", "open", "nf"),
+    (r"\bparams\.\w*(?:db|input|index|ref|match|samplesheet|fasta|genome)\w*", "read", "nf"),
+    (r"^\s*(?:minimap2|samtools|kaiju\w*|centrifuge\w*|centrifuger\w*|rcf|fastp|seqkit|seqtk|esviritu|seqscreen\w*|hmmbuild|hmmsearch|zcat|gzip|gunzip|krona\w*|ktImport\w*)\b", "exec", "nf"),
+    (r"\bpodman\s+run\b|\bdocker\s+run\b|\bapptainer\s+(?:run|exec)\b|\bsingularity\s+(?:run|exec)\b", "exec", "nf"),
 ]
+
+
+def _family(p):
+    return "py" if p.suffix in PY_EXT else "nf" if p.suffix in NF_EXT else "c"
 
 
 def _sources(root):
@@ -83,12 +95,12 @@ def _sources(root):
         dn[:] = [d for d in dn if d not in SKIP_DIRS]
         for f in fn:
             p = Path(dp) / f
-            if p.suffix in PY_EXT or p.suffix in C_EXT:
+            if p.suffix in PY_EXT or p.suffix in C_EXT or p.suffix in NF_EXT:
                 yield p
 
 
 def scan(root, include="", limit=400):
-    """Touch-points with the enclosing function, so an agent opens only the named lines."""
+    """Touch-points with the enclosing function (for Nextflow the process or workflow), so an agent opens only the named lines."""
     inc = re.compile(include) if include else None
     compiled = [(re.compile(rx), kind, fam) for rx, kind, fam in PATTERNS]
     hits, kinds, n = [], Counter(), 0
@@ -96,12 +108,12 @@ def scan(root, include="", limit=400):
         rel = str(p.relative_to(root))
         if inc and not inc.search(rel):
             continue
-        fam = "py" if p.suffix in PY_EXT else "c"
+        fam = _family(p)
         n += 1
         func = None
         for i, line in enumerate(p.read_text(errors="replace").splitlines(), 1):
             s = line.strip()
-            if not s or s.startswith("#") or (fam == "c" and s.startswith(("//", "/*", "*"))):
+            if not s or (fam != "nf" and s.startswith("#")) or (fam in ("c", "nf") and s.startswith(("//", "/*", "*"))):
                 continue
             m = FUNC[fam].match(line)
             if m and not s.endswith(";") and m.group(1) not in NOT_FUNCS:
@@ -148,7 +160,7 @@ def register(mcp):
         (default: where the smoke run ran). Returns {files, extensions: [{ext, count, bytes, examples, hint}], likely_science}."""
         c = P.load(pipeline)
         smoke = P.stage(c, "smoke")["outputs"]
-        root = output_dir or smoke.get("cwd") or P.source_of(c)
+        root = output_dir or smoke.get("data_dir") or smoke.get("cwd") or P.source_of(c)
         if not os.path.isdir(root):
             raise P.PipelineError(f"{root} is not a directory")
         out = inventory(root)
@@ -157,7 +169,8 @@ def register(mcp):
 
     @mcp.tool()
     def discover_scan(pipeline: str, include: str = "", limit: int = 400) -> dict:
-        """Find where the application accesses, stores, communicates and computes data, with file, line and function. Use after discover_inventory, then
+        """Find where the application accesses, stores, communicates and computes data, with file, line and function (Python, C/C++ and Nextflow .nf: process input/output
+        paths, publishDir, params naming databases or inputs, tool command lines). Use after discover_inventory, then
         read the writer of each artifact candidate and walk its callers. include: regex on file paths. Returns {by_kind, top_files, hits: [{file, line, function, kind, code}], truncated}."""
         out = scan(Path(P.source_of(P.load(pipeline))), include, limit)
         P.record(pipeline, STAGE, status="running", outputs={"scan": {k: out[k] for k in ("files_scanned", "total_hits", "by_kind")}}, note=f"scan: {out['total_hits']} touch-points")

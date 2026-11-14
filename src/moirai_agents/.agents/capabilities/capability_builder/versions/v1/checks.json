@@ -1,1 +1,0 @@
-[{"tool":"capability_list","args":{},"expect":{"contains":"active"}},{"tool":"capability_apply","args":{"id":"nope","confirmed":false},"expect":{"contains":"not confirmed"}}]

@@ -31,6 +31,10 @@ capability; read its skill before running it.
 - Feedback that is both a fact and a process change: record `remember` for the fact and `process` for the change.
 - A pipeline resumed in a later chat: `pipeline_status` holds everything needed.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
 Predictor `pipeline_new`, `pipeline_advance`, validator `pipeline_validate`. A failed verdict comes here: fix the original tool or its input, then predict and validate again. The same failure twice stops the loop: change approach, or ask.
 

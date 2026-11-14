@@ -27,6 +27,10 @@ Cross-references: [[query_explain]] [[prov_query]]
 - An answer computed before steps had medians and `per` tables: told the old way (what differs, what is the same); ask again for the direct answer.
 - A probability recorded as 0-1: the level is scaled from 0-100.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
 Validator `explain_answer_check`; failures follow the table in [[query_explain]].
 
