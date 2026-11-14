@@ -51,6 +51,50 @@ def refresh() -> bool:
     return bool(r.get("changed")) or capstore.take_notify()
 
 
+def _run_tool(name: str, fn, args: dict):
+    """Run one tool call. In a web UI chat a message the user sends while the tool runs returns at once with that
+    message, and the tool goes on in the background (phronix.engine.steer; tool_wait gives its result)."""
+    try:
+        from phronix.engine import steer
+    except ImportError:
+        return fn(**args)
+    return steer.call(name, fn, args, wait_tool="tool_wait")
+
+
+def _steer_busy() -> bool:
+    try:
+        from phronix.engine import steer
+        return steer.busy()
+    except ImportError:
+        return False
+
+
+def _tool_wait(call_id: str, wait_s: float = 600):
+    from phronix.engine import steer
+    return steer.wait(call_id, float(wait_s or 600), wait_tool="tool_wait")
+
+
+def _tool_calls():
+    from phronix.engine import steer
+    return {"calls": steer.calls()}
+
+
+STEER_TOOLS = {
+    "tool_wait": {"fn": _tool_wait, "schema": {
+        "name": "tool_wait", "description": (
+            "Get the result of a moirai tool call that went on in the background because the user sent a message "
+            "while it ran (its reply had status still_running and a call_id). Waits up to wait_s seconds (default "
+            "600); returns the tool's own result when it finishes, or still_running again (a newer user message, or "
+            "the wait ran out: call again)."),
+        "inputSchema": {"type": "object", "properties": {"call_id": {"type": "string"}, "wait_s": {"type": "number"}},
+                        "required": ["call_id"]}}},
+    "tool_calls": {"fn": _tool_calls, "schema": {
+        "name": "tool_calls", "description": ("Moirai tool calls still running in the background after a user "
+                                              "message (or finished, result not yet collected with tool_wait)."),
+        "inputSchema": {"type": "object", "properties": {}, "required": []}}},
+}
+
+
 def handle(req: dict):
     m = req.get("method")
     if m == "initialize":
@@ -60,15 +104,21 @@ def handle(req: dict):
         return {}
     if m == "tools/list":
         refresh()
-        return {"tools": [t["schema"] for t in TOOLS.values()]}
+        return {"tools": [t["schema"] for t in TOOLS.values()] + [t["schema"] for t in STEER_TOOLS.values()]}
     if m == "tools/call":
         p = req.get("params") or {}
         refresh()
         t = TOOLS.get(p.get("name"))
+        if not t and p.get("name") in STEER_TOOLS:
+            try:
+                res = STEER_TOOLS[p["name"]]["fn"](**(p.get("arguments") or {}))
+                return {"content": [{"type": "text", "text": json.dumps(res, indent=1, default=str)}]}
+            except Exception as e:
+                return {"isError": True, "content": [{"type": "text", "text": f"{type(e).__name__}: {e}"}]}
         if not t:
             return {"isError": True, "content": [{"type": "text", "text": f"unknown tool {p.get('name')}"}]}
         try:
-            res = knowledge.on_failure(p["name"], t["fn"](**(p.get("arguments") or {})))
+            res = knowledge.on_failure(p["name"], _run_tool(p["name"], t["fn"], p.get("arguments") or {}))
             text = res if isinstance(res, str) else json.dumps(res, indent=1, default=str)
             return {"content": [{"type": "text", "text": text}]}
         except Exception as e:
@@ -107,7 +157,7 @@ def _watch(lines: Lines) -> None:
         if err:
             print(f"[moirai-mcp] keeping the running code: {err}", file=sys.stderr, flush=True)
         with OUT:
-            if changed and not lines.busy:
+            if changed and not lines.busy and not _steer_busy():     # never under a tool going on in the background
                 print(f"[moirai-mcp] refreshing for {len(changed)} changed file(s)", file=sys.stderr, flush=True)
                 os.environ["MOIRAI_AGENTS_MCP_REFRESHED"] = "1"
                 os.execv(sys.executable, [sys.executable, "-m", "moirai_agents.mcp_server"] + sys.argv[1:])

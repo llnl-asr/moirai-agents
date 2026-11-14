@@ -708,6 +708,8 @@ def turn_spec(session: dict, user: dict, sync_caps: bool = True) -> dict:
         env["CLAUDE_CONFIG_DIR"] = str(Path(user["workspace"]) / ".claude-home")   # private transcripts
     live_dir = Path(user["workspace"]) / ".moirai-agents" / "live" / uuid.uuid4().hex[:12]
     env["MOIRAI_AGENTS_LIVE_DIR"] = str(live_dir)     # hooks/live_log.py writes Bash output here
+    # steer messages reach a long-running moirai tool through this inbox (phronix.engine.steer)
+    env["PHRONIX_STEER_INBOX"] = str(Path(user["workspace"]) / ".moirai-agents" / "steer" / f"{session['id']}.inbox")
     return {"cmd": cmd, "env": env, "cwd": user["workspace"], "live_dir": live_dir, "lessons_meta": lessons_meta,
             "claude_home": env.get("CLAUDE_CONFIG_DIR") or str(claude_home())}
 
@@ -1000,19 +1002,47 @@ class Turn:
                 pass
 
     def steer(self, text: str, files: Optional[list] = None) -> bool:
-        """Hand a message to the running agent without interrupting it. False when the turn has
-        already finished taking input (the caller then starts a new turn)."""
+        """Hand a message to the running agent without interrupting it. A moirai tool that is running takes it at
+        once (the tool goes on in the background, phronix.engine.steer); otherwise it goes on stdin and the agent reads
+        it after its current step. False when the turn has already finished taking input (the caller then starts a
+        new turn)."""
         with self.io_lock:
             if not self.stdin_open or self.done or not self.proc or self.proc.poll() is not None:
                 return False
             meta = self.save_uploads(files or [])
-            if not self._write_user("[Feedback while you were working] " + text + self.upload_note(meta)):
+        full = "[Feedback while you were working] " + text + self.upload_note(meta)
+        if self._steer_to_tool(full):
+            n = f"t{len(self.steers)}"
+            self.steers.append((-1, text + self.upload_note(meta)))     # delivered: never re-sent after a Stop
+            self.emit({"type": "steer", "text": text, "n": n, "ts": _now(),
+                       "files": [{k: m[k] for k in ("name", "size")} for m in meta]})
+            self.emit({"type": "steer_ack", "n": n})
+            self.prov.record(self.user, self.session, {"kind": "steer", "turn_id": self.turn_id, "message": text,
+                                                       "via": "tool"})
+            return True
+        with self.io_lock:
+            if not self.stdin_open or self.done or not self.proc or self.proc.poll() is not None:
+                return False
+            if not self._write_user(full):
                 return False
         self.steers.append((self.sent - 1, text + self.upload_note(meta)))
         self.emit({"type": "steer", "text": text, "n": self.sent - 1, "ts": _now(),
                    "files": [{k: m[k] for k in ("name", "size")} for m in meta]})
         self.prov.record(self.user, self.session, {"kind": "steer", "turn_id": self.turn_id, "message": text})
         return True
+
+    def _steer_to_tool(self, text: str) -> bool:
+        """Offer the message to a running moirai tool (it claims it within a moment); False when none took it."""
+        ib = (self.env or {}).get("PHRONIX_STEER_INBOX")
+        if not ib:
+            return False
+        try:
+            from phronix.engine import steer
+            ib = Path(ib)
+            return steer.wait_claimed(ib, steer.post(ib, text),
+                                      float(os.environ.get("MOIRAI_AGENTS_STEER_CLAIM_S", "1.5")))
+        except Exception:                       # the inbox is a shortcut: stdin always works
+            return False
 
     def snapshot(self) -> dict:
         """The session as it is right now (incl. the running reply) + where its live stream is."""
@@ -1104,6 +1134,12 @@ class Turn:
             i = cmd.index("--resume")
             del cmd[i:i + 2]
         self.sent = self.consumed = self.answered = 0
+        try:
+            from phronix.engine import steer
+            if (self.env or {}).get("PHRONIX_STEER_INBOX"):
+                steer.reset(Path(self.env["PHRONIX_STEER_INBOX"]))     # this turn's steer inbox starts empty
+        except Exception:
+            pass
         overflow = False
         learned = reflected = False
         w, self.warm = self.warm, None
