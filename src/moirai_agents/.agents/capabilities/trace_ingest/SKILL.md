@@ -17,6 +17,10 @@ description: Take provenance traces from the user and check what they hold. Load
 - One entity has `EH` records in several files: they merge.
 - A partial set of a run shows up as dangling ids.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
 Predictor `ingest_traces`, validator `ingest_validate`. A failed verdict comes here: fix the original tool or its input, then predict and validate again. The same failure twice stops the loop: change approach, or ask.
 

@@ -1,6 +1,7 @@
 """Run pipeline stage 2: build the ORIGINAL application and run the small test, so later failures can be pinned on what we changed."""
 import os
 import shlex
+import subprocess
 import time
 from pathlib import Path
 
@@ -98,6 +99,39 @@ def _faults(steps):
 def _fault_detail(faults):
     s = "; ".join(f"step {f['step']} rc={f['rc']}: {f['tail']}" for f in faults)
     return s[:395] if len(s) <= 395 else "..." + s[-392:]      # a verdict keeps 400 chars: keep the END of the log
+
+
+def _sacct_rows(text):
+    """Pure: rows [{id, state, elapsed, exit}] of `sacct -j <id> -n -P -o JobID,State,Elapsed,ExitCode` output."""
+    rows = []
+    for ln in (text or "").splitlines():
+        p = [x.strip() for x in ln.split("|")]
+        if len(p) >= 4 and p[0]:
+            rows.append({"id": p[0], "state": p[1].split()[0], "elapsed": p[2], "exit": p[3]})
+    return rows
+
+
+def _slurm_verdict(rows):
+    """Pure: (ok, detail) of a finished Slurm job: every step COMPLETED with exit code 0:0; no rows means unknown job."""
+    if not rows:
+        return False, "sacct has no record of this job id"
+    bad = [r for r in rows if r["state"] != "COMPLETED" or r["exit"] != "0:0"]
+    if bad:
+        return False, "; ".join(f"{r['id']} {r['state']} exit {r['exit']}" for r in bad)[:395]
+    return True, f"{rows[0]['id']} COMPLETED in {rows[0]['elapsed']}, exit 0:0 on {len(rows)} step(s)"
+
+
+def _job_id(value):
+    """Pure: the Slurm job id as text ('' when none); the MCP call may deliver a number."""
+    return str(value if value is not None else "").strip()
+
+
+def _sacct(job_id):
+    try:
+        r = subprocess.run(["sacct", "-j", str(job_id), "-n", "-P", "-o", "JobID,State,Elapsed,ExitCode"], capture_output=True, text=True, timeout=30)
+        return r.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
 
 
 def _plan(build_command, command, launcher, build_where, approval):
@@ -212,14 +246,18 @@ def register(mcp):
         return {"job": j["id"], "status": r["status"], "rc": r["rc"], "elapsed": r["elapsed"], "log_tail": r.get("log_tail", "")[-3000:]}
 
     @mcp.tool()
-    def smoke_validate(pipeline: str, data_dir: str = "") -> dict:
+    def smoke_validate(pipeline: str, data_dir: str = "", slurm_job_id: str = "") -> dict:
         """Validate the smoke stage: every step or the job finished with exit code 0 (a non-zero rc fails with the last 10 log lines), and list what it wrote (those files are the
         candidate data for annotation). For a job submitted by flux batch the job rc is the launcher script's rc (it exits non-zero when the batch job's return code is non-zero), so
         rc 0 is trusted and non-zero fails. Use after smoke_run or smoke_session. data_dir: optional absolute directory the user named as where the data goes when the run wrote
         outside its cwd/session (quote their answer); default the data_dir recorded by smoke_run. It must exist (else {status: error}); its files, bytes, count by suffix and first
-        200 paths go to outputs_created and the summary; non-empty passes the 'outputs' check, empty stays inconclusive. Returns the verdict, or {status: error, error}."""
+        200 paths go to outputs_created and the summary; non-empty passes the 'outputs' check, empty stays inconclusive. slurm_job_id: for a run the user or agent submitted with sbatch
+        on a Slurm system (no flux, no smoke_run): sacct must show every step COMPLETED with exit 0:0; pass data_dir too. Returns the verdict, or {status: error, error}."""
         o = P.stage(P.load(pipeline), STAGE)["outputs"]
-        dd = (data_dir or o.get("data_dir") or "").strip()
+        dd = _job_id(data_dir or o.get("data_dir"))
+        sj = _job_id(slurm_job_id)
+        if sj and not sj.replace("_", "").replace("+", "").isdigit():
+            return {"status": "error", "error": f"slurm_job_id {sj!r} is not a Slurm job id (digits, e.g. 319353)"}
         v = P.Verdict(STAGE)
 
         def data_outputs(extra):
@@ -233,7 +271,18 @@ def register(mcp):
             v.inconclusive("outputs", f"data_dir {dd} is empty: ask the user where the run wrote its data")
             return inv, True
 
-        if o.get("session_steps"):
+        if sj:
+            ok, detail = _slurm_verdict(_sacct_rows(_sacct(sj)))
+            v.check("slurm_job", ok, detail, "read the job's output file and fix the command or the job script, then resubmit")
+            P.record(pipeline, STAGE, outputs={"slurm_job": sj, "summary": f"slurm {detail}"})
+            if ok:
+                if dd:
+                    inv, good = data_outputs(detail)
+                    if not good:
+                        return inv
+                else:
+                    v.inconclusive("outputs", "pass data_dir: the directory the Slurm job wrote its data to")
+        elif o.get("session_steps"):
             f = _faults(o["session_steps"])
             v.check("session_steps", not f, _fault_detail(f), "fix the failed step (see its rc and log tail) and re-run smoke_session")
             if not f:
@@ -243,7 +292,7 @@ def register(mcp):
                         return inv
                 elif not o.get("outputs_created"):
                     v.inconclusive("outputs", "the run wrote no file in the session: ask the user where its data goes, then call smoke_validate with data_dir")
-        elif v.check("ran", bool(o.get("job")), "smoke_run has not run", "run smoke_session or smoke_run"):
+        elif v.check("ran", bool(o.get("job")), "smoke_run has not run", "run smoke_session or smoke_run (on Slurm: smoke_validate with slurm_job_id)"):
             j = J.get(pipeline, o["job"], 1500)
             if j["status"] == "running":
                 v.inconclusive("finished", "still running")

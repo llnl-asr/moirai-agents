@@ -24,6 +24,10 @@ The Export PDF menu under the chat takes a snapshot of the chat as drawn (diagra
 - A chat that is still running exports as far as it has got.
 - The day lines say "Today" and "Yesterday" as on screen: the date under the title anchors them.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
 Predictor `chat_pdf_render`, validator `chat_pdf_check`. A failed verdict comes here: fix the original tool or its input, then predict and validate again. The same failure twice stops the loop: change approach, or ask.
 

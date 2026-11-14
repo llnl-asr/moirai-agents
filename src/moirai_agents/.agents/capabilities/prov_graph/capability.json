@@ -1,7 +1,7 @@
 {
  "name": "prov_graph",
  "description": "Build the provenance graph of the baseline run and gate on its health - every artifact produced and rooted in real inputs; compare plain vs traced outputs by content (tar members, zstd) and tell timestamp-only differences from real ones. Load for the graph stage.",
- "version": 7,
+ "version": 8,
  "enabled": true,
  "stages": [
   "graph"
@@ -24,7 +24,7 @@
  },
  "review": [
   "imports subprocess: runs commands",
-  "line 325: writes or deletes files (write_text)"
+  "line 347: writes or deletes files (write_text)"
  ],
  "history": [
   {
@@ -70,6 +70,12 @@
    "by": "haridev",
    "proposal": "63a99ac18dfc",
    "why": "science_unchanged stayed inconclusive forever when only timestamp_only members differed (elmerfold-prov-20261030-125944: 70 members compared, 0 different, 10 hhsearch_output.hhr Date/Command headers), because nothing could record the user's call and pipeline_advance refuses inconclusive. graph_compare now takes accept_timestamp_only (the user's own words)."
+  },
+  {
+   "version": 8,
+   "ts": 1794617283.589198,
+   "by": "fixall",
+   "why": "v5-v7 were built on v2 and lost what v3/v4 added: graph_check again reads through core.answers.graph (the incremental reader the query tools share), runs the graph inference algorithms (INFERENCES, outputs.inferences) and records the spec-vs-baseline diff (core.aggregate); graph_validate again fails expected_recorded on spec edges/types never recorded, states conditional/unexpected ones, and fails inferences_ran when an algorithm raised. Everything v5-v7 added is kept (graph_compare, graph_compare_dirs, graph_compare_selftest, accept_timestamp_only); science_unchanged is judged only once graph_compare has run, as the graph stage itself compares no outputs (v3)."
   }
  ]
 }

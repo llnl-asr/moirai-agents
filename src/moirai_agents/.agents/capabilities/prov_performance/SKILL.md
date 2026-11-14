@@ -43,6 +43,10 @@ Scope: How to improve efficiency: the bottleneck (where time goes, by activity, 
 - DFTRACER_CPP_INIT is not inserted here: C++ events need the dftracer core initialized by moirai's own initialize; verify with the same re-run.
 - clang is needed for C/C++ planning and applying; without it perf_annotate lists the file as skipped with the error; pass `compile_flags` (-I, -D, -std=) for real C++ projects, as dftracer-agents' extract_functions requires.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
 Validator `performance_check` (and `performance_selftest`, `perf_annotate_selftest` for the capability itself, `perf_validate` for the inserted calls).
 

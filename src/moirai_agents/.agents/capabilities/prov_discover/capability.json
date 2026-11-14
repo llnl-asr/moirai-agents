@@ -1,7 +1,7 @@
 {
  "name": "prov_discover",
  "description": "Find the scientific artifact and every place the app touches data, and prepare the questions that decide what provenance to capture. Load for the discover stage, or any question about what should be captured as provenance.",
- "version": 2,
+ "version": 3,
  "enabled": true,
  "stages": [
   "discover"
@@ -24,7 +24,7 @@
   ]
  },
  "review": [
-  "line 187: writes or deletes files (write_text)"
+  "line 200: writes or deletes files (write_text)"
  ],
  "history": [
   {
@@ -37,6 +37,13 @@
    "by": "haridev",
    "proposal": "97a6aeac7f0b",
    "why": "The user asked for the four aspects of provenance (traceability, accountability, decision making, performance), each its own capability, and for one reading capability (prov_read: TraceViewer) used by every graph, query and check. Discovery no longer rules out performance: it comes from dftracer's events."
+  },
+  {
+   "version": 3,
+   "ts": 1794622153.3468719,
+   "by": "haridev",
+   "proposal": "680de3c96080",
+   "why": "taxteller (Nextflow): discover_scan scanned 0 files (\"files_scanned 0, total_hits 0\") because only Python and C/C++ sources were known, so discover_validate failed touch_points twice and the agent had to read the modules by hand. Add a Nextflow family: .nf files, process/workflow names as the enclosing function, and patterns for input/output path declarations (read/write), publishDir (write), params.* database and input parameters (read), and the tool command lines of script blocks and podman run (exec)."
   }
  ]
 }

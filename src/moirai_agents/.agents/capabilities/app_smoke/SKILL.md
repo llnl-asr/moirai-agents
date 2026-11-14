@@ -26,11 +26,11 @@ Cross-references: [[app_explore]] [[moirai_run]] [[pipeline_control]] [[capabili
 
 ## Site rule: creating files under python3.N/site-packages on a compute node
 - Observed (main thread probes, tuolumne, 2026-10-30; reading is allowed): on compute nodes, creating a file under any `python3.N/site-packages` fails with ENOENT on Lustre, vast1 and /usr/workspace, while creating files in `lib/site-packages`, `lib/python3.13/other` and any write from a login node work. The cause is unknown: do not assert one.
-- Evidence: job smoke-933998287 (pipeline elmerfold-prov-20261030-125944, tuolumne1009): `uv venv --no-managed-python --python=3.13 --relocatable /p/lustre5/haridev/elmerfold/openfoldenv` -> `failed to create file .../lib/python3.13/site-packages/_virtualenv.py: No such file or directory (os error 2)`, `flux-job: task(s) exited with exit code 2`. Lesson L-d4e3d3ef (app_explore): from tuolumne1607 `touch` in site-packages and site-packages/pip failed ENOENT, but worked in the venv root, lib, lib/python3.13, the parent and a fresh mkdir'd directory; `lfs getdirstripe` layouts are identical; pip hit the same ENOENT in wheel.py save() while the C++ wheel compiled on the node.
+- Evidence: job smoke-933998287 (pipeline elmerfold-prov-20261030-125944, tuolumne1009): `uv venv --no-managed-python --python=3.13 --relocatable /p/lustre5/$USER/elmerfold/openfoldenv` -> `failed to create file .../lib/python3.13/site-packages/_virtualenv.py: No such file or directory (os error 2)`, `flux-job: task(s) exited with exit code 2`. Lesson L-d4e3d3ef (app_explore): from tuolumne1607 `touch` in site-packages and site-packages/pip failed ENOENT, but worked in the venv root, lib, lib/python3.13, the parent and a fresh mkdir'd directory; `lfs getdirstripe` layouts are identical; pip hit the same ENOENT in wheel.py save() while the C++ wheel compiled on the node.
 - What to do: (1) compile wheels on the compute node (launcher), install into the venv from the login node; or (2) ask the user for the login-build exception and run `smoke_run(build_where='login', user_approved_login_build=<their words>, launcher=...)`. Never create the venv elsewhere silently or edit setup scripts to dodge it.
 
 ## Output outside the session
-- Seen (confirmed 2026-10-30): job smoke-934167821 (pipeline elmerfold-prov-20261030-125944, flux batch f3hERTfUyEVd, rc 0, 457.4 s) wrote 10 tars to /p/lustre5/haridev/elmerfold/runs/smoke/output/chunk_000000, outside the session and cwd; v2 could only say inconclusive. Fix: `smoke_validate(pipeline, data_dir='/p/lustre5/haridev/elmerfold/runs/smoke/output')` after the user's answer.
+- Seen (confirmed 2026-10-30): job smoke-934167821 (pipeline elmerfold-prov-20261030-125944, flux batch f3hERTfUyEVd, rc 0, 457.4 s) wrote 10 tars to /p/lustre5/$USER/elmerfold/runs/smoke/output/chunk_000000, outside the session and cwd; v2 could only say inconclusive. Fix: `smoke_validate(pipeline, data_dir='/p/lustre5/$USER/elmerfold/runs/smoke/output')` after the user's answer.
 
 ## Corner cases
 - The app writes outside its directory: `outputs_created` misses that; ask where the data goes, then use `data_dir`.
@@ -39,6 +39,10 @@ Cross-references: [[app_explore]] [[moirai_run]] [[pipeline_control]] [[capabili
 - A dftracer step that reports no rc: only its status is judged; check its log if the output looks wrong.
 - `smoke_session` has no `build_where`; if its build step must run on the login node, ask and use `smoke_run`.
 - `data_dir` given to `smoke_validate` wins over the one recorded by `smoke_run`; with neither, the cwd inventory is used. The rc check still runs first: a non-zero rc fails whatever `data_dir` holds.
+
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
 
 ## Corrector
 Predictor `smoke_session`, `smoke_run`, validator `smoke_validate`. A failed verdict comes here: fix the original tool or its input, then predict and validate again. The same failure twice stops the loop: change approach, or ask.

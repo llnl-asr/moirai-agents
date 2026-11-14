@@ -61,6 +61,9 @@ class Role(enum.IntEnum):
     UNKNOWN=0; INPUT=1; OUTPUT=2; INTERMEDIATE=3; PARAMETER=4; REFERENCE=5
 class Store(enum.IntEnum):
     MEMORY=0; GPU_MEMORY=1; LOCAL_DISK=2; PARALLEL_FS=3
+class Relation(enum.IntEnum):
+    USED=0; GENERATED=1; INVALIDATED=2; UPDATED=3; DERIVED_FROM=16; REVISION_OF=17; CONTAINS=18; PART_OF=19
+    SPECIALIZATION_OF=20; ALTERNATE_OF=21; DEPENDS_ON=22
 _seen = set()
 def _emit(rec):
     with open(os.environ["MOIRAI_LOG_FILE"] + "_node1.pfw.gz", "ab") as fh:
@@ -75,11 +78,18 @@ def _entity(t, key, store, uri):
         _seen.add(eid)
         _emit({"name": "EH", "cat": "dftracer", "type": 128, "ph": 4, "args": {"id": eid, "type": t, "store": int(store), "uri": uri}})
     return eid
+def entity(t, key, store=Store.MEMORY, uri=""): return _entity(t, key, store, uri)
+def relate(relation, subject, object):
+    _emit({"name": "ER", "cat": "dftracer", "type": 128, "ph": 4, "args": {"relation": int(relation), "subject": subject, "object": object}})
 class Activity:
     def __init__(self, name): self.name, self.r = name, {}
     def __enter__(self): self.t = time.time(); return self
     def uses(self, t, key, store=Store.MEMORY, uri=""): self.r.setdefault("used", []).append(_entity(t, key, store, uri))
     def generates(self, t, key, store=Store.MEMORY, uri=""): self.r.setdefault("generated", []).append(_entity(t, key, store, uri))
+    def relate(self, relation, e):
+        e = _entity(*(tuple(e) + (Store.MEMORY, "")[len(e) - 2:])) if isinstance(e, tuple) else e
+        self.r.setdefault(Relation(relation).name.lower(), []).append(e)
+        return e
     def __exit__(self, *a):
         _emit({"name": self.name, "cat": "moirai", "type": 128, "ph": 1, "ts": int(self.t * 1e6), "dur": int((time.time() - self.t) * 1e6), "args": {"relations": self.r}})
 ''')

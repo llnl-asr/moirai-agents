@@ -96,10 +96,12 @@ def bokeh_problems(item: Any) -> List[Tuple[str, str, str]]:
 
 def diff(original: Dict[str, Any], edited: Dict[str, Any]) -> Dict[str, Any]:
     """What the user changed in a graph: removed / added nodes and edges, renamed labels. Edges compare by (source, target, kind)."""
-    groups = {n.get("parent") for n in original["nodes"] if n.get("parent")}        # a parent is a group, drawn as a colour; an edit does not carry it
-    on, en = {n["id"]: n for n in original["nodes"] if n["id"] not in groups}, {n["id"]: n for n in edited["nodes"]}
-    ok = {(e["source"], e["target"], e.get("kind", "flow")): e for e in original["edges"] if e["source"] not in groups and e["target"] not in groups}
-    ek = {(e["source"], e["target"], e.get("kind", "flow")): e for e in edited["edges"]}
+    # a parent is a group, drawn as a colour, not a node of the graph: an edit may or may not carry it (and its members' parent field), so
+    # groups named on either side are dropped from both, with every edge touching one
+    groups = {n.get("parent") for g in (original, edited) for n in g["nodes"] if n.get("parent")}
+    on, en = ({n["id"]: n for n in g["nodes"] if n["id"] not in groups} for g in (original, edited))
+    ok, ek = ({(e["source"], e["target"], e.get("kind", "flow")): e for e in g["edges"] if e["source"] not in groups and e["target"] not in groups}
+              for g in (original, edited))
     return {"removed_nodes": [on[i]["label"] for i in on if i not in en], "added_nodes": [en[i]["label"] for i in en if i not in on],
             "renamed": [{"id": i, "from": on[i]["label"], "to": en[i]["label"]} for i in on if i in en and on[i]["label"] != en[i]["label"]],
             "removed_edges": [f"{on.get(k[0], {}).get('label', k[0])} -{k[2]}-> {on.get(k[1], {}).get('label', k[1])}" for k in ok if k not in ek],

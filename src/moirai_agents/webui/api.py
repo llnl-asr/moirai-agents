@@ -48,6 +48,12 @@ def _fresh_wb():
             _LOADED[f] = mt
     return workbench
 
+def _consolidation(app) -> dict:
+    """A fresh consolidation report without blocking the request: lessons now, capabilities from the server's last check (webui.consolidation)."""
+    c = getattr(app, "consolidator", None)
+    return c.report() if c is not None else consolidate.unkept({"lessons": consolidate.lessons(), "capabilities": [], "capabilities_pending": True})
+
+
 def send_json(h, obj, code=200, cookie=None):
     b = json.dumps(obj, default=str).encode()
     h.send_response(code)
@@ -259,6 +265,17 @@ def proxy(h, app, user, path, method="GET", body=None):
     h.close_connection = True
 
 
+def _contrib(what: str) -> dict:
+    """The Update button: what moirai-agents contributed to dftracer-agents and phronix (status), or bringing their
+    clones up to date and rebasing the contribution branches (update). Nothing is pushed: the result says what to push
+    and where to open each pull request."""
+    from phronix.engine import upstream
+    try:
+        return upstream.status() if what == "status" else upstream.update()
+    except Exception as e:                          # the panel shows it
+        return {"error": f"{type(e).__name__}: {e}"}
+
+
 def get_route(h, app, life, u, q):
     if u.path in ("/", "/index.html"):
         return send_static(h, "index.html", set_cookie(app.token) if authorized(h, app, q) else None)
@@ -407,6 +424,8 @@ def get_route(h, app, life, u, q):
         return send_json(h, jobs.scheduler_view(float(q.get("since", ["0"])[0] or 0)))
     if u.path == "/api/capabilities":
         return send_json(h, capstore.list_capabilities())
+    if u.path == "/api/capabilities/contributions":
+        return send_json(h, _contrib("status"))
     if u.path.startswith("/api/capability/"):
         return send_json(h, capstore.get(u.path.rsplit("/", 1)[1]))
     if u.path == "/api/lessons":
@@ -547,6 +566,10 @@ def post_route(h, app, life, u, body):
         with t.cond:
             t.cond.wait_for(lambda: t.done, timeout=30)
         return send_json(h, {"ok": True, "queued": 0})
+    if u.path == "/api/capabilities/update":
+        r = _contrib("update")
+        capstore._State.fingerprint = ""            # load what the clones brought
+        return send_json(h, r)
     if u.path in ("/api/capability/decide", "/api/lesson/decide"):
         if u.path.startswith("/api/lesson"):
             return send_json(h, learning.decide(body.get("id", ""), bool(body.get("approve")), user["name"]))
@@ -558,10 +581,10 @@ def post_route(h, app, life, u, body):
         r = consolidate.answer(body.get("id", ""), None if ch in (None, "") else int(ch), body.get("note", ""), user["name"])
         bg = getattr(app, "background", None)
         if r.get("status") == "for_agent" and bg is not None:        # your own words: the agent acts on them now
-            s = bg.consolidate_once(consolidate.report(), force="lessons").get("lessons")
+            s = bg.consolidate_once(_consolidation(app), force="lessons").get("lessons")
             r["agent"] = s if isinstance(s, str) else (s or {}).get("status") or (s or {}).get("error")
         if r.get("status") != "error":
-            threading.Thread(target=lambda: setattr(app, "consolidation", consolidate.report()), daemon=True).start()
+            app.consolidation = _consolidation(app)
         return send_json(h, r)
     if u.path == "/api/lesson/revise":
         return send_json(h, learning.revise(body.get("id", ""), body.get("text", ""), body.get("capability", ""), body.get("note", ""), bool(body.get("approve")), user["name"]))
@@ -593,7 +616,7 @@ def post_route(h, app, life, u, body):
         if a == "learner":
             r = bg.learn_once(force=True)
         elif a in ("lessons", "capabilities", "all"):
-            r = bg.consolidate_once(consolidate.report(), force=a)
+            r = bg.consolidate_once(_consolidation(app), force=a)
             r = (r.get(a) if a != "all" else r) or {"status": "nothing to consolidate"}
         else:
             return send_json(h, {"error": "agent is learner, lessons or capabilities"}, 400)

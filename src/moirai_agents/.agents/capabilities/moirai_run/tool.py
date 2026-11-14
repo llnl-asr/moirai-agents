@@ -1419,7 +1419,7 @@ def _guard_selftest(td) -> dict:
     os.utime(stalef, (time.time() - 1000, time.time() - 1000))
     a1 = adopt_files(str(real), str(t), time.time() - 100)
     cases["adopt_links_new_only"] = (a1["linked_new"] == 1 and (t / "prov_n1.pfw.gz").is_symlink() and not (t / "prov_old.pfw.gz").exists() and a1["skipped_old"] == 1
-                                     and a1["linked_total"] == 1 and T.expand(str(t)) == [str(t / "prov_n1.pfw.gz")])
+                                     and a1["linked_total"] == 1 and T.expand(str(t)) == [os.path.realpath(t / "prov_n1.pfw.gz")])  # expand() resolves links
     cases["adopt_stale_moved_aside"] = (not stalef.exists() and a1["stale_moved"] == ["prov_stale.pfw.gz"] and Path(a1["stale_dir"], "prov_stale.pfw.gz").exists())
     cases["adopt_hosts_and_service_log"] = a1["hosts_file"] == str(real / "hosts.txt") and (t.parent / "service-n1-1.log").is_symlink()
     a2 = adopt_files(str(real), str(t), time.time() - 100)

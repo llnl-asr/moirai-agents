@@ -22,6 +22,10 @@ Cross-references: [[prov_query]] [[prov_traceability]] [[prov_accountability]] [
 - dftracer columns differ per file (a small file's index may not list every args column): select only columns the index has, else read whole rows.
 - Group-by output names: count, sum_<col>, mean_<col>, min_<col>, max_<col>; a computed column (ts + dur) goes through with_column before select, not after a group_by.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
 Validator `prov_read_selftest`.
 

@@ -162,6 +162,10 @@ After `annotate_apply` and a passing `annotate_validate`:
 - Performance section: a function already wrapped as an activity is not decorated; async functions and generators are refused; a region's statements are re-indented, so a multi-line string, a shared line or an `elif` anchor is refused with the reason; two regions may not overlap; C is planned only and C++ needs clang (`compile_flags` for real projects). Whether dftracer.python's events land in the same trace as moirai's is proven only by a traced re-run (perf_time by function must list the entries).
 - Elmerfold has Python, C++ and C parts (explore said python/cpp/c): the planner covers the Python and C/C++ files the spec touches; C++ files that sit under hot activities but are not touched by the spec are added to the spec as a file of an activity or as a performance entry with `force`.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
 Predictor `discover_scan`, `annotate_spec`, `annotate_apply`, `annotate_preview`, `annotate_diagram`, `perf_annotate` (plans the performance entries), validator `annotate_validate` (with `perf_validate`). A failed verdict comes here: fix the original tool or its input, then predict and validate again. The same failure twice stops the loop: change approach, or ask.
 

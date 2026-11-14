@@ -25,6 +25,10 @@ The plan is the first stage of every pipeline. Each stage's owner reads its own 
 - The user changes the goal mid-run: `plan_update` each affected step and say so at the next gate.
 - A stage skipped by agreement: say why in `plan_update`.
 
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
+
 ## Corrector
 Predictors `plan_write`, `plan_update`, validator `plan_validate`. A failed verdict comes here: fix the original tool or its input, then predict and validate again. The same failure twice stops the loop: change approach, or ask.
 

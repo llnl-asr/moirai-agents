@@ -11,7 +11,7 @@ Cross-references: [[prov_annotate]] [[workload_elmerfold]] [[moirai_run]]
 - Pass the build through the flags: CMake and autotools read `CFLAGS`, `CXXFLAGS`, `LDFLAGS`; a plain Makefile may need `$MOIRAI_CFLAGS` and `$MOIRAI_LDFLAGS` on its command line.
 - For C/C++ give `binary` to `integrate_validate`.
 - This stage owns the PYTHONPATH rule for the generated `_moirai_prov.py`: `moirai_env.sh` must export a PYTHONPATH naming the annotated root. The annotate stage runs before this file exists, so it lists the rule as deferred and `integrate_validate` enforces it (`env_pythonpath`, `env_import`).
-- Always pass `app_python` when the app runs under a Python other than the moirai Python (Elmerfold: `app_python=/p/lustre5/haridev/elmerfold/openfoldenv/bin/python`). Standing user rule: the moirai venv is SEPARATE and moirai is never installed into the app venv. A check that runs the moirai venv's own Python proves nothing about the app.
+- Always pass `app_python` when the app runs under a Python other than the moirai Python (Elmerfold: `app_python=/p/lustre5/$USER/elmerfold/openfoldenv/bin/python`). Standing user rule: the moirai venv is SEPARATE and moirai is never installed into the app venv. A check that runs the moirai venv's own Python proves nothing about the app.
 - With `app_python` in a different environment, `integrate_apply` builds `<provenance>/moirai_shim/`: symlinks only, to the top-level entries (from `importlib.metadata`: top_level.txt and RECORD, never hardcoded) of moirai and its requirement closure (for moirai today: `moirai`, `dftracer`, `dftracer.libs`). A name the app Python already provides from its own prefix is skipped and listed in `shim_skipped`, so nothing is shadowed. Rebuilding is idempotent and removes stale links. A shim inside the user's source tree is refused.
 - With the shim, `moirai_env.sh` exports `PYTHONPATH=<shim>:<annotated root>`, never the moirai site-packages (it would shadow the app's typing_extensions, packaging, setuptools); it does NOT put the moirai venv bin first on PATH (a bare `python` would be the wrong interpreter): it exports `MOIRAI_SERVICE=<moirai venv>/bin/moirai-service` and appends the bin dir at the END of PATH; LD_LIBRARY_PATH is appended to, never replaced.
 - Order of work: `integrate_shim_selftest` (sandbox logic), `integrate_apply(..., app_python=...)`, `integrate_validate`.
@@ -33,6 +33,10 @@ Cross-references: [[prov_annotate]] [[workload_elmerfold]] [[moirai_run]]
 - `python_import` injects PYTHONPATH itself with the moirai Python; `env_import` sources `moirai_env.sh` in a clean environment (under the app Python when `app_python` is set) and so proves the file works. Both can pass or fail apart. `python -I` or `-P`/`PYTHONSAFEPATH` ignore PYTHONPATH; the app must not run that way.
 - The env checks apply to Python annotations (the annotated root has `_moirai_prov.py`); a pure C/C++ app skips `env_import` and the checks after it, but `env_pythonpath` and `env_path_order` still apply.
 - Pending lesson L-0e661662 (moirai_integrate) is the rule above: the integrate check must run under the app's Python, in a clean env, with a shim and not the moirai site-packages. When it is approved its text and this section must agree.
+
+## Parallel plan
+
+Independent calls go out together in one message: predictor calls on different inputs, and lookups such as knowledge_search or lesson_search, do not depend on each other. Sequential, and why: the validator runs after the predictor whose result it rules on, and the corrector only after the validator's verdict. Larger fan-outs build on [[tools_parallel]] (parallel_plan / parallel_call / parallel_validate).
 
 ## Corrector
 Predictor `integrate_apply`, validator `integrate_validate`. A failed verdict comes here: fix the original tool or its input, then predict and validate again. The same failure twice stops the loop: change approach, or ask.

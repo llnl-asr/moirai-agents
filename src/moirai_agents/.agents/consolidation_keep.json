@@ -1,0 +1,22 @@
+[
+ {
+  "ids": "L-533260fa|L-cd1aeca2",
+  "why": "one is about the site, one the tool"
+ },
+ {
+  "ids": "L-76b0e254|L-a0e99a53",
+  "why": "they are about different clusters"
+ },
+ {
+  "ids": "dftracer_provenance_annotate|prov_annotate",
+  "why": "dftracer-agents' provenance mode (dftracer_provenance_*) runs without moirai and cannot refer to it (moirai is downstream of dftracer-agents), so the shared provenance rules have to stand in both: moirai's prov_annotate is moirai's version, dftracer's dftracer_provenance_annotate the one its provenance mode loads."
+ },
+ {
+  "ids": "dftracer_provenance_discover|prov_discover",
+  "why": "dftracer-agents' provenance mode (dftracer_provenance_*) runs without moirai and cannot refer to it (moirai is downstream of dftracer-agents), so the shared provenance rules have to stand in both: moirai's prov_discover is moirai's version, dftracer's dftracer_provenance_discover the one its provenance mode loads."
+ },
+ {
+  "ids": "dftracer_provenance_graph|repro_package",
+  "why": "dftracer-agents' provenance mode (dftracer_provenance_*) runs without moirai and cannot refer to it (moirai is downstream of dftracer-agents), so the shared provenance rules have to stand in both: moirai's repro_package is moirai's version, dftracer's dftracer_provenance_graph the one its provenance mode loads."
+ }
+]

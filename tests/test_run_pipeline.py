@@ -123,7 +123,9 @@ def test_run_pipeline_end_to_end(tmp_path, monkeypatch, call):
 
     # questions are asked in the Query view, any time: logged on the pipeline, no stage, no gate
     s = call("query_summary", pipeline=pid)
-    assert sum(s["entities_by_type"].values()) == 2 and sum(s["activities_by_name"].values()) == 2 and all(q.startswith("TraceViewer(") for q in s["queries"])
+    eb = s["entities_by_type"]          # the spec's types, plus what prov_annotate records besides (captured values, identity names)
+    assert eb["raw"] == 1 and eb["fitted"] == 1 and set(eb) - {"raw", "fitted"} <= {"identity"} | {k for k in eb if k.endswith((".input", ".output", ".attribute"))}
+    assert sum(s["activities_by_name"].values()) == 2 and all(q.startswith("TraceViewer(") for q in s["queries"]), s
     assert call("query_entities", pipeline=pid, type="fitted")["count"] == 1
     assert call("query_lineage", pipeline=pid, entity="fitted")["hops"] >= 1
     assert "no query stage" in call("query_validate", pipeline=pid)["error"]
