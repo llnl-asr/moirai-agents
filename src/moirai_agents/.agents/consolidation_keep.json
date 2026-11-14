@@ -1,5 +1,17 @@
 [
  {
+  "ids": "L-16e7328c|L-1e9c80d9",
+  "why": "they are about different clusters"
+ },
+ {
+  "ids": "L-2fd7c740|L-b99f332d",
+  "why": "they are about different clusters"
+ },
+ {
+  "ids": "L-4e16dd36|L-cb077c6c",
+  "why": "one is about the site, one the tool"
+ },
+ {
   "ids": "L-533260fa|L-cd1aeca2",
   "why": "one is about the site, one the tool"
  },
@@ -12,7 +24,19 @@
   "why": "Different on purpose: they share only the taxteller session and the registry/plugin topic. The plugin install (software_nextflow), the access recheck and registry denial (workload_elmerfold), the registry login recipe (system_mammoth) and the smoke plan (app_smoke) each belong to a different capability and do not contradict each other."
  },
  {
+  "ids": "L-73c5dc63|L-fa8ca9d3",
+  "why": "one is about the site, one the tool"
+ },
+ {
   "ids": "L-76b0e254|L-a0e99a53",
+  "why": "they are about different clusters"
+ },
+ {
+  "ids": "L-7e94586c|L-8a336de1",
+  "why": "one is about the site, one the tool"
+ },
+ {
+  "ids": "L-b1b2dd8e|L-bfaa2312",
   "why": "they are about different clusters"
  },
  {

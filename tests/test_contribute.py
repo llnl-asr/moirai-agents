@@ -1,5 +1,5 @@
 """moirai-agents in the capability chain: upstream capabilities load read-only; what it learns about one of them is
-committed on contrib/moirai-agents in a worktree of that upstream's clone, for a person to push and open a PR."""
+committed in that upstream's clone on its integration branch, for a person to push (on a new branch) and open a PR."""
 from __future__ import annotations
 
 import json
@@ -49,16 +49,21 @@ def chain(tmp_path, monkeypatch):
 def test_a_lesson_on_an_upstream_capability_is_committed_upstream(chain):
     from moirai_agents.core import learning
     r = learning.add("workload_x", "prefer the small input for smoke runs", source="user")
-    assert r["status"] == "applied" and r["contributed"][0]["branch"] == "contrib/moirai-agents", r
-    wt = chain["proj"] / "vendor" / "contrib" / "up"
-    assert "small input" in (wt / "src/uppkg/.agents/capabilities/workload_x/LESSONS.md").read_text()
-    assert git(chain["clone"], "status", "--porcelain") == ""
+    assert r["status"] == "applied" and r["contributed"][0]["branch"] == "main", r
+    clone = chain["clone"]
+    assert "small input" in (clone / "src/uppkg/.agents/capabilities/workload_x/LESSONS.md").read_text()
+    assert git(clone, "status", "--porcelain") == "" and git(clone, "branch", "--show-current") == "main"
 
 
-def test_the_update_button_reports_what_to_push(chain):
+def test_the_repositories_panel_pulls_pushes_on_a_new_branch_and_switches_back(chain):
     from moirai_agents.core import learning
     from moirai_agents.webui import api
     learning.add("workload_x", "one more", source="user")
-    assert api._contrib("status")["upstream"][0]["contribution"]["ahead"] == 1
-    item = api._contrib("update")["upstream"][0]
-    assert item["rebase"] in ("ok", "up_to_date") and "push --force-with-lease -u origin contrib/moirai-agents" in item["to_do"]["push"], item
+    rows = {r["project"]: r for r in api._repos()["repos"]}
+    assert rows["up"]["contribution"]["ahead"] == 1 and rows["up"]["actions"] == ["pull", "push"]
+    assert api._repos("rebase", "up")["upstream"][0]["rebase"] in ("ok", "up_to_date")
+    p = api._repos("push", "up")["upstream"][0]
+    assert p["pushed"] and p["pushed_branch"].startswith("contrib/moirai-agents-"), p
+    assert "switch" in {r["project"]: r for r in api._repos()["repos"]}["up"]["actions"]
+    s = api._repos("switch", "up")
+    assert s["status"] == "ok" and git(chain["clone"], "rev-parse", "HEAD") == git(chain["clone"], "rev-parse", "origin/main")
