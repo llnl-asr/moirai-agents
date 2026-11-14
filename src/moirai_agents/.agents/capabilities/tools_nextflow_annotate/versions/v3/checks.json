@@ -1,0 +1,47 @@
+[
+ {
+  "tool": "nextflow_annotate_spec",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "nextflow_annotate_apply",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "nextflow_annotate_validate",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "nextflow_annotate_diagram",
+  "args": {
+   "pipeline": "nope-1"
+  },
+  "expect": {
+   "raises": true
+  }
+ },
+ {
+  "tool": "nextflow_annotate_selftest",
+  "args": {},
+  "expect": {
+   "json": {
+    "status": "ok"
+   }
+  }
+ }
+]
