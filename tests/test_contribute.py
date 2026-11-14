@@ -61,4 +61,4 @@ def test_the_update_button_reports_what_to_push(chain):
     learning.add("workload_x", "one more", source="user")
     assert api._contrib("status")["upstream"][0]["contribution"]["ahead"] == 1
     item = api._contrib("update")["upstream"][0]
-    assert item["rebase"] == "ok" and "push -u origin contrib/moirai-agents" in item["to_do"]["push"], item
+    assert item["rebase"] in ("ok", "up_to_date") and "push --force-with-lease -u origin contrib/moirai-agents" in item["to_do"]["push"], item

@@ -36,11 +36,17 @@ def upstream():
         return [phronix_scope()]
 
 
+def claude_bin():
+    """The merge agent for a conflicted contribution rebase: the Claude Code the web UI uses (MOIRAI_AGENTS_CLAUDE_BIN)."""
+    from ..webui.runtime import find_claude
+    return (find_claude() or {}).get("path")
+
+
 SETTINGS = configure(
     project="moirai-agents", env_prefix="MOIRAI_AGENTS", package_dir=PKG,
     state_dir=state_dir, module_prefix="moirai", context_tag="moirai-context",
     trace_rule="read traces only through TraceViewer (moirai_agents.core.provtrace / evidence, or dftracer.utils.TraceViewer), "
                "never by decompressing them",
     trace_reader="prov_read (moirai_agents.core.provtrace: read, row_counts, ensure_index, tv)",
-    bootstrap="moirai_agents.core._engine", scope=scope(), upstream=upstream())
+    bootstrap="moirai_agents.core._engine", scope=scope(), upstream=upstream(), agent=claude_bin)
 
