@@ -143,7 +143,8 @@ def sync(ws: Path) -> dict:
     skills, agents = ws / ".claude" / "skills", ws / ".claude" / "agents"
     skills.mkdir(parents=True, exist_ok=True)
     agents.mkdir(parents=True, exist_ok=True)
-    caps = {n: v for n, v in capstore.all_caps().items() if v[2].get("enabled", True)}
+    known = capstore.all_caps()                      # read once: each call re-reads every capability.json
+    caps = {n: v for n, v in known.items() if v[2].get("enabled", True)}
     for name, (_, d, meta) in caps.items():
         link = skills / name
         if not link.is_symlink() or os.readlink(link) != str(d):
@@ -158,10 +159,10 @@ def sync(ws: Path) -> dict:
         if not f.exists() or f.read_text() != text:
             f.write_text(text)
     for p in list(agents.glob("*.md")):              # a disabled capability; dftracer's agents have other names
-        if p.stem in capstore.all_caps() and p.stem not in caps:
+        if p.stem in known and p.stem not in caps:
             p.unlink()
     for p in list(skills.iterdir()):
-        if p.is_symlink() and p.stem in capstore.all_caps() and p.name not in caps:
+        if p.is_symlink() and p.stem in known and p.name not in caps:
             p.unlink()
     return {"capabilities": sorted(caps)}
 

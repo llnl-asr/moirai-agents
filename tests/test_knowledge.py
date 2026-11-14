@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+import moirai_agents
+
 from moirai_agents.core import knowledge as K
 from moirai_agents.core import learning as L
 
@@ -62,6 +64,7 @@ def test_body_text_is_found_without_the_graph(learnt, monkeypatch):
     assert [m["name"] for m in r["memory"]][:2] == ["purge-policy", "linked-fact"]
 
 
+@needs_graphify
 def test_their_memories_are_searched(learnt):
     if not K._dftracer_memory():
         pytest.skip("dftracer-agents is not installed")
@@ -81,9 +84,9 @@ def test_a_pack_shows_each_row_once_per_session(learnt, monkeypatch):
 
 
 def test_the_hook_adds_context_and_never_blocks_a_prompt(learnt):
-    hook = Path(K.__file__).parents[1] / ".agents/hooks/context.py"
+    hook = Path(moirai_agents.__file__).parent / ".agents/hooks/context.py"
     K.remember("purge-policy", "scratch rules", "Purged on Sundays.", "project")
-    env = {**os.environ, "PYTHONPATH": str(Path(K.__file__).parents[2])}
+    env = {**os.environ, "PYTHONPATH": str(Path(moirai_agents.__file__).parents[1])}
     run = lambda text: subprocess.run([sys.executable, str(hook)], input=text, capture_output=True, text=True, env=env, timeout=30)
     r = run(json.dumps({"prompt": "purged Sundays", "session_id": "x"}))
     assert r.returncode == 0 and "purge-policy" in r.stdout

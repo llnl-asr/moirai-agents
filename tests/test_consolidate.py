@@ -154,3 +154,43 @@ def test_a_proposed_merge_clears_the_group_while_it_waits():
     assert Q.report()["lessons"]
     L.merge([a, b], BASE + " (tuolumne)", "lessons", "same fact")
     assert Q.report()["lessons"] == []
+
+
+def test_the_web_server_compares_capabilities_in_a_child_and_only_when_one_changed(tmp_path, monkeypatch):
+    """consolidate.capabilities() is about a minute of pure Python: in the server it held the GIL and requests waited behind it."""
+    import json
+    import os
+    import subprocess
+
+    from moirai_agents.webui import consolidation as WC
+    runs, real = [], subprocess.run
+
+    def child(cmd, **kw):
+        if cmd[1:2] != ["-m"]:
+            return real(cmd, **kw)                     # git, for the upstream layers
+        runs.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, json.dumps([{"kind": "overlap", "ids": ["a_cap", "b_cap"], "texts": ["x"]}]), "")
+    monkeypatch.setattr(WC.subprocess, "run", child)
+    monkeypatch.setattr(WC.consolidate, "capabilities", lambda: (_ for _ in ()).throw(AssertionError("compared in the server's process")))
+    c = WC.Consolidation(tmp_path)
+    assert c.report()["capabilities_pending"] and c.report()["capabilities"] == []
+    assert c.refresh_capabilities() and runs[-1][1:] == ["-m", "moirai_agents.webui.consolidation"]
+    rep = c.report()
+    assert rep["capabilities"][0]["ids"] == ["a_cap", "b_cap"] and not rep["capabilities_pending"]
+    assert not c.refresh_capabilities() and len(runs) == 1                     # nothing changed: no child
+    assert not WC.Consolidation(tmp_path).refresh_capabilities() and len(runs) == 1   # nor after a restart
+    d = tmp_path / "project_caps" / "new_cap"
+    d.mkdir(parents=True)
+    (d / "capability.json").write_text(json.dumps({"name": "new_cap", "version": 1}))
+    (d / "SKILL.md").write_text("x")
+    assert os.environ["MOIRAI_AGENTS_PROJECT_CAPABILITIES"] == str(tmp_path / "project_caps")
+    assert c.refresh_capabilities() and len(runs) == 2                         # a capability changed: compared again
+    L.add("lessons", BASE, "user")
+    L.add("knowledge", BASE + " of tuolumne systems", "user")
+    assert c.report()["lessons"] and len(runs) == 2                             # lessons are cheap: fresh, in-process
+
+
+def test_the_child_prints_the_capability_groups(monkeypatch, capsys):
+    from moirai_agents.webui import consolidation as WC
+    monkeypatch.setattr(WC.consolidate, "capabilities", lambda: [{"kind": "overlap", "ids": ["a", "b"], "texts": []}])
+    assert WC.main() == 0 and '"ids": ["a", "b"]' in capsys.readouterr().out

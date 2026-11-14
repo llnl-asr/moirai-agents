@@ -17,7 +17,7 @@ dependencies = []
 dev = ["pytest>=7.0.0"]
 # Sessions, site detection, skills, agents and the permission policy. scripts/setup_env.sh installs it editable from a checkout (no deps from its
 # git pins: they build C++); the core still imports with stdlib only, so capabilities fall back to their own tools without it.
-dftracer = ["dftracer-agents", "fastmcp", "dftracer-utils"]
+dftracer = ["dftracer-agents", "fastmcp>=3.0,<4", "mcp>=1.24,<2", "dftracer-utils"]
 
 [project.scripts]
 moirai-mcp-server = "moirai_agents.mcp_server:main"

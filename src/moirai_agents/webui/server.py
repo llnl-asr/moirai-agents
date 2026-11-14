@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import api, dfdash, prompts, runtime as R
-from ..core import capstore, consolidate, jobs, learning, moirai_env, pipeline, provtrace, selfrefresh
+from ..core import capstore, jobs, learning, moirai_env, pipeline, provtrace, selfrefresh
 from .. import workspace
 
 PKG = Path(__file__).resolve().parents[1]
@@ -102,10 +102,14 @@ def reload_hot(changed: list, life: Life) -> None:
 
 
 def watch_consolidation(app: "R.App") -> None:
-    """Look for lessons and capabilities to consolidate, on this node, in the background; the page shows what it finds."""
+    """Look for lessons and capabilities to consolidate, on this node, in the background; the page shows what it finds.
+    The capabilities comparison runs in a child process and only when a capability changed (webui.consolidation): in
+    this process it held the GIL for about a minute after every start, and requests waited behind it."""
     while True:
         try:
-            app.consolidation = consolidate.report()
+            app.consolidation = app.consolidator.report()           # the lessons now, the last capabilities report
+            if app.consolidator.refresh_capabilities():
+                app.consolidation = app.consolidator.report()
         except Exception as e:      # a bad file must not end the watch, or the server
             print(f"{time.strftime('%F %T')} consolidation check failed: {e}", flush=True)
         time.sleep(CONSOLIDATION_S)
@@ -262,6 +266,8 @@ def main(argv=None) -> int:
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, on_signal)
     threading.Thread(target=lifecycle, args=(app, life, srv), daemon=True, name="lifecycle").start()
+    from .consolidation import Consolidation
+    app.consolidator = Consolidation(R.STATE)
     threading.Thread(target=watch_consolidation, args=(app,), daemon=True, name="consolidation").start()
     from . import background
     app.background = background.Background(app)

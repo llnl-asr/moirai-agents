@@ -85,6 +85,21 @@ def test_an_edit_is_kept_beside_the_original_and_group_boxes_are_not_reported_as
         D.save_edit(pid, "annotation", {"nodes": [{"id": "a"}], "edges": [{"source": "a", "target": "zz"}]})
 
 
+def test_a_diff_drops_group_boxes_on_both_sides():
+    g = D.from_spec(SPEC)
+    # an edit that keeps the group box (and its members' parent): the group is neither added nor removed, nor any edge touching it
+    edited = copy.deepcopy({"nodes": [n for n in g["nodes"] if n["id"] != "t:raw"] + [{"id": "x", "label": "extra"}],
+                            "edges": [e for e in g["edges"] if "t:raw" not in (e["source"], e["target"])]
+                            + [{"source": "x", "target": "a:merge", "kind": "flow"}, {"source": "f:m.py", "target": "x", "kind": "flow"}]})
+    ch = D.diff(g, edited)
+    assert ch["removed_nodes"] == ["raw"] and ch["added_nodes"] == ["extra"]
+    assert not any("m.py" in e for e in ch["added_edges"] + ch["removed_edges"])
+    # a group only the edit names is a group too
+    only_edit = {"nodes": [{"id": "grp", "label": "G"}, {"id": "a", "label": "a", "parent": "grp"}], "edges": [{"source": "grp", "target": "a"}]}
+    ch = D.diff({"nodes": [{"id": "a", "label": "a"}], "edges": []}, only_edit)
+    assert ch == {"removed_nodes": [], "added_nodes": [], "renamed": [], "removed_edges": [], "added_edges": []}
+
+
 def test_publishing_again_replaces_the_diagram_and_drops_the_old_edit():
     pid = run()
     D.publish_graph(pid, "annotate", "annotation", "t", D.from_spec(SPEC))
